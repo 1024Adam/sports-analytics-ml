@@ -84,12 +84,12 @@ class Settings(BaseModel):
     skater_shrinkage_k: float = 12.0
     goalie_shrinkage_k: float = 15.0
 
-    # Default Elo parameters
+    # Default Elo parameters (see src/sports_ml/core/ratings.py)
     elo_base_rating: float = 1500.0
-    elo_home_advantage: float = 35.0
-    elo_k_factor: float = 6.0
+    elo_home_advantage: float = 24.0
+    elo_k_factor: float = 8.0
     elo_shootout_winner_score: float = 0.60
-    elo_offseason_retention: float = 0.67
+    elo_offseason_retention: float = 0.72
 
     # Stage 2 cross-stage reconciliation damping factor
     stage2_reconciliation_gamma: float = 0.50

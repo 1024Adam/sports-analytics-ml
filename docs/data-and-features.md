@@ -78,6 +78,7 @@ All Silver tables are stored as partitioned Parquet files under `data/silver/hoc
 | `toi_5v5_minutes` | `pl.Float64` | Total 5-on-5 time on ice in minutes |
 | `pp_goals`, `pp_opportunities`, `pp_xgf`, `pp_toi_min` | `pl.Float64` | Power-play offense metrics (`5v4`) |
 | `pk_goals_against`, `pk_times_shorthanded`, `pk_xga`, `pk_toi_min` | `pl.Float64` | Penalty-kill defense metrics (`4v5`) |
+| `has_moneypuck_xg` | `pl.Boolean` | `True` when MoneyPuck situational $xG$ was joined; `False` when using NHL API boxscore fallback |
 
 ### 2.3 `skater_game_logs.parquet` (1 row per active skater per game)
 | Column | Polars Type | Description |
@@ -122,8 +123,9 @@ In Polars, `core/temporal.py` provides both simple rolling/EWMA helpers and a **
 def pregame_rolling_mean(col_name: str, window: int, group_by: str) -> pl.Expr:
     return (
         pl.col(col_name)
+        .cast(pl.Float64)
         .shift(1)
-        .rolling_mean(window_size=window, min_periods=1)
+        .rolling_mean(window_size=window, min_samples=1)
         .over(group_by)
     )
 
@@ -134,8 +136,8 @@ def pregame_exposure_rate(
     group_by: str,
     scale_factor: float = 1.0,  # 60.0 for NHL TOI min, 9.0 for MLB IP, 1.0 for MLB PA / PGA rounds
 ) -> pl.Expr:
-    shifted_num = pl.col(numerator_col).shift(1).rolling_sum(window_size=window, min_periods=1).over(group_by)
-    shifted_exp = pl.col(exposure_col).shift(1).rolling_sum(window_size=window, min_periods=1).over(group_by)
+    shifted_num = pl.col(numerator_col).cast(pl.Float64).shift(1).rolling_sum(window_size=window, min_samples=1).over(group_by)
+    shifted_exp = pl.col(exposure_col).cast(pl.Float64).shift(1).rolling_sum(window_size=window, min_samples=1).over(group_by)
     return scale_factor * (shifted_num / pl.when(shifted_exp > 0).then(shifted_exp).otherwise(None))
 ```
 
@@ -159,14 +161,14 @@ When $n = 0$ (Opening Night or rookie debut), the feature cleanly evaluates to $
 For each game $g$ between Home Team $H$ and Away Team $A$, the Stage 1 feature matrix (`data/gold/hockey/stage1_game_features.parquet`) computes features for $H$, $A$, and their **matchup differential** ($\Delta = \text{Home} - \text{Away}$):
 
 ### 4.1 Dynamic Elo Rating Features (`core/ratings.py`)
-* **Pre-game Elo**: $E_H, E_A$, and $\Delta E = E_H + \text{HFA} - E_A$ (where base rating $= 1500$, $\text{HFA} \approx 35$ Elo points).
+* **Pre-game Elo**: $E_H, E_A$, and $\Delta E = E_H + \text{HFA} - E_A$ (where base rating $= 1500$, $\text{HFA} \approx 24\text{--}35$ Elo points, $K = 8.0$).
 * **Elo Win Probability**:
   $$P_{\text{Elo}}(\text{Home Win}) = \frac{1}{1 + 10^{-\Delta E / 400}}$$
 * **Post-game Update Rule** (applied strictly *after* pre-game features are recorded):
   $$E_H^{\text{post}} = E_H + K \cdot M_{\text{MOV}} \cdot \left(S_H - P_{\text{Elo}}(\text{Home Win})\right)$$
   * Overtime/Shootout dampening: If the game ends in `"SO"`, $S_H = 0.60$ for the winner and $0.40$ for the loser (since shootouts are near-coin-flips).
   * Margin-of-victory multiplier: $M_{\text{MOV}} = \ln(|\text{GoalDiff}| + 1) \cdot \frac{2.2}{0.001 \cdot |\Delta E| + 2.2}$.
-  * Off-season regression: Between seasons, $E_{\text{new\_season}} = 0.67 \cdot E_{\text{end\_prev}} + 0.33 \cdot 1500$.
+  * Off-season regression: Between seasons, $E_{\text{new\_season}} = 0.72 \cdot E_{\text{end\_prev}} + 0.28 \cdot 1500$ (configurable via `offseason_retention`).
 
 ### 4.2 Schedule, Rest & Travel Features (`core/schedule.py`)
 * `rest_days_home`, `rest_days_away` (capped at 7 days), and `rest_advantage = rest_days_home - rest_days_away`.

@@ -29,10 +29,10 @@ Every feature and model step MUST pass all five checks:
    Post-event columns (`goals_for`, `xgf_5v5`, `gsax`, `points`, `sog`, `toi_min`, etc.) observed in event $t$ MUST be shifted by `1` within the entity partition (`team`, `player_id`) **before** any rolling aggregation:
    ```python
    # CORRECT (Leak-Free):
-   pl.col("xgf_5v5").shift(1).rolling_mean(window_size=10, min_periods=1).over("team")
+   pl.col("xgf_5v5").shift(1).rolling_mean(window_size=10, min_samples=1).over("team")
 
    # FORBIDDEN (Leaks current game's xGF into pre-game feature!):
-   pl.col("xgf_5v5").rolling_mean(window_size=10, min_periods=1).over("team")
+   pl.col("xgf_5v5").rolling_mean(window_size=10, min_samples=1).over("team")
    ```
 
 3. **Pre-Event Rating Extraction Before Post-Event Update**:

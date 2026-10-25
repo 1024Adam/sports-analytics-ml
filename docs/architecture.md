@@ -178,6 +178,8 @@ sports-analytics-ml/
 │   └── predictions/                 # Append-only live prediction ledger (Parquet audit log)
 ├── artifacts/                       # Git-ignored trained model bundles + metadata.json fingerprints
 ├── .gitignore                       # Blocks data/, artifacts/, .venv/, and caches from git
+├── .python-version                  # Pins local uv/Python environment to 3.11 (matching CI)
+├── README.md                        # Quickstart guide, CLI examples & skill catalog
 ├── pyproject.toml                   # Dependencies, ruff, mypy, and pytest configuration
 ├── uv.lock                          # Reproducible transitive dependency lockfile
 ├── src/
