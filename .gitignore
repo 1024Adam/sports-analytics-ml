@@ -1,0 +1,36 @@
+# Data Lakehouse & Model Artifacts (never commit raw/processed data or binaries)
+data/
+artifacts/
+*.parquet
+*.pkl
+*.joblib
+*.lightgbm
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python bytecode & packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tooling & test caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Environment & IDE files
+.env
+.env.*
+.DS_Store
