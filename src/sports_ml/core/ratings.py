@@ -21,10 +21,10 @@ class EloConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     base_rating: float = 1500.0
-    home_field_advantage: float = 35.0
-    k_factor: float = 6.0
+    home_field_advantage: float = 24.0
+    k_factor: float = 8.0
     shootout_winner_score: float = 0.60
-    offseason_retention: float = 0.67
+    offseason_retention: float = 0.72
     use_mov_multiplier: bool = True
 
 

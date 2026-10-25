@@ -309,16 +309,10 @@ def _compute_postgame_team_features(team_with_sched: pl.DataFrame) -> pl.DataFra
     f_ff = pl.col("ff_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
     a_ff = pl.col("fa_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
     f_hd = (
-        pl.col("hd_xgf_5v5")
-        .cast(pl.Float64)
-        .rolling_sum(window_size=w, min_samples=1)
-        .over("team")
+        pl.col("hd_xgf_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
     )
     a_hd = (
-        pl.col("hd_xga_5v5")
-        .cast(pl.Float64)
-        .rolling_sum(window_size=w, min_samples=1)
-        .over("team")
+        pl.col("hd_xga_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
     )
     toi_5v5 = (
         pl.col("toi_5v5_minutes")
@@ -338,12 +332,12 @@ def _compute_postgame_team_features(team_with_sched: pl.DataFrame) -> pl.DataFra
         bayesian_shrinkage(f_xg / (f_xg + a_xg), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
             "_post_xgf_pct_5v5_w10"
         ),
-        bayesian_shrinkage(
-            60.0 * f_xg / toi_5v5, n_post, PRIOR_XGF_PER_60, TEAM_SHRINKAGE_K
-        ).alias("_post_xgf_per_60_5v5_w10"),
-        bayesian_shrinkage(
-            60.0 * a_xg / toi_5v5, n_post, PRIOR_XGA_PER_60, TEAM_SHRINKAGE_K
-        ).alias("_post_xga_per_60_5v5_w10"),
+        bayesian_shrinkage(60.0 * f_xg / toi_5v5, n_post, PRIOR_XGF_PER_60, TEAM_SHRINKAGE_K).alias(
+            "_post_xgf_per_60_5v5_w10"
+        ),
+        bayesian_shrinkage(60.0 * a_xg / toi_5v5, n_post, PRIOR_XGA_PER_60, TEAM_SHRINKAGE_K).alias(
+            "_post_xga_per_60_5v5_w10"
+        ),
         bayesian_shrinkage(f_cf / (f_cf + a_cf), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
             "_post_cf_pct_5v5_w10"
         ),
@@ -459,19 +453,27 @@ def build_stage1_game_features(
         )
         asof_cols = [c for c in asof_source.columns if c not in {"start_time_utc", "team"}]
         matchup = (
-            matchup.sort("start_time_utc")
+            matchup.sort(["home_team", "start_time_utc"])
             .join_asof(
-                asof_source.rename({"team": "home_team", **{c: f"_asof_{c}_home" for c in asof_cols}}),
+                asof_source.sort(["team", "start_time_utc"]).rename(
+                    {"team": "home_team", **{c: f"_asof_{c}_home" for c in asof_cols}}
+                ),
                 on="start_time_utc",
                 by="home_team",
                 strategy="backward",
+                check_sortedness=False,
             )
+            .sort(["away_team", "start_time_utc"])
             .join_asof(
-                asof_source.rename({"team": "away_team", **{c: f"_asof_{c}_away" for c in asof_cols}}),
+                asof_source.sort(["team", "start_time_utc"]).rename(
+                    {"team": "away_team", **{c: f"_asof_{c}_away" for c in asof_cols}}
+                ),
                 on="start_time_utc",
                 by="away_team",
                 strategy="backward",
+                check_sortedness=False,
             )
+            .sort("start_time_utc")
         )
         fill_exprs: list[pl.Expr] = []
         for c in asof_cols:
@@ -523,6 +525,45 @@ def build_stage1_game_features(
         matchup = matchup.join(home_g, on=[event_col, "home_team"], how="left").join(
             away_g, on=[event_col, "away_team"], how="left"
         )
+        g_asof_src = g_feat.sort(["team", "start_time_utc"]).select(
+            ["start_time_utc", "team", *g_cols]
+        )
+        matchup = (
+            matchup.sort(["home_team", "start_time_utc"])
+            .join_asof(
+                g_asof_src.rename({"team": "home_team", **{c: f"_g_{c}_home" for c in g_cols}}),
+                on="start_time_utc",
+                by="home_team",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .sort(["away_team", "start_time_utc"])
+            .join_asof(
+                g_asof_src.rename({"team": "away_team", **{c: f"_g_{c}_away" for c in g_cols}}),
+                on="start_time_utc",
+                by="away_team",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .with_columns(
+                [
+                    pl.col(f"{c}_{s}").fill_null(pl.col(f"_g_{c}_{s}")).alias(f"{c}_{s}")
+                    for c in g_cols
+                    for s in ("home", "away")
+                ]
+            )
+            .drop([f"_g_{c}_{s}" for c in g_cols for s in ("home", "away")])
+            .with_columns(
+                pl.col("gsax_per_60_shrunk_home").fill_null(PRIOR_GOALIE_GSAx_PER_60),
+                pl.col("gsax_per_60_shrunk_away").fill_null(PRIOR_GOALIE_GSAx_PER_60),
+                pl.col("save_pct_shrunk_home").fill_null(PRIOR_GOALIE_SAVE_PCT),
+                pl.col("save_pct_shrunk_away").fill_null(PRIOR_GOALIE_SAVE_PCT),
+                pl.col("goalie_days_rest_home").fill_null(7),
+                pl.col("goalie_days_rest_away").fill_null(7),
+                pl.col("goalie_starts_last_7d_home").fill_null(0),
+                pl.col("goalie_starts_last_7d_away").fill_null(0),
+            )
+        )
     else:
         matchup = matchup.with_columns(
             pl.lit(PRIOR_GOALIE_GSAx_PER_60).alias("gsax_per_60_shrunk_home"),
@@ -564,6 +605,52 @@ def build_stage1_game_features(
         matchup = matchup.join(home_r, on=[event_col, "home_team"], how="left").join(
             away_r, on=[event_col, "away_team"], how="left"
         )
+        r_asof_src = r_feat.sort(["team", "start_time_utc"]).select(
+            ["start_time_utc", "team", *r_cols]
+        )
+        matchup = (
+            matchup.sort(["home_team", "start_time_utc"])
+            .join_asof(
+                r_asof_src.rename({"team": "home_team", **{c: f"_r_{c}_home" for c in r_cols}}),
+                on="start_time_utc",
+                by="home_team",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .sort(["away_team", "start_time_utc"])
+            .join_asof(
+                r_asof_src.rename({"team": "away_team", **{c: f"_r_{c}_away" for c in r_cols}}),
+                on="start_time_utc",
+                by="away_team",
+                strategy="backward",
+                check_sortedness=False,
+            )
+            .with_columns(
+                [
+                    pl.col(f"{c}_{s}").fill_null(pl.col(f"_r_{c}_{s}")).alias(f"{c}_{s}")
+                    for c in r_cols
+                    for s in ("home", "away")
+                ]
+            )
+            .drop([f"_r_{c}_{s}" for c in r_cols for s in ("home", "away")])
+            .with_columns(
+                pl.col("forward_weighted_ixg_per_60_home").fill_null(PRIOR_IXG_PER_60_F),
+                pl.col("forward_weighted_ixg_per_60_away").fill_null(PRIOR_IXG_PER_60_F),
+                pl.col("forward_weighted_xgd_per_60_home").fill_null(0.0),
+                pl.col("forward_weighted_xgd_per_60_away").fill_null(0.0),
+                pl.col("forward_weighted_gs_per_60_home").fill_null(PRIOR_GAMESCORE_PER_60_F),
+                pl.col("forward_weighted_gs_per_60_away").fill_null(PRIOR_GAMESCORE_PER_60_F),
+                pl.col("defense_weighted_ixg_per_60_home").fill_null(PRIOR_IXG_PER_60_D),
+                pl.col("defense_weighted_ixg_per_60_away").fill_null(PRIOR_IXG_PER_60_D),
+                pl.col("defense_weighted_xgd_per_60_home").fill_null(0.0),
+                pl.col("defense_weighted_xgd_per_60_away").fill_null(0.0),
+                pl.col("defense_weighted_gs_per_60_home").fill_null(PRIOR_GAMESCORE_PER_60_D),
+                pl.col("defense_weighted_gs_per_60_away").fill_null(PRIOR_GAMESCORE_PER_60_D),
+                pl.col("missing_regular_toi_home").fill_null(0.0),
+                pl.col("missing_regular_toi_away").fill_null(0.0),
+            )
+        )
+        matchup = sort_events_chronologically(matchup)
     else:
         matchup = matchup.with_columns(
             pl.lit(PRIOR_IXG_PER_60_F).alias("forward_weighted_ixg_per_60_home"),

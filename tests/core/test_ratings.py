@@ -39,7 +39,9 @@ def _sample_games_df() -> pl.DataFrame:
 
 def test_elo_zero_sum_hfa_and_offseason_regression() -> None:
     """Verify Elo zero-sum conservation, HFA shift, shootout dampening & offseason regression."""
-    engine = PairwiseEloEngine()
+    engine = PairwiseEloEngine(
+        EloConfig(home_field_advantage=35.0, k_factor=6.0, offseason_retention=0.67)
+    )
     rated = engine.compute_ratings(_sample_games_df())
 
     # 1. Pre-game Game 1: both teams start at 1500.0, HFA = 35.0 -> P(Home) > 0.50

@@ -162,7 +162,7 @@ class HockeyMatchupPredictor:
         away_code: str,
         game_date: date,
     ) -> pl.DataFrame:
-        """Synthesize a pre-game matchup feature row from each team's latest appearance."""
+        """Synthesize a pre-game matchup feature row from each team's latest state if absent."""
         exact = stage1_df.filter(
             (pl.col("game_date") == game_date)
             & (pl.col("home_team") == home_code)
@@ -171,7 +171,38 @@ class HockeyMatchupPredictor:
         if not exact.is_empty():
             return exact.tail(1)
 
-        # Fall back to latest available game row and overwrite team/date identifiers
+        from sports_ml.core.ratings import compute_elo_win_probability
+
+        def _latest_team_val(t_code: str, col_base: str, default_val: float) -> float:
+            t_rows = stage1_df.filter(
+                (pl.col("home_team") == t_code) | (pl.col("away_team") == t_code)
+            )
+            if t_rows.is_empty():
+                return default_val
+            last_r = t_rows.row(-1, named=True)
+            side = "home" if last_r["home_team"] == t_code else "away"
+            if col_base == "elo":
+                val = last_r.get(f"elo_{side}_post") or last_r.get(f"elo_{side}_pre")
+                return float(val) if val is not None else default_val
+            val = last_r.get(f"{col_base}_{side}")
+            return float(val) if val is not None else default_val
+
+        elo_h = _latest_team_val(home_code, "elo", 1500.0)
+        elo_a = _latest_team_val(away_code, "elo", 1500.0)
+        elo_diff = elo_h + 35.0 - elo_a
+        elo_prob = compute_elo_win_probability(elo_diff)
+
+        xgf_h = _latest_team_val(home_code, "xgf_pct_5v5_w10", 0.50)
+        xgf_a = _latest_team_val(away_code, "xgf_pct_5v5_w10", 0.50)
+        cf_h = _latest_team_val(home_code, "cf_pct_5v5_w10", 0.50)
+        cf_a = _latest_team_val(away_code, "cf_pct_5v5_w10", 0.50)
+        gsax_h = _latest_team_val(home_code, "gsax_per_60_shrunk", 0.0)
+        gsax_a = _latest_team_val(away_code, "gsax_per_60_shrunk", 0.0)
+        fwd_h = _latest_team_val(home_code, "forward_weighted_ixg_per_60", 0.75)
+        fwd_a = _latest_team_val(away_code, "forward_weighted_ixg_per_60", 0.75)
+        def_h = _latest_team_val(home_code, "defense_weighted_xgd_per_60", 0.0)
+        def_a = _latest_team_val(away_code, "defense_weighted_xgd_per_60", 0.0)
+
         latest_row = stage1_df.tail(1)
         synth_id = int(f"{game_date.year}029999")
         return latest_row.with_columns(
@@ -181,6 +212,25 @@ class HockeyMatchupPredictor:
             pl.lit(home_code, dtype=pl.Utf8).alias("home_team"),
             pl.lit(away_code, dtype=pl.Utf8).alias("away_team"),
             pl.lit("FUT", dtype=pl.Utf8).alias("game_state"),
+            pl.lit(elo_h, dtype=pl.Float64).alias("elo_home_pre"),
+            pl.lit(elo_a, dtype=pl.Float64).alias("elo_away_pre"),
+            pl.lit(elo_diff, dtype=pl.Float64).alias("elo_diff_pre"),
+            pl.lit(elo_prob, dtype=pl.Float64).alias("elo_home_win_prob"),
+            pl.lit(xgf_h, dtype=pl.Float64).alias("xgf_pct_5v5_w10_home"),
+            pl.lit(xgf_a, dtype=pl.Float64).alias("xgf_pct_5v5_w10_away"),
+            pl.lit(xgf_h - xgf_a, dtype=pl.Float64).alias("xgf_pct_5v5_w10_diff"),
+            pl.lit(cf_h, dtype=pl.Float64).alias("cf_pct_5v5_w10_home"),
+            pl.lit(cf_a, dtype=pl.Float64).alias("cf_pct_5v5_w10_away"),
+            pl.lit(cf_h - cf_a, dtype=pl.Float64).alias("cf_pct_5v5_w10_diff"),
+            pl.lit(gsax_h, dtype=pl.Float64).alias("gsax_per_60_shrunk_home"),
+            pl.lit(gsax_a, dtype=pl.Float64).alias("gsax_per_60_shrunk_away"),
+            pl.lit(gsax_h - gsax_a, dtype=pl.Float64).alias("goalie_gsax_per_60_diff"),
+            pl.lit(fwd_h, dtype=pl.Float64).alias("forward_weighted_ixg_per_60_home"),
+            pl.lit(fwd_a, dtype=pl.Float64).alias("forward_weighted_ixg_per_60_away"),
+            pl.lit(fwd_h - fwd_a, dtype=pl.Float64).alias("forward_ixg_per_60_diff"),
+            pl.lit(def_h, dtype=pl.Float64).alias("defense_weighted_xgd_per_60_home"),
+            pl.lit(def_a, dtype=pl.Float64).alias("defense_weighted_xgd_per_60_away"),
+            pl.lit(def_h - def_a, dtype=pl.Float64).alias("defense_xgd_per_60_diff"),
         )
 
     def _collect_confidence_warnings(

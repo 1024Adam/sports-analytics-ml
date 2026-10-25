@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
@@ -159,6 +160,8 @@ def _run_hockey_ingestion(
                 goalie_frames.extend(g_f)
 
         if seasons:
+            from sports_ml.sports.hockey.constants import NHL_TEAMS_32
+
             active_s = derive_active_nhl_season()
             for raw_s in seasons.split(","):
                 cleaned_s = raw_s.strip()
@@ -171,39 +174,38 @@ def _run_hockey_ingestion(
                 )
                 start_yr = int(str(season_int)[:4])
                 season_start_years.add(start_yr)
-                # Fetch initial 3 weeks of regular season to seed schedule + boxscores quickly,
-                # or full club schedules as requested
-                s_open = date(start_yr, 10, 7)
-                s_end = min(date(start_yr, 10, 28), datetime.now(tz=UTC).date())
-                if s_open <= s_end:
-                    s_games = nhl_client.fetch_date_range_games(s_open, s_end)
-                    if not s_games.is_empty():
-                        schedule_frames.append(s_games)
-                        t_f, s_f, g_f = _fetch_missing_boxscores(
-                            nhl_client,
-                            s_games,
-                            seen_boxscore_ids,
-                            max_games_per_run=max_boxscores,
+
+                # Fetch full 82-game season schedule across all 32 NHL clubs (32 fast requests,
+                # cached permanently for past seasons) so Elo & standings reflect the full season!
+                is_act_s = season_int >= active_s
+                season_sched_parts: list[pl.DataFrame] = []
+                for team_code in NHL_TEAMS_32:
+                    try:
+                        club_payload = nhl_client.fetch_club_schedule_season(
+                            team_code, season_int, is_active_season=is_act_s
                         )
-                        team_frames.extend(t_f)
-                        skater_frames.extend(s_f)
-                        goalie_frames.extend(g_f)
-                elif season_int < active_s:
-                    club_sched = nhl_client.fetch_club_schedule_season(
-                        "BOS", season_int, is_active_season=False
+                        c_df = parse_schedule_payload(club_payload)
+                        if not c_df.is_empty():
+                            season_sched_parts.append(c_df)
+                    except Exception:
+                        continue
+
+                if season_sched_parts:
+                    full_season_games = (
+                        pl.concat(season_sched_parts, how="vertical")
+                        .unique(subset=["game_id"], keep="last")
+                        .sort(["game_date", "start_time_utc", "game_id"])
                     )
-                    c_games = parse_schedule_payload(club_sched)
-                    if not c_games.is_empty():
-                        schedule_frames.append(c_games)
-                        t_f, s_f, g_f = _fetch_missing_boxscores(
-                            nhl_client,
-                            c_games,
-                            seen_boxscore_ids,
-                            max_games_per_run=max_boxscores,
-                        )
-                        team_frames.extend(t_f)
-                        skater_frames.extend(s_f)
-                        goalie_frames.extend(g_f)
+                    schedule_frames.append(full_season_games)
+                    t_f, s_f, g_f = _fetch_missing_boxscores(
+                        nhl_client,
+                        full_season_games,
+                        seen_boxscore_ids,
+                        max_games_per_run=max_boxscores,
+                    )
+                    team_frames.extend(t_f)
+                    skater_frames.extend(s_f)
+                    goalie_frames.extend(g_f)
 
         if current_season:
             now_payload = nhl_client.fetch_schedule_now()
@@ -239,17 +241,16 @@ def _run_hockey_ingestion(
         active_yr = int(str(derive_active_nhl_season())[:4])
         for yr in sorted(season_start_years):
             is_act = yr == active_yr
-            try:
+            with contextlib.suppress(Exception):
                 mp_teams_list.append(mp_client.load_team_game_stats(yr, is_active_season=is_act))
+            with contextlib.suppress(Exception):
                 mp_skaters_list.append(
                     mp_client.load_skater_game_stats(yr, is_active_season=is_act)
                 )
+            with contextlib.suppress(Exception):
                 mp_goalies_list.append(
                     mp_client.load_goalie_game_stats(yr, is_active_season=is_act)
                 )
-            except Exception:
-                # Graceful fallback if MoneyPuck has not published the current/future season ZIP yet
-                pass
 
     if raw_mp_dir.exists() and not mp_teams_list:
         for t_csv in sorted(raw_mp_dir.glob("teams_*.csv")):
@@ -272,12 +273,24 @@ def _run_hockey_ingestion(
     mp_skaters_df = pl.concat(mp_skaters_list, how="vertical") if mp_skaters_list else None
     mp_goalies_df = pl.concat(mp_goalies_list, how="vertical") if mp_goalies_list else None
 
+    reconciled_games_df: pl.DataFrame | None = None
     if schedule_frames:
-        reconciler.reconcile_games(pl.concat(schedule_frames, how="vertical"))
-    if team_frames:
+        reconciled_games_df = reconciler.reconcile_games(pl.concat(schedule_frames, how="vertical"))
+    elif reconciler.games_path.exists():
+        reconciled_games_df = pl.read_parquet(reconciler.games_path)
+
+    if team_frames or reconciled_games_df is not None:
+        from sports_ml.sports.hockey.constants import SILVER_TEAM_GAME_LOGS_SCHEMA
+
+        incoming_teams = (
+            pl.concat(team_frames, how="vertical")
+            if team_frames
+            else pl.DataFrame(schema=SILVER_TEAM_GAME_LOGS_SCHEMA)
+        )
         reconciler.reconcile_team_game_logs(
-            pl.concat(team_frames, how="vertical"),
+            incoming_teams,
             moneypuck_teams_df=mp_teams_df,
+            games_df=reconciled_games_df,
         )
     if skater_frames:
         reconciler.reconcile_skater_game_logs(

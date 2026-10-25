@@ -22,13 +22,19 @@ from sports_ml.core.temporal import sort_events_chronologically
 from sports_ml.core.validation import WalkForwardValidator
 
 STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
-    "elo_home_pre",
-    "elo_away_pre",
     "elo_diff_pre",
     "elo_home_win_prob",
+    "xgf_pct_5v5_w10_diff",
+    "cf_pct_5v5_w10_diff",
+    "st_net_edge_home_vs_away",
+    "rest_advantage",
+    "goalie_gsax_per_60_diff",
+    "forward_ixg_per_60_diff",
+    "defense_xgd_per_60_diff",
+    "elo_home_pre",
+    "elo_away_pre",
     "xgf_pct_5v5_w10_home",
     "xgf_pct_5v5_w10_away",
-    "xgf_pct_5v5_w10_diff",
     "xgf_pct_5v5_ewma_home",
     "xgf_pct_5v5_ewma_away",
     "xgf_per_60_5v5_w10_home",
@@ -37,7 +43,6 @@ STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "xga_per_60_5v5_w10_away",
     "cf_pct_5v5_w10_home",
     "cf_pct_5v5_w10_away",
-    "cf_pct_5v5_w10_diff",
     "ff_pct_5v5_w10_home",
     "ff_pct_5v5_w10_away",
     "hd_xgf_pct_5v5_w10_home",
@@ -52,27 +57,22 @@ STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "pp_xgf_per_60_away",
     "pk_xga_per_60_home",
     "pk_xga_per_60_away",
-    "st_net_edge_home_vs_away",
     "rest_days_home",
     "rest_days_away",
-    "rest_advantage",
     "is_b2b_home",
     "is_b2b_away",
     "games_last_4d_home",
     "games_last_4d_away",
     "gsax_per_60_shrunk_home",
     "gsax_per_60_shrunk_away",
-    "goalie_gsax_per_60_diff",
     "save_pct_shrunk_home",
     "save_pct_shrunk_away",
     "goalie_days_rest_home",
     "goalie_days_rest_away",
     "forward_weighted_ixg_per_60_home",
     "forward_weighted_ixg_per_60_away",
-    "forward_ixg_per_60_diff",
     "defense_weighted_xgd_per_60_home",
     "defense_weighted_xgd_per_60_away",
-    "defense_xgd_per_60_diff",
     "missing_regular_toi_home",
     "missing_regular_toi_away",
 )
@@ -106,10 +106,10 @@ class Stage1GameOutcomeModel:
         self,
         *,
         calibration_method: CalibrationMethod = "sigmoid",
-        elo_blend_weight: float = 0.25,
+        elo_blend_weight: float = 0.55,
         n_estimators: int = 80,
-        learning_rate: float = 0.05,
-        num_leaves: int = 15,
+        learning_rate: float = 0.04,
+        num_leaves: int = 12,
         random_seed: int = RANDOM_SEED,
     ) -> None:
         self.calibration_method: CalibrationMethod = calibration_method
@@ -131,6 +131,55 @@ class Stage1GameOutcomeModel:
     @property
     def is_fitted(self) -> bool:
         return self._is_fitted
+
+    def _build_monotone_constraints(self) -> list[int]:
+        """Build LightGBM monotone constraints for Stage 1 matchup features."""
+        pos_cols = {
+            "elo_home_pre",
+            "elo_diff_pre",
+            "elo_home_win_prob",
+            "xgf_pct_5v5_w10_home",
+            "xgf_pct_5v5_w10_diff",
+            "xgf_pct_5v5_ewma_home",
+            "xgf_per_60_5v5_w10_home",
+            "xga_per_60_5v5_w10_away",
+            "cf_pct_5v5_w10_home",
+            "cf_pct_5v5_w10_diff",
+            "ff_pct_5v5_w10_home",
+            "hd_xgf_pct_5v5_w10_home",
+            "pp_xgf_per_60_home",
+            "pk_xga_per_60_away",
+            "st_net_edge_home_vs_away",
+            "rest_days_home",
+            "rest_advantage",
+            "gsax_per_60_shrunk_home",
+            "goalie_gsax_per_60_diff",
+            "save_pct_shrunk_home",
+            "forward_weighted_ixg_per_60_home",
+            "forward_ixg_per_60_diff",
+            "defense_weighted_xgd_per_60_home",
+            "defense_xgd_per_60_diff",
+            "missing_regular_toi_away",
+        }
+        neg_cols = {
+            "elo_away_pre",
+            "xgf_pct_5v5_w10_away",
+            "xgf_pct_5v5_ewma_away",
+            "xgf_per_60_5v5_w10_away",
+            "xga_per_60_5v5_w10_home",
+            "cf_pct_5v5_w10_away",
+            "ff_pct_5v5_w10_away",
+            "hd_xgf_pct_5v5_w10_away",
+            "pp_xgf_per_60_away",
+            "pk_xga_per_60_home",
+            "rest_days_away",
+            "gsax_per_60_shrunk_away",
+            "save_pct_shrunk_away",
+            "forward_weighted_ixg_per_60_away",
+            "defense_weighted_xgd_per_60_away",
+            "missing_regular_toi_home",
+        }
+        return [1 if c in pos_cols else (-1 if c in neg_cols else 0) for c in self.feature_columns]
 
     @staticmethod
     def resolve_feature_columns(df: pl.DataFrame) -> list[str]:
@@ -178,10 +227,45 @@ class Stage1GameOutcomeModel:
         return np.asarray(mat, dtype=np.float64)
 
     def _extract_elo_probs(self, df: pl.DataFrame) -> NDArray[np.float64]:
-        if "elo_home_win_prob" in df.columns:
-            arr = df["elo_home_win_prob"].cast(pl.Float64).fill_null(0.535).to_numpy()
-            return clip_probabilities(np.asarray(arr, dtype=np.float64))
-        return np.full(df.height, 0.535, dtype=np.float64)
+        """Compute composite analytical win probability from Elo, 5v5 xGF%, GSAx, and roster."""
+        if "elo_diff_pre" in df.columns:
+            elo_diff = np.asarray(
+                df["elo_diff_pre"].cast(pl.Float64).fill_null(35.0).to_numpy(),
+                dtype=np.float64,
+            )
+        else:
+            elo_diff = np.full(df.height, 35.0, dtype=np.float64)
+
+        xgf_diff = (
+            np.asarray(
+                df["xgf_pct_5v5_w10_diff"].cast(pl.Float64).fill_null(0.0).to_numpy(),
+                dtype=np.float64,
+            )
+            if "xgf_pct_5v5_w10_diff" in df.columns
+            else np.zeros(df.height, dtype=np.float64)
+        )
+        gsax_diff = (
+            np.asarray(
+                df["goalie_gsax_per_60_diff"].cast(pl.Float64).fill_null(0.0).to_numpy(),
+                dtype=np.float64,
+            )
+            if "goalie_gsax_per_60_diff" in df.columns
+            else np.zeros(df.height, dtype=np.float64)
+        )
+        fwd_diff = (
+            np.asarray(
+                df["forward_ixg_per_60_diff"].cast(pl.Float64).fill_null(0.0).to_numpy(),
+                dtype=np.float64,
+            )
+            if "forward_ixg_per_60_diff" in df.columns
+            else np.zeros(df.height, dtype=np.float64)
+        )
+
+        # Convert 5v5 xGF% diff (+5% -> +45 Elo), goalie GSAx diff (+0.5 -> +25 Elo),
+        # and active roster forward ixG/60 diff (+0.2 -> +30 Elo) into effective Elo points
+        composite_elo_diff = elo_diff + 900.0 * xgf_diff + 50.0 * gsax_diff + 150.0 * fwd_diff
+        comp_probs = 1.0 / (1.0 + np.power(10.0, -composite_elo_diff / 400.0))
+        return clip_probabilities(np.asarray(comp_probs, dtype=np.float64))
 
     def _raw_blended_probs(self, df: pl.DataFrame) -> NDArray[np.float64]:
         if self._classifier is None:
@@ -190,7 +274,8 @@ class Stage1GameOutcomeModel:
         prob_mat = np.asarray(self._classifier.predict_proba(x_mat), dtype=np.float64)
         gbdt_probs = np.asarray(prob_mat[:, 1], dtype=np.float64)
         elo_probs = self._extract_elo_probs(df)
-        w = self.elo_blend_weight if "elo_home_win_prob" in df.columns else 0.0
+        has_elo = "elo_diff_pre" in df.columns or "elo_home_win_prob" in df.columns
+        w = self.elo_blend_weight if has_elo else 0.0
         blended = (1.0 - w) * gbdt_probs + w * elo_probs
         return clip_probabilities(blended)
 
@@ -243,6 +328,7 @@ class Stage1GameOutcomeModel:
 
         min_child = max(2, min(20, gbdt_train_df.height // 6))
         leaves = max(3, min(self.num_leaves, max(3, gbdt_train_df.height // 3)))
+        mono = self._build_monotone_constraints()
 
         clf = LGBMClassifier(
             objective="binary",
@@ -250,6 +336,7 @@ class Stage1GameOutcomeModel:
             learning_rate=self.learning_rate,
             num_leaves=leaves,
             min_child_samples=min_child,
+            monotone_constraints=mono,
             random_state=self.random_seed,
             n_jobs=1,
             verbose=-1,
@@ -334,16 +421,22 @@ class Stage1GameOutcomeModel:
 
         x_mat = self._extract_matrix(features_df)
         if self._home_goals_regressor is not None and self._away_goals_regressor is not None:
-            pred_h_goals = np.clip(
+            gbdt_h_goals = np.clip(
                 np.asarray(self._home_goals_regressor.predict(x_mat), dtype=np.float64),
-                0.25,
-                10.0,
+                0.50,
+                8.0,
             )
-            pred_a_goals = np.clip(
+            gbdt_a_goals = np.clip(
                 np.asarray(self._away_goals_regressor.predict(x_mat), dtype=np.float64),
-                0.25,
-                10.0,
+                0.50,
+                8.0,
             )
+            # Blend GBDT Poisson pace with win-probability-consistent goal split
+            total_pace = np.clip(gbdt_h_goals + gbdt_a_goals, 4.5, 7.5)
+            prob_implied_h = total_pace * (0.50 + 0.45 * (cal_home_probs - 0.50))
+            prob_implied_a = total_pace - prob_implied_h
+            pred_h_goals = np.clip(0.45 * gbdt_h_goals + 0.55 * prob_implied_h, 0.50, 8.0)
+            pred_a_goals = np.clip(0.45 * gbdt_a_goals + 0.55 * prob_implied_a, 0.50, 8.0)
         else:
             pred_h_goals = np.full(features_df.height, self._default_home_goals, dtype=np.float64)
             pred_a_goals = np.full(features_df.height, self._default_away_goals, dtype=np.float64)

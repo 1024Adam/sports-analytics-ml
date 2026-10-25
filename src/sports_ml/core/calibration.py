@@ -76,10 +76,17 @@ class ProbabilityCalibrator:
             self._platt_model = None
         else:
             logits = logit(probs_1d).reshape(-1, 1)
-            lr = LogisticRegression(C=1.0, solver="lbfgs", random_state=self.random_seed)
+            lr = LogisticRegression(C=0.25, solver="lbfgs", random_state=self.random_seed)
             lr.fit(logits, y_1d)
-            self._platt_model = lr
-            self._isotonic_model = None
+            slope = float(lr.coef_[0, 0])
+            intercept = float(lr.intercept_[0])
+            # Guard against small-sample validation folds (< 250 games) or extreme intercept shift
+            if slope <= 0.25 or probs_1d.size < 250 or abs(intercept) > 0.35:
+                self._platt_model = None
+                self._isotonic_model = None
+            else:
+                self._platt_model = lr
+                self._isotonic_model = None
 
         self._constant_prob = None
         self._is_fitted = True
