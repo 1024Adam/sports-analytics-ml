@@ -7,48 +7,48 @@ This roadmap breaks the `sports-analytics-ml` platform into **6 sequential, test
 ---
 
 ## Milestone 1: Project Foundation & Sport-Agnostic Core Engine (`core/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Establish the Python 3.11+ package structure (`pyproject.toml`, `src/sports_ml/`), canonical data contracts, and the sport-agnostic time-series and rating primitives in `src/sports_ml/core/`.
 
 ### Deliverables
-- [ ] `.gitignore`: Strictly excludes `data/`, `artifacts/`, `.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`, and `.pytest_cache/`.
-- [ ] `pyproject.toml` and `uv.lock` configured with `polars`, `pyarrow`, `pydantic`, `httpx`, `tenacity`, `lightgbm`, `scikit-learn`, `scipy`, `typer`, `rich`, `pytest`, `pytest-cov`, `mypy`, and `ruff` (with rule sets `E`, `F`, `I`, `B`, `UP`, `SIM`, `NPY`), plus `src/sports_ml/config.py` defining deterministic `RANDOM_SEED = 42`.
-- [ ] `.github/workflows/ci.yml`: Fast, offline GitHub Actions CI workflow triggered on `push` and `pull_request` to `main` (with `permissions: contents: read`) running a tracked-binary/data guard check, `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml`.
-- [ ] `src/sports_ml/core/contracts.py`: `SportAdapter` protocol supporting both `head_to_head` (NHL, MLB, PGA H2H) and `multi_entrant_field` (PGA tournament field) competition formats, canonical event/participant schema validators, and starter/venue modifier hooks.
-- [ ] `src/sports_ml/core/temporal.py`: Leak-free Polars window helpers (`pregame_rolling_mean`, `pregame_rolling_sum`, `pregame_ewma`, and generalized `pregame_exposure_rate` supporting per-60 TOI, per-PA/per-9 IP, and per-round Strokes Gained) enforcing `.shift(1)` ordered by `(start_time_utc, event_seq, event_id)`.
-- [ ] `src/sports_ml/core/shrinkage.py`: Early-season / low-sample Bayesian prior blending (`(n * curr + k * prior) / (n + k)`).
-- [ ] `src/sports_ml/core/ratings.py`: Dynamic rating engine supporting pairwise Elo/Glicko updates (with Home-Field Advantage, Margin-of-Victory multiplier, OT/Shootout dampening, starter adjustment hooks, and between-season regression) and extensible multi-entrant field skill ratings.
-- [ ] `src/sports_ml/core/schedule.py`: Rest days, back-to-back (`is_b2b`), same-day doubleheader turnaround (`event_seq`), `k`-in-`m` nights density, geodesic venue haversine distance, and timezone shift calculator.
-- [ ] `src/sports_ml/core/validation.py`: Walk-forward expanding and sliding window time-series cross-validator grouped by chronological event timestamp.
+- [x] `.gitignore`: Strictly excludes `data/`, `artifacts/`, `.venv/`, `__pycache__/`, `.mypy_cache/`, `.ruff_cache/`, and `.pytest_cache/`.
+- [x] `pyproject.toml` and `uv.lock` configured with `polars`, `pyarrow`, `pydantic`, `httpx`, `tenacity`, `lightgbm`, `scikit-learn`, `scipy`, `typer`, `rich`, `pytest`, `pytest-cov`, `mypy`, and `ruff` (with rule sets `E`, `F`, `I`, `B`, `UP`, `SIM`, `NPY`), plus `src/sports_ml/config.py` defining deterministic `RANDOM_SEED = 42`.
+- [x] `.github/workflows/ci.yml`: Fast, offline GitHub Actions CI workflow triggered on `push` and `pull_request` to `main` (with `permissions: contents: read`) running a tracked-binary/data guard check, `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml`.
+- [x] `src/sports_ml/core/contracts.py`: `SportAdapter` protocol supporting both `head_to_head` (NHL, MLB, PGA H2H) and `multi_entrant_field` (PGA tournament field) competition formats, canonical event/participant schema validators, and starter/venue modifier hooks.
+- [x] `src/sports_ml/core/temporal.py`: Leak-free Polars window helpers (`pregame_rolling_mean`, `pregame_rolling_sum`, `pregame_ewma`, and generalized `pregame_exposure_rate` supporting per-60 TOI, per-PA/per-9 IP, and per-round Strokes Gained) enforcing `.shift(1)` ordered by `(start_time_utc, event_seq, event_id)`.
+- [x] `src/sports_ml/core/shrinkage.py`: Early-season / low-sample Bayesian prior blending (`(n * curr + k * prior) / (n + k)`).
+- [x] `src/sports_ml/core/ratings.py`: Dynamic rating engine supporting pairwise Elo/Glicko updates (with Home-Field Advantage, Margin-of-Victory multiplier, OT/Shootout dampening, starter adjustment hooks, and between-season regression) and extensible multi-entrant field skill ratings.
+- [x] `src/sports_ml/core/schedule.py`: Rest days, back-to-back (`is_b2b`), same-day doubleheader turnaround (`event_seq`), `k`-in-`m` nights density, geodesic venue haversine distance, and timezone shift calculator.
+- [x] `src/sports_ml/core/validation.py`: Walk-forward expanding and sliding window time-series cross-validator grouped by chronological event timestamp.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/core/test_temporal_leakage.py`: **Future-Mutation Invariance Test** — mutating all target and box-score columns for events at index $\ge t$ (including same-day doubleheader Game 2 or multi-round tournament Round $r+1$) produces **bit-for-bit identical** features at index $< t$.
-- [ ] `tests/core/test_ratings.py`: Verify Elo zero-sum conservation, home-field shift, shootout dampening, and off-season mean regression.
-- [ ] `tests/core/test_schedule.py`: Verify B2B, same-day doubleheader, and 3-in-4 calculations across month/year boundaries and venue travel distances.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `tests/core/test_temporal_leakage.py`: **Future-Mutation Invariance Test** — mutating all target and box-score columns for events at index $\ge t$ (including same-day doubleheader Game 2 or multi-round tournament Round $r+1$) produces **bit-for-bit identical** features at index $< t$.
+- [x] `tests/core/test_ratings.py`: Verify Elo zero-sum conservation, home-field shift, shootout dampening, and off-season mean regression.
+- [x] `tests/core/test_schedule.py`: Verify B2B, same-day doubleheader, and 3-in-4 calculations across month/year boundaries and venue travel distances.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 
 ## Milestone 2: Hybrid NHL Ingestion & Silver Lakehouse (`sports/hockey/ingestion/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Build resilient, cached ingestion pipelines for the **Official NHL Web API** and **MoneyPuck CSV datasets**, normalizing and reconciling them into canonical Silver Parquet tables.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/hockey/constants.py`: NHL 32-team registry, historical tricode normalization (`ARI` $\rightarrow$ `UTA`, `S.J` $\rightarrow$ `SJS`, `L.A` $\rightarrow$ `LAK`, `N.J` $\rightarrow$ `NJD`, `T.B` $\rightarrow$ `TBL`), and arena latitude/longitude/timezone coordinates.
-- [ ] `src/sports_ml/sports/hockey/ingestion/nhl_api.py`: `httpx` client with deterministic disk caching (`data/raw/nhl_api/`) and `tenacity` retry/backoff for schedules, game boxscores, and team rosters. Supports permanent caching for `FINAL`/`OFF` games and incremental delta fetching (`--current-season` / `--start-date` / `--end-date`) for newly completed games and upcoming `FUT` schedules.
-- [ ] `src/sports_ml/sports/hockey/ingestion/moneypuck.py`: Downloader and Polars parser for MoneyPuck team, skater, and goalie game-by-game CSVs (`5on5`, `5on4`, `4on5`, `all`), with TTL/ETag refresh for current-season-to-date CSV snapshots.
-- [ ] `src/sports_ml/sports/hockey/ingestion/lineups.py`: **2-Tier Live Pre-Game Lineup, Starting Goalie & Injury Resolver**:
+- [x] `src/sports_ml/sports/hockey/constants.py`: NHL 32-team registry, historical tricode normalization (`ARI` $\rightarrow$ `UTA`, `S.J` $\rightarrow$ `SJS`, `L.A` $\rightarrow$ `LAK`, `N.J` $\rightarrow$ `NJD`, `T.B` $\rightarrow$ `TBL`), and arena latitude/longitude/timezone coordinates.
+- [x] `src/sports_ml/sports/hockey/ingestion/nhl_api.py`: `httpx` client with deterministic disk caching (`data/raw/nhl_api/`) and `tenacity` retry/backoff for schedules, game boxscores, and team rosters. Supports permanent caching for `FINAL`/`OFF` games and incremental delta fetching (`--current-season` / `--start-date` / `--end-date`) for newly completed games and upcoming `FUT` schedules.
+- [x] `src/sports_ml/sports/hockey/ingestion/moneypuck.py`: Downloader and Polars parser for MoneyPuck team, skater, and goalie game-by-game CSVs (`5on5`, `5on4`, `4on5`, `all`), with TTL/ETag refresh for current-season-to-date CSV snapshots.
+- [x] `src/sports_ml/sports/hockey/ingestion/lineups.py`: **2-Tier Live Pre-Game Lineup, Starting Goalie & Injury Resolver**:
   - **Tier 1**: Official NHL API pre-game/warmup dressed lineup & starter (`/v1/gamecenter/{GAME_ID}/boxscore` + `/v1/roster/{TEAM}/current`).
   - **Tier 2**: Daytime morning-skate starting goalies (`Confirmed` / `Expected`), projected line combinations, and injury exclusions (e.g., DailyFaceoff feed reconciled to NHL 7-digit `player_id`s) when predicting hours before puck drop.
-- [ ] `src/sports_ml/sports/hockey/ingestion/reconciler.py`: Upserts and joins NHL API and MoneyPuck records into the 4 canonical Silver Parquet tables (`games.parquet`, `team_game_logs.parquet`, `skater_game_logs.parquet`, `goalie_game_logs.parquet`), with graceful fallback when MoneyPuck lags by a day.
+- [x] `src/sports_ml/sports/hockey/ingestion/reconciler.py`: Upserts and joins NHL API and MoneyPuck records into the 4 canonical Silver Parquet tables (`games.parquet`, `team_game_logs.parquet`, `skater_game_logs.parquet`, `goalie_game_logs.parquet`), with graceful fallback when MoneyPuck lags by a day.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/hockey/test_ingestion.py`: Test JSON/CSV parsing, tricode normalization, schema adherence, incremental upsert (transitioning a game from `FUT` to `FINAL` as the current season progresses), 2-Tier pre-game lineup/goalie/injury resolution (Tier 1 warmup payload vs. Tier 2 daytime morning-skate payload), and fallback handling using deterministic local fixtures.
-- [ ] Verify Silver tables enforce uniqueness on `(game_id)` for games, `(game_id, team)` for team logs, and `(game_id, player_id)` for player logs.
+- [x] `tests/sports/hockey/test_ingestion.py`: Test JSON/CSV parsing, tricode normalization, schema adherence, incremental upsert (transitioning a game from `FUT` to `FINAL` as the current season progresses), 2-Tier pre-game lineup/goalie/injury resolution (Tier 1 warmup payload vs. Tier 2 daytime morning-skate payload), and fallback handling using deterministic local fixtures.
+- [x] Verify Silver tables enforce uniqueness on `(game_id)` for games, `(game_id, team)` for team logs, and `(game_id, player_id)` for player logs.
 
 ---
 
