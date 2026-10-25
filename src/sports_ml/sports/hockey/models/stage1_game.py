@@ -367,8 +367,8 @@ class Stage1GameOutcomeModel:
                 0.0,
                 None,
             )
-            self._default_home_goals = float(max(0.5, np.mean(y_home_g)))
-            self._default_away_goals = float(max(0.5, np.mean(y_away_g)))
+            self._default_home_goals = max(0.5, float(np.mean(y_home_g)))
+            self._default_away_goals = max(0.5, float(np.mean(y_away_g)))
 
             reg_h = LGBMRegressor(
                 objective="poisson",
