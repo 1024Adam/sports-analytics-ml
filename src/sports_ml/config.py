@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Final
 
@@ -11,7 +12,10 @@ RANDOM_SEED: Final[int] = 42
 
 
 def _default_repo_root() -> Path:
-    """Resolve the repository root directory relative to this module."""
+    """Resolve the repository root directory (or `SPORTS_ML_ROOT_DIR` override)."""
+    env_override = os.environ.get("SPORTS_ML_ROOT_DIR")
+    if env_override:
+        return Path(env_override).resolve()
     return Path(__file__).resolve().parents[2]
 
 

@@ -53,19 +53,19 @@ Build resilient, cached ingestion pipelines for the **Official NHL Web API** and
 ---
 
 ## Milestone 3: Hockey Pre-Game Feature Engineering (`sports/hockey/features/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Construct the complete pre-game feature suite for **Stage 1 (Game Outcome)** and **Stage 2 (Player Matchup Projections)** in `data/gold/hockey/`.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/hockey/features/team.py`: Rolling 5, 10, 25-game and EWMA features for 5v5 $xGF\%$, $xGF/60$, $xGA/60$, Corsi ($CF\%$), Fenwick ($FF\%$), High-Danger $xG\%$, PDO luck/regression signal, and Special Teams Net Edge (PP vs. PK).
-- [ ] `src/sports_ml/sports/hockey/features/goalie.py`: Starting goalie resolver and rolling shrunk $\text{GSAx/60}$, $\text{SV\%}$, and goalie workload/fatigue metrics.
-- [ ] `src/sports_ml/sports/hockey/features/roster.py`: Active roster aggregator weighting individual skater rolling $\text{ixG/60}$, $\text{OnIce-xGD/60}$, and $\text{GameScore/60}$ by projected TOI share for Forwards and Defensemen, plus `missing_regular_toi`.
-- [ ] `src/sports_ml/sports/hockey/features/player.py`: Stage 2 individual player-matchup feature builder (rolling EV/PP TOI, vacated injury TOI, per-60 rates, shrunk career shooting %, opponent defensive suppression, and opponent starting goalie GSAx).
+- [x] `src/sports_ml/sports/hockey/features/team.py`: Rolling 5, 10, 25-game and EWMA features for 5v5 $xGF\%$, $xGF/60$, $xGA/60$, Corsi ($CF\%$), Fenwick ($FF\%$), High-Danger $xG\%$, PDO luck/regression signal, and Special Teams Net Edge (PP vs. PK).
+- [x] `src/sports_ml/sports/hockey/features/goalie.py`: Starting goalie resolver and rolling shrunk $\text{GSAx/60}$, $\text{SV\%}$, and goalie workload/fatigue metrics.
+- [x] `src/sports_ml/sports/hockey/features/roster.py`: Active roster aggregator weighting individual skater rolling $\text{ixG/60}$, $\text{OnIce-xGD/60}$, and $\text{GameScore/60}$ by projected TOI share for Forwards and Defensemen, plus `missing_regular_toi`.
+- [x] `src/sports_ml/sports/hockey/features/player.py`: Stage 2 individual player-matchup feature builder (rolling EV/PP TOI, vacated injury TOI, per-60 rates, shrunk career shooting %, opponent defensive suppression, and opponent starting goalie GSAx).
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/hockey/test_hockey_features.py`:
+- [x] `tests/sports/hockey/test_hockey_features.py`:
   - **Strict Anti-Leakage Test**: Verify that changing tonight's game goals, $xG$, or player points does not alter any pre-game team, goalie, roster, or player feature for tonight's game.
   - **Cold-Start Test**: Verify Game 1 of a season and a debuting rookie/goalie produce finite, non-null shrunk features.
   - **Roster Weighting Test**: Verify TOI weights normalize cleanly and reflect lineup changes when a top-line player is removed from the active roster.
@@ -73,20 +73,20 @@ Construct the complete pre-game feature suite for **Stage 1 (Game Outcome)** and
 ---
 
 ## Milestone 4: Stage 1 — Mandatory Calibrated Win Probability Pipeline
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Implement the mandatory Stage 1 game outcome model, probability calibration wrapper, auxiliary team-goals environment estimator, and walk-forward backtesting harness.
 
 ### Deliverables
-- [ ] `src/sports_ml/core/calibration.py`: Out-of-fold Platt (Sigmoid) and Isotonic probability calibrators.
-- [ ] `src/sports_ml/core/evaluation.py`: Evaluation suite computing **Log Loss**, **Brier Score**, Expected Calibration Error (ECE), accuracy, and benchmark comparisons against coin-flip, home-team baseline, and Elo-only baseline.
-- [ ] `src/sports_ml/sports/hockey/models/stage1_game.py`:
+- [x] `src/sports_ml/core/calibration.py`: Out-of-fold Platt (Sigmoid) and Isotonic probability calibrators.
+- [x] `src/sports_ml/core/evaluation.py`: Evaluation suite computing **Log Loss**, **Brier Score**, Expected Calibration Error (ECE), accuracy, and benchmark comparisons against coin-flip, home-team baseline, and Elo-only baseline.
+- [x] `src/sports_ml/sports/hockey/models/stage1_game.py`:
   - Trained Elo baseline + LightGBM classifier producing calibrated $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$.
   - Auxiliary Poisson/Tweedie team-goals regressor estimating $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$ to provide macro pace context for Stage 2.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/hockey/test_stage1_model.py`:
+- [x] `tests/sports/hockey/test_stage1_model.py`:
   - Verify predicted probabilities lie strictly in $(0, 1)$ and $P(\text{Home Win}) + P(\text{Away Win}) = 1.0$.
   - Verify walk-forward training never fits the GBDT or calibrator on validation/test dates.
   - Verify calibrated model achieves lower Brier Score / Log Loss than a constant home-win-rate baseline on synthetic directional data.
@@ -94,20 +94,20 @@ Implement the mandatory Stage 1 game outcome model, probability calibration wrap
 ---
 
 ## Milestone 5: Stage 2 — Optional Player Matchup Stat Projections
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Implement the optional Stage 2 player stat projection models for both teams' skaters and goalies, conditioned on Stage 1's game outcome and scoring environment.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/hockey/models/stage2_player.py`:
+- [x] `src/sports_ml/sports/hockey/models/stage2_player.py`:
   - **Skater TOI Projector**: Estimates $\widehat{\text{TOI}}_{\text{ev}}$ and $\widehat{\text{TOI}}_{\text{pp}}$ for active roster skaters.
   - **Skater Count/Rate Models**: LightGBM Poisson/Tweedie regressors conditioned on player rolling rates, opponent defense/goalie features, and Stage 1 context ($P(\text{Win})$, $\hat{\lambda}_{\text{team}}$) predicting `proj_goals`, `proj_assists`, `proj_points`, `proj_sog`, `prob_1plus_goal`, and `prob_1plus_point`.
   - **Goalie Projection Model**: Predicts `proj_shots_against`, `proj_goals_against`, `proj_saves`, and `proj_save_pct`.
   - **Cross-Stage Coherence Reconciler**: Soft-scales team skater goal totals toward Stage 1's $\hat{\lambda}_{\text{team}}$.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/hockey/test_stage2_player.py`:
+- [x] `tests/sports/hockey/test_stage2_player.py`:
   - Verify all predicted counts and TOI are non-negative ($\ge 0$) and milestone probabilities lie in $[0, 1]$.
   - Verify **Stage-Conditioning Monotonicity**: Increasing Stage 1's expected team goals $\hat{\lambda}_{\text{team}}$ or facing a weaker opponent goalie (lower GSAx) increases reconciled skater goal/point projections.
   - Verify Stage 2 can be toggled completely off (`include_players=False`) with zero overhead when only Stage 1 win probability is requested.
@@ -115,20 +115,20 @@ Implement the optional Stage 2 player stat projection models for both teams' ska
 ---
 
 ## Milestone 6: Unified Two-Stage Predictor Service & CLI (`predictor.py` & `cli.py`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Wire Stage 1 and Stage 2 into a cohesive inference API, artifact registry, and `sports-ml` CLI tool with Rich terminal output.
 
 ### Deliverables
-- [ ] `src/sports_ml/core/registry.py`: Model bundle save/load with `metadata.json` fingerprinting (ordered feature names, Polars dtypes, SHA-256 schema hash, training date range, git SHA, and validation metrics) that validates feature compatibility before inference.
-- [ ] `src/sports_ml/sports/hockey/models/predictor.py`: `HockeyMatchupPredictor` supporting `predict_matchup(..., include_players: bool = False)` and `predict_date(..., include_players: bool = False)`, surfacing pre-prediction confidence warnings (confirmed vs. projected starting goalie, data freshness, rookie prior flags), and automatically appending predictions to the live audit ledger (`data/predictions/hockey_predictions.parquet`).
-- [ ] `src/sports_ml/cli.py`: `typer` CLI implementing:
+- [x] `src/sports_ml/core/registry.py`: Model bundle save/load with `metadata.json` fingerprinting (ordered feature names, Polars dtypes, SHA-256 schema hash, training date range, git SHA, and validation metrics) that validates feature compatibility before inference.
+- [x] `src/sports_ml/sports/hockey/models/predictor.py`: `HockeyMatchupPredictor` supporting `predict_matchup(..., include_players: bool = False)` and `predict_date(..., include_players: bool = False)`, surfacing pre-prediction confidence warnings (confirmed vs. projected starting goalie, data freshness, rookie prior flags), and automatically appending predictions to the live audit ledger (`data/predictions/hockey_predictions.parquet`).
+- [x] `src/sports_ml/cli.py`: `typer` CLI implementing:
   - Streamlined auto-chaining: `train` automatically builds/updates Gold features if missing or stale; `predict` connects live by default (with `--offline` opt-out) to run incremental `--current-season` ingestion, resolve live 2-Tier pre-game lineups/goalies/injuries, and refresh features before predicting.
   - Granular developer & audit subcommands: `ingest`, `features build`, `backtest` (R&D evaluation), `train`, `predict` (with `--include-players`, `--matchup`, and `--offline` flags), and `score-predictions` (evaluates the live `data/predictions/` ledger against completed games).
-- [ ] `README.md`: End-to-end quickstart guide, CLI usage examples, and architecture overview.
+- [x] `README.md`: End-to-end quickstart guide, CLI usage examples, and architecture overview.
 
 ### Verification & Acceptance Criteria
-- [ ] Verify `registry.py` raises a clear schema-mismatch error if a feature column is missing or reordered at inference time.
-- [ ] End-to-end CLI integration test running `ingest` $\rightarrow$ `features` $\rightarrow$ `train` $\rightarrow$ `backtest` $\rightarrow$ `predict` $\rightarrow$ `score-predictions` (both default Stage 1 only and Stage 1 + Stage 2 with `--include-players`) on fixture data.
-- [ ] Full `pytest --cov=sports_ml`, `ruff check .`, `ruff format --check .`, and `mypy src tests` pass cleanly.
+- [x] Verify `registry.py` raises a clear schema-mismatch error if a feature column is missing or reordered at inference time.
+- [x] End-to-end CLI integration test running `ingest` $\rightarrow$ `features` $\rightarrow$ `train` $\rightarrow$ `backtest` $\rightarrow$ `predict` $\rightarrow$ `score-predictions` (both default Stage 1 only and Stage 1 + Stage 2 with `--include-players`) on fixture data.
+- [x] Full `pytest --cov=sports_ml`, `ruff check .`, `ruff format --check .`, and `mypy src tests` pass cleanly.

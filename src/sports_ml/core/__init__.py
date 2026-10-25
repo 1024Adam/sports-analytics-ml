@@ -5,6 +5,12 @@ shrinkage, Elo/field rating engines, schedule/travel calculators, walk-forward
 splitters, probability calibration, evaluation metrics, and artifact registry.
 """
 
+from sports_ml.core.calibration import (
+    CalibrationMethod,
+    ProbabilityCalibrator,
+    calibrate_multi_entrant_group,
+    clip_probabilities,
+)
 from sports_ml.core.contracts import (
     CANONICAL_EVENT_KEY_COLS,
     CANONICAL_PARTICIPANT_KEY_COLS,
@@ -17,6 +23,13 @@ from sports_ml.core.contracts import (
     validate_canonical_event_frame,
     validate_canonical_participant_frame,
 )
+from sports_ml.core.evaluation import (
+    BenchmarkComparisonReport,
+    EvaluationMetrics,
+    compare_against_baselines,
+    evaluate_probabilities,
+    expected_calibration_error,
+)
 from sports_ml.core.ratings import (
     EloConfig,
     FieldSkillConfig,
@@ -24,6 +37,14 @@ from sports_ml.core.ratings import (
     PairwiseEloEngine,
     compute_elo_win_probability,
     compute_mov_multiplier,
+)
+from sports_ml.core.registry import (
+    LoadedModelBundle,
+    ModelMetadata,
+    ModelRegistry,
+    SchemaMismatchError,
+    compute_schema_fingerprint,
+    extract_schema_signature,
 )
 from sports_ml.core.schedule import (
     compute_schedule_features,
@@ -46,14 +67,22 @@ from sports_ml.core.temporal import (
 from sports_ml.core.validation import WalkForwardSplit, WalkForwardValidator
 
 __all__ = [
+    "BenchmarkComparisonReport",
     "CANONICAL_EVENT_KEY_COLS",
     "CANONICAL_PARTICIPANT_KEY_COLS",
     "CANONICAL_TEMPORAL_SORT_COLS",
+    "CalibrationMethod",
     "CompetitionTopology",
     "EloConfig",
+    "EvaluationMetrics",
     "FieldSkillConfig",
+    "LoadedModelBundle",
+    "ModelMetadata",
+    "ModelRegistry",
     "MultiEntrantSkillEngine",
     "PairwiseEloEngine",
+    "ProbabilityCalibrator",
+    "SchemaMismatchError",
     "SchemaValidationError",
     "SportAdapter",
     "StarterModifierHook",
@@ -61,10 +90,17 @@ __all__ = [
     "WalkForwardSplit",
     "WalkForwardValidator",
     "bayesian_shrinkage",
+    "calibrate_multi_entrant_group",
+    "clip_probabilities",
+    "compare_against_baselines",
     "compute_elo_win_probability",
     "compute_mov_multiplier",
     "compute_regressed_prior",
     "compute_schedule_features",
+    "compute_schema_fingerprint",
+    "evaluate_probabilities",
+    "expected_calibration_error",
+    "extract_schema_signature",
     "haversine_distance_km",
     "pregame_ewma",
     "pregame_exposure_rate",

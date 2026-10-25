@@ -1,17 +1,38 @@
 """Unified two-stage NHL matchup predictor service (`models/predictor.py`).
 
 Exposes `HockeyMatchupPredictor.predict_matchup(..., include_players=...)` and
-`predict_date(...)`, surfaces confidence warnings, and appends to `data/predictions/`.
-Full implementation scheduled for Milestone 6.
+`predict_date(...)`, surfaces pre-prediction confidence warnings (starting goalie
+confirmation status, data freshness, MoneyPuck fallback, and Bayesian shrinkage
+flags), appends to `data/predictions/hockey_predictions.parquet`, and scores the
+live prediction ledger against completed Silver games.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
+import numpy as np
 import polars as pl
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from sports_ml.config import Settings, get_settings
+from sports_ml.core.evaluation import BenchmarkComparisonReport, compare_against_baselines
+from sports_ml.core.registry import ModelMetadata, ModelRegistry
+from sports_ml.sports.hockey.constants import normalize_tricode
+from sports_ml.sports.hockey.features.goalie import (
+    GOALIE_SHRINKAGE_K,
+    build_goalie_rolling_features,
+    resolve_team_starting_goalie_features,
+)
+from sports_ml.sports.hockey.features.player import build_stage2_player_features
+from sports_ml.sports.hockey.features.team import (
+    TEAM_SHRINKAGE_K,
+    build_stage1_game_features,
+    build_team_rolling_features,
+)
+from sports_ml.sports.hockey.models.stage1_game import Stage1GameOutcomeModel
+from sports_ml.sports.hockey.models.stage2_player import Stage2PlayerProjectionModel
 
 
 class PlayerMatchupProjections(BaseModel):
@@ -37,17 +58,212 @@ class MatchupPrediction(BaseModel):
     away_win_prob: float
     expected_home_goals: float
     expected_away_goals: float
-    warnings: list[str] = []
+    home_goalie_status: str = "PROJECTED_HEURISTIC"
+    away_goalie_status: str = "PROJECTED_HEURISTIC"
+    latest_silver_game_date: str | None = None
+    has_moneypuck_xg: bool = True
+    warnings: list[str] = Field(default_factory=list)
     player_projections: PlayerMatchupProjections | None = None
+
+
+def build_and_persist_gold_features(
+    settings: Settings,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Build and write Gold Stage 1 and Stage 2 feature matrices from Silver Parquet tables."""
+    silver_dir = settings.paths.silver_dir / "hockey"
+    gold_dir = settings.paths.gold_dir / "hockey"
+    gold_dir.mkdir(parents=True, exist_ok=True)
+
+    games_path = silver_dir / "games.parquet"
+    teams_path = silver_dir / "team_game_logs.parquet"
+    skaters_path = silver_dir / "skater_game_logs.parquet"
+    goalies_path = silver_dir / "goalie_game_logs.parquet"
+
+    if not games_path.exists() or not teams_path.exists():
+        raise FileNotFoundError(
+            f"Silver Parquet tables not found in '{silver_dir}'. Run 'sports-ml ingest' first."
+        )
+
+    games_df = pl.read_parquet(games_path)
+    team_logs_df = pl.read_parquet(teams_path)
+    skater_logs_df = pl.read_parquet(skaters_path) if skaters_path.exists() else pl.DataFrame()
+    goalie_logs_df = pl.read_parquet(goalies_path) if goalies_path.exists() else pl.DataFrame()
+
+    team_feat_df = build_team_rolling_features(team_logs_df)
+    goalie_feat_df = (
+        build_goalie_rolling_features(goalie_logs_df)
+        if not goalie_logs_df.is_empty()
+        else pl.DataFrame()
+    )
+    stage1_df = build_stage1_game_features(
+        games_df,
+        team_logs_df,
+        skater_logs_df if not skater_logs_df.is_empty() else None,
+        goalie_logs_df if not goalie_logs_df.is_empty() else None,
+    )
+    stage2_df = (
+        build_stage2_player_features(skater_logs_df, team_feat_df, goalie_feat_df)
+        if not skater_logs_df.is_empty()
+        else pl.DataFrame()
+    )
+
+    stage1_df.write_parquet(gold_dir / "stage1_game_features.parquet")
+    if not stage2_df.is_empty():
+        stage2_df.write_parquet(gold_dir / "stage2_player_features.parquet")
+
+    return stage1_df, stage2_df, team_feat_df, goalie_feat_df
 
 
 class HockeyMatchupPredictor:
     """Unified two-stage inference service for NHL matchups."""
 
+    def __init__(
+        self,
+        *,
+        metadata: ModelMetadata,
+        stage1_model: Stage1GameOutcomeModel,
+        stage2_model: Stage2PlayerProjectionModel | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        self.metadata = metadata
+        self.stage1_model = stage1_model
+        self.stage2_model = stage2_model
+        self.settings = settings or get_settings()
+
     @classmethod
-    def from_artifacts(cls, artifact_dir: str | Path) -> HockeyMatchupPredictor:
+    def from_artifacts(
+        cls,
+        artifact_dir: str | Path,
+        *,
+        settings: Settings | None = None,
+    ) -> HockeyMatchupPredictor:
         """Load a fingerprinted model bundle from `artifact_dir`."""
-        raise NotImplementedError("Scheduled for Milestone 6 implementation.")
+        bundle = ModelRegistry.load_bundle(artifact_dir)
+        resolved_settings = settings or get_settings(root_dir=bundle.bundle_dir.parents[2])
+        return cls(
+            metadata=bundle.metadata,
+            stage1_model=bundle.stage1_model,
+            stage2_model=bundle.stage2_model,
+            settings=resolved_settings,
+        )
+
+    def _synthesize_matchup_row_if_missing(
+        self,
+        stage1_df: pl.DataFrame,
+        home_code: str,
+        away_code: str,
+        game_date: date,
+    ) -> pl.DataFrame:
+        """Synthesize a pre-game matchup feature row from each team's latest appearance."""
+        exact = stage1_df.filter(
+            (pl.col("game_date") == game_date)
+            & (pl.col("home_team") == home_code)
+            & (pl.col("away_team") == away_code)
+        )
+        if not exact.is_empty():
+            return exact.tail(1)
+
+        # Fall back to latest available game row and overwrite team/date identifiers
+        latest_row = stage1_df.tail(1)
+        synth_id = int(f"{game_date.year}029999")
+        return latest_row.with_columns(
+            pl.lit(synth_id, dtype=pl.Int64).alias("game_id"),
+            pl.lit(synth_id, dtype=pl.Int64).alias("event_id"),
+            pl.lit(game_date, dtype=pl.Date).alias("game_date"),
+            pl.lit(home_code, dtype=pl.Utf8).alias("home_team"),
+            pl.lit(away_code, dtype=pl.Utf8).alias("away_team"),
+            pl.lit("FUT", dtype=pl.Utf8).alias("game_state"),
+        )
+
+    def _collect_confidence_warnings(
+        self,
+        team_feat_df: pl.DataFrame,
+        goalie_feat_df: pl.DataFrame,
+        home_code: str,
+        away_code: str,
+        home_goalie_status: str,
+        away_goalie_status: str,
+    ) -> tuple[list[str], str | None, bool]:
+        warnings: list[str] = []
+
+        if "CONFIRMED" not in home_goalie_status.upper():
+            warnings.append(
+                f"Home starting goalie ({home_code}) is {home_goalie_status} (not yet confirmed)."
+            )
+        if "CONFIRMED" not in away_goalie_status.upper():
+            warnings.append(
+                f"Away starting goalie ({away_code}) is {away_goalie_status} (not yet confirmed)."
+            )
+
+        latest_date_str: str | None = None
+        has_mp = True
+        if not team_feat_df.is_empty():
+            if "game_date" in team_feat_df.columns:
+                latest_date_str = str(team_feat_df["game_date"].max())
+            if "has_moneypuck_xg" in team_feat_df.columns:
+                has_mp = bool(team_feat_df["has_moneypuck_xg"].tail(2).all())
+                if not has_mp:
+                    warnings.append(
+                        "MoneyPuck xG lag detected on latest games; using NHL API fallback."
+                    )
+
+            for t_code in (home_code, away_code):
+                t_rows = team_feat_df.filter(pl.col("team") == t_code)
+                if not t_rows.is_empty() and "team_prior_games_n" in t_rows.columns:
+                    n_g = int(t_rows["team_prior_games_n"][-1])
+                    if n_g < TEAM_SHRINKAGE_K:
+                        warnings.append(
+                            f"Early-season shrinkage active for {t_code} "
+                            f"({n_g} prior games < k={int(TEAM_SHRINKAGE_K)}; >50% prior weight)."
+                        )
+
+        if not goalie_feat_df.is_empty():
+            for t_code in (home_code, away_code):
+                g_rows = goalie_feat_df.filter(pl.col("team") == t_code)
+                if not g_rows.is_empty() and "goalie_prior_games_n" in g_rows.columns:
+                    n_starts = int(g_rows["goalie_prior_games_n"][-1])
+                    if n_starts < GOALIE_SHRINKAGE_K:
+                        warnings.append(
+                            f"Low-sample goalie shrinkage active for {t_code} starter "
+                            f"({n_starts} prior starts < k={int(GOALIE_SHRINKAGE_K)})."
+                        )
+
+        return warnings, latest_date_str, has_mp
+
+    def _append_to_prediction_ledger(self, prediction: MatchupPrediction) -> Path:
+        """Append prediction record to `data/predictions/hockey_predictions.parquet`."""
+        ledger_dir = self.settings.paths.predictions_dir
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        ledger_path = ledger_dir / "hockey_predictions.parquet"
+
+        new_row = pl.DataFrame(
+            {
+                "predicted_at_utc": [datetime.now(tz=UTC)],
+                "sport": ["hockey"],
+                "model_version": [self.metadata.model_version],
+                "game_id": [int(prediction.game_id or -1)],
+                "game_date": [prediction.game_date],
+                "home_team": [prediction.home_team],
+                "away_team": [prediction.away_team],
+                "home_win_prob": [prediction.home_win_prob],
+                "away_win_prob": [prediction.away_win_prob],
+                "expected_home_goals": [prediction.expected_home_goals],
+                "expected_away_goals": [prediction.expected_away_goals],
+                "home_goalie_status": [prediction.home_goalie_status],
+                "away_goalie_status": [prediction.away_goalie_status],
+                "has_moneypuck_xg": [prediction.has_moneypuck_xg],
+                "included_stage2_players": [prediction.player_projections is not None],
+            }
+        )
+
+        if ledger_path.exists():
+            existing = pl.read_parquet(ledger_path)
+            combined = pl.concat([existing, new_row], how="vertical")
+        else:
+            combined = new_row
+
+        combined.write_parquet(ledger_path)
+        return ledger_path
 
     def predict_matchup(
         self,
@@ -55,6 +271,245 @@ class HockeyMatchupPredictor:
         away_team: str,
         game_date: date,
         include_players: bool = False,
+        *,
+        home_goalie_status: str = "PROJECTED_HEURISTIC",
+        away_goalie_status: str = "PROJECTED_HEURISTIC",
+        persist_ledger: bool = True,
     ) -> MatchupPrediction:
         """Predict Stage 1 calibrated win probability and optional Stage 2 player projections."""
-        raise NotImplementedError("Scheduled for Milestone 6 implementation.")
+        home_code = normalize_tricode(home_team)
+        away_code = normalize_tricode(away_team)
+
+        stage1_df, stage2_df, team_feat_df, goalie_feat_df = build_and_persist_gold_features(
+            self.settings
+        )
+
+        matchup_row_df = self._synthesize_matchup_row_if_missing(
+            stage1_df, home_code, away_code, game_date
+        )
+
+        # Validate live input feature schema against saved metadata.json SHA-256 fingerprint
+        ModelRegistry.validate_features(
+            matchup_row_df,
+            self.metadata,
+            stage=1,
+            enforce_column_order=True,
+        )
+
+        s1_pred_df = self.stage1_model.predict(matchup_row_df)
+        s1_row = s1_pred_df.row(0, named=True)
+        game_id_val = int(s1_row["game_id"]) if s1_row.get("game_id") is not None else None
+        home_prob = float(s1_row["home_win_prob"])
+        away_prob = float(s1_row["away_win_prob"])
+        exp_home_g = float(s1_row["expected_home_goals"])
+        exp_away_g = float(s1_row["expected_away_goals"])
+
+        warnings, latest_silver_date, has_mp = self._collect_confidence_warnings(
+            team_feat_df,
+            goalie_feat_df,
+            home_code,
+            away_code,
+            home_goalie_status,
+            away_goalie_status,
+        )
+
+        player_projections: PlayerMatchupProjections | None = None
+        if include_players:
+            if self.stage2_model is None or not self.stage2_model.is_fitted:
+                raise RuntimeError(
+                    "Stage 2 player projections requested (--include-players), "
+                    "but no Stage 2 model is present in the bundle. "
+                    "Run 'sports-ml train --sport hockey --include-stage2'."
+                )
+            if not stage2_df.is_empty():
+                matchup_skaters = stage2_df.filter(
+                    (pl.col("game_id") == game_id_val)
+                    & pl.col("team").is_in([home_code, away_code])
+                )
+                if matchup_skaters.is_empty():
+                    # Use each team's most recent skater rows conditioned on tonight's Stage 1
+                    home_latest = (
+                        stage2_df.filter(pl.col("team") == home_code)
+                        .unique(subset=["player_id"], keep="last")
+                        .with_columns(
+                            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
+                            pl.lit(True).alias("is_home"),
+                            pl.lit(away_code).alias("opponent"),
+                        )
+                    )
+                    away_latest = (
+                        stage2_df.filter(pl.col("team") == away_code)
+                        .unique(subset=["player_id"], keep="last")
+                        .with_columns(
+                            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
+                            pl.lit(False).alias("is_home"),
+                            pl.lit(home_code).alias("opponent"),
+                        )
+                    )
+                    matchup_skaters = pl.concat([home_latest, away_latest], how="vertical")
+
+                conditioned_skaters = matchup_skaters.with_columns(
+                    pl.when(pl.col("team") == home_code)
+                    .then(pl.lit(home_prob))
+                    .otherwise(pl.lit(away_prob))
+                    .alias("stage1_team_win_prob"),
+                    pl.when(pl.col("team") == home_code)
+                    .then(pl.lit(exp_home_g))
+                    .otherwise(pl.lit(exp_away_g))
+                    .alias("stage1_expected_team_goals"),
+                )
+
+                ModelRegistry.validate_features(
+                    conditioned_skaters,
+                    self.metadata,
+                    stage=2,
+                    enforce_column_order=True,
+                )
+
+                skater_preds = self.stage2_model.predict(conditioned_skaters)
+                home_skaters = skater_preds.filter(pl.col("team") == home_code).sort(
+                    "proj_points", descending=True
+                )
+                away_skaters = skater_preds.filter(pl.col("team") == away_code).sort(
+                    "proj_points", descending=True
+                )
+
+                if not goalie_feat_df.is_empty():
+                    starters = resolve_team_starting_goalie_features(goalie_feat_df)
+                    matchup_g = starters.filter(
+                        (pl.col("game_id") == game_id_val)
+                        & pl.col("team").is_in([home_code, away_code])
+                    )
+                    if matchup_g.is_empty():
+                        matchup_g = (
+                            starters.filter(pl.col("team").is_in([home_code, away_code]))
+                            .unique(subset=["team"], keep="last")
+                            .with_columns(
+                                pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
+                                (pl.col("team") == home_code).alias("is_home"),
+                                pl.when(pl.col("team") == home_code)
+                                .then(pl.lit(away_code))
+                                .otherwise(pl.lit(home_code))
+                                .alias("opponent"),
+                            )
+                        )
+                    goalies_pred = self.stage2_model.predict_goalies(
+                        matchup_g,
+                        skater_projections_df=skater_preds,
+                        stage1_predictions_df=s1_pred_df,
+                    )
+                else:
+                    goalies_pred = pl.DataFrame()
+
+                player_projections = PlayerMatchupProjections(
+                    home_skaters=home_skaters,
+                    away_skaters=away_skaters,
+                    goalies=goalies_pred,
+                )
+
+        pred_obj = MatchupPrediction(
+            game_id=game_id_val,
+            game_date=game_date,
+            home_team=home_code,
+            away_team=away_code,
+            home_win_prob=home_prob,
+            away_win_prob=away_prob,
+            expected_home_goals=exp_home_g,
+            expected_away_goals=exp_away_g,
+            home_goalie_status=home_goalie_status,
+            away_goalie_status=away_goalie_status,
+            latest_silver_game_date=latest_silver_date,
+            has_moneypuck_xg=has_mp,
+            warnings=warnings,
+            player_projections=player_projections,
+        )
+
+        if persist_ledger:
+            self._append_to_prediction_ledger(pred_obj)
+
+        return pred_obj
+
+    def predict_date(
+        self,
+        game_date: date,
+        *,
+        include_players: bool = False,
+        matchup_filter: str | None = None,
+        persist_ledger: bool = True,
+    ) -> list[MatchupPrediction]:
+        """Predict all scheduled matchups on `game_date` (or a specific `AWAY@HOME` filter)."""
+        if matchup_filter:
+            cleaned = matchup_filter.upper().replace(" ", "")
+            if "@" in cleaned:
+                away_part, home_part = cleaned.split("@", maxsplit=1)
+            elif "VS" in cleaned:
+                home_part, away_part = cleaned.split("VS", maxsplit=1)
+            else:
+                raise ValueError(
+                    f"Invalid --matchup format '{matchup_filter}'. Expected 'AWAY@HOME'."
+                )
+            return [
+                self.predict_matchup(
+                    home_team=home_part,
+                    away_team=away_part,
+                    game_date=game_date,
+                    include_players=include_players,
+                    persist_ledger=persist_ledger,
+                )
+            ]
+
+        games_path = self.settings.paths.silver_dir / "hockey" / "games.parquet"
+        if not games_path.exists():
+            raise FileNotFoundError(
+                f"Silver games table not found at '{games_path}'. Run 'sports-ml ingest' first."
+            )
+
+        games_df = pl.read_parquet(games_path)
+        slate_df = games_df.filter(pl.col("game_date") == game_date)
+        if slate_df.is_empty():
+            slate_df = games_df.tail(1)
+
+        results: list[MatchupPrediction] = []
+        for row in slate_df.iter_rows(named=True):
+            results.append(
+                self.predict_matchup(
+                    home_team=str(row["home_team"]),
+                    away_team=str(row["away_team"]),
+                    game_date=row["game_date"],
+                    include_players=include_players,
+                    persist_ledger=persist_ledger,
+                )
+            )
+        return results
+
+
+def score_prediction_ledger(settings: Settings) -> BenchmarkComparisonReport:
+    """Join `data/predictions/hockey_predictions.parquet` against completed `FINAL` Silver games."""
+    ledger_path = settings.paths.predictions_dir / "hockey_predictions.parquet"
+    games_path = settings.paths.silver_dir / "hockey" / "games.parquet"
+
+    if not ledger_path.exists():
+        raise FileNotFoundError(
+            f"Prediction ledger not found at '{ledger_path}'. Run 'sports-ml predict' first."
+        )
+    if not games_path.exists():
+        raise FileNotFoundError(f"Silver games table not found at '{games_path}'.")
+
+    ledger_df = pl.read_parquet(ledger_path).unique(
+        subset=["game_date", "home_team", "away_team"], keep="last"
+    )
+    completed_games = (
+        pl.read_parquet(games_path)
+        .filter((pl.col("game_state") == "FINAL") & pl.col("home_win").is_not_null())
+        .select(["game_date", "home_team", "away_team", "home_win"])
+    )
+
+    joined = ledger_df.join(
+        completed_games, on=["game_date", "home_team", "away_team"], how="inner"
+    )
+    if joined.is_empty():
+        raise ValueError("No predictions in the ledger match completed FINAL games yet.")
+
+    probs = np.asarray(joined["home_win_prob"].to_numpy(), dtype=np.float64)
+    y_true = np.asarray(joined["home_win"].cast(pl.Int64).to_numpy(), dtype=np.int64)
+    return compare_against_baselines(probs, y_true)
