@@ -31,6 +31,14 @@ from sports_ml.sports.hockey.features.team import (
     build_stage1_game_features,
     build_team_rolling_features,
 )
+from sports_ml.sports.hockey.ingestion.lineups import (
+    fetch_dailyfaceoff_starting_goalies,
+)
+from sports_ml.sports.hockey.ingestion.nhl_api import (
+    NHLWebAPIClient,
+    derive_active_nhl_season,
+    parse_roster_payload,
+)
 from sports_ml.sports.hockey.models.stage1_game import Stage1GameOutcomeModel
 from sports_ml.sports.hockey.models.stage2_player import Stage2PlayerProjectionModel
 
@@ -265,6 +273,142 @@ class HockeyMatchupPredictor:
         combined.write_parquet(ledger_path)
         return ledger_path
 
+    def _resolve_matchup_goalie_statuses(
+        self,
+        game_id_val: int | None,
+        game_date: date,
+        home_code: str,
+        away_code: str,
+        goalie_feat_df: pl.DataFrame,
+        *,
+        home_goalie_status_override: str | None = None,
+        away_goalie_status_override: str | None = None,
+        offline: bool = False,
+    ) -> tuple[str, str]:
+        """Resolve starting goalie confirmation statuses via Tier 1 & Tier 2 waterfall."""
+        if home_goalie_status_override and away_goalie_status_override:
+            return home_goalie_status_override, away_goalie_status_override
+
+        h_status = home_goalie_status_override or "PROJECTED_HEURISTIC"
+        a_status = away_goalie_status_override or "PROJECTED_HEURISTIC"
+
+        # Tier 1a: Check if starter is already recorded in Silver goalie_game_logs for this game_id
+        if game_id_val is not None and not goalie_feat_df.is_empty():
+            g_ev_col = "game_id" if "game_id" in goalie_feat_df.columns else "event_id"
+            game_goalies = goalie_feat_df.filter(
+                (pl.col(g_ev_col) == game_id_val) & pl.col("is_starter")
+            )
+            if not game_goalies.is_empty():
+                teams_with_starter = set(game_goalies["team"].to_list())
+                if home_code in teams_with_starter and not home_goalie_status_override:
+                    h_status = "CONFIRMED_NHL_OFFICIAL"
+                if away_code in teams_with_starter and not away_goalie_status_override:
+                    a_status = "CONFIRMED_NHL_OFFICIAL"
+
+        if "CONFIRMED" in h_status and "CONFIRMED" in a_status:
+            return h_status, a_status
+
+        # Tier 1b: Check cached raw boxscore JSON if present on disk
+        if game_id_val is not None:
+            box_path = self.settings.paths.raw_dir / "nhl_api" / "boxscores" / f"{game_id_val}.json"
+            if box_path.exists():
+                import json
+
+                box_payload = json.loads(box_path.read_text(encoding="utf-8"))
+                pbg = box_payload.get("playerByGameStats") or {}
+                if (pbg.get("homeTeam") or {}).get("goalies") and not home_goalie_status_override:
+                    h_status = "CONFIRMED_NHL_OFFICIAL"
+                if (pbg.get("awayTeam") or {}).get("goalies") and not away_goalie_status_override:
+                    a_status = "CONFIRMED_NHL_OFFICIAL"
+
+        if "CONFIRMED" in h_status and "CONFIRMED" in a_status:
+            return h_status, a_status
+
+        # Tier 2: Query DailyFaceoff morning-skate feed for target date when online
+        if not offline:
+            df_starters = fetch_dailyfaceoff_starting_goalies(game_date)
+            for code_side, is_home_side in ((home_code, True), (away_code, False)):
+                curr_st = h_status if is_home_side else a_status
+                if "CONFIRMED" in curr_st:
+                    continue
+                entry = df_starters.get(code_side)
+                if entry is not None:
+                    raw_strength = str(entry.get("goalie_status", "Expected")).upper()
+                    mapped = (
+                        "CONFIRMED_MORNING_SKATE"
+                        if "CONFIRM" in raw_strength
+                        else "EXPECTED_MORNING_SKATE"
+                    )
+                    if is_home_side and not home_goalie_status_override:
+                        h_status = mapped
+                    elif not is_home_side and not away_goalie_status_override:
+                        a_status = mapped
+
+        return h_status, a_status
+
+    def _select_active_team_skaters(
+        self,
+        stage2_df: pl.DataFrame,
+        team_code: str,
+        opp_code: str,
+        is_home: bool,
+        game_id_val: int | None,
+        game_date: date,
+        *,
+        offline: bool = False,
+    ) -> pl.DataFrame:
+        """Select active roster skaters for `team_code` on `game_date` without historical ghosts."""
+        target_season = derive_active_nhl_season(game_date)
+        team_hist = stage2_df.filter(pl.col("team") == team_code)
+
+        # Restrict to the target season (or latest available season for this team)
+        season_hist = team_hist.filter(pl.col("season") == target_season)
+        if season_hist.is_empty() and not team_hist.is_empty():
+            max_season_val = team_hist["season"].cast(pl.Int32).to_list()
+            max_season = max(max_season_val) if max_season_val else target_season
+            season_hist = team_hist.filter(pl.col("season") == max_season)
+
+        # When predicting a current-season game, filter to Official NHL active roster if available
+        active_season_now = derive_active_nhl_season()
+        if target_season == active_season_now:
+            roster_ids: set[int] = set()
+            raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
+            cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
+            try:
+                if not offline:
+                    nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
+                    roster_payload = nhl_client.fetch_team_roster(team_code)
+                    roster_df = parse_roster_payload(team_code, roster_payload)
+                    roster_ids = set(
+                        roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
+                    )
+                elif cached_roster_path.exists():
+                    import json
+
+                    roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
+                    roster_df = parse_roster_payload(team_code, roster_payload)
+                    roster_ids = set(
+                        roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
+                    )
+            except Exception:
+                roster_ids = set()
+
+            if roster_ids:
+                filtered_by_roster = season_hist.filter(pl.col("player_id").is_in(roster_ids))
+                if not filtered_by_roster.is_empty():
+                    season_hist = filtered_by_roster
+
+        latest_skaters = (
+            season_hist.sort(["start_time_utc", "game_id"])
+            .unique(subset=["player_id"], keep="last")
+            .tail(20)
+        )
+        return latest_skaters.with_columns(
+            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
+            pl.lit(is_home).alias("is_home"),
+            pl.lit(opp_code).alias("opponent"),
+        )
+
     def predict_matchup(
         self,
         home_team: str,
@@ -272,8 +416,9 @@ class HockeyMatchupPredictor:
         game_date: date,
         include_players: bool = False,
         *,
-        home_goalie_status: str = "PROJECTED_HEURISTIC",
-        away_goalie_status: str = "PROJECTED_HEURISTIC",
+        home_goalie_status: str | None = None,
+        away_goalie_status: str | None = None,
+        offline: bool = False,
         persist_ledger: bool = True,
     ) -> MatchupPrediction:
         """Predict Stage 1 calibrated win probability and optional Stage 2 player projections."""
@@ -304,13 +449,24 @@ class HockeyMatchupPredictor:
         exp_home_g = float(s1_row["expected_home_goals"])
         exp_away_g = float(s1_row["expected_away_goals"])
 
+        resolved_home_status, resolved_away_status = self._resolve_matchup_goalie_statuses(
+            game_id_val,
+            game_date,
+            home_code,
+            away_code,
+            goalie_feat_df,
+            home_goalie_status_override=home_goalie_status,
+            away_goalie_status_override=away_goalie_status,
+            offline=offline,
+        )
+
         warnings, latest_silver_date, has_mp = self._collect_confidence_warnings(
             team_feat_df,
             goalie_feat_df,
             home_code,
             away_code,
-            home_goalie_status,
-            away_goalie_status,
+            resolved_home_status,
+            resolved_away_status,
         )
 
         player_projections: PlayerMatchupProjections | None = None
@@ -327,24 +483,24 @@ class HockeyMatchupPredictor:
                     & pl.col("team").is_in([home_code, away_code])
                 )
                 if matchup_skaters.is_empty():
-                    # Use each team's most recent skater rows conditioned on tonight's Stage 1
-                    home_latest = (
-                        stage2_df.filter(pl.col("team") == home_code)
-                        .unique(subset=["player_id"], keep="last")
-                        .with_columns(
-                            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
-                            pl.lit(True).alias("is_home"),
-                            pl.lit(away_code).alias("opponent"),
-                        )
+                    # Use each team's active current-season roster skaters conditioned on Stage 1
+                    home_latest = self._select_active_team_skaters(
+                        stage2_df,
+                        home_code,
+                        away_code,
+                        True,
+                        game_id_val,
+                        game_date,
+                        offline=offline,
                     )
-                    away_latest = (
-                        stage2_df.filter(pl.col("team") == away_code)
-                        .unique(subset=["player_id"], keep="last")
-                        .with_columns(
-                            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
-                            pl.lit(False).alias("is_home"),
-                            pl.lit(home_code).alias("opponent"),
-                        )
+                    away_latest = self._select_active_team_skaters(
+                        stage2_df,
+                        away_code,
+                        home_code,
+                        False,
+                        game_id_val,
+                        game_date,
+                        offline=offline,
                     )
                     matchup_skaters = pl.concat([home_latest, away_latest], how="vertical")
 
@@ -416,8 +572,8 @@ class HockeyMatchupPredictor:
             away_win_prob=away_prob,
             expected_home_goals=exp_home_g,
             expected_away_goals=exp_away_g,
-            home_goalie_status=home_goalie_status,
-            away_goalie_status=away_goalie_status,
+            home_goalie_status=resolved_home_status,
+            away_goalie_status=resolved_away_status,
             latest_silver_game_date=latest_silver_date,
             has_moneypuck_xg=has_mp,
             warnings=warnings,
@@ -435,6 +591,7 @@ class HockeyMatchupPredictor:
         *,
         include_players: bool = False,
         matchup_filter: str | None = None,
+        offline: bool = False,
         persist_ledger: bool = True,
     ) -> list[MatchupPrediction]:
         """Predict all scheduled matchups on `game_date` (or a specific `AWAY@HOME` filter)."""
@@ -454,6 +611,7 @@ class HockeyMatchupPredictor:
                     away_team=away_part,
                     game_date=game_date,
                     include_players=include_players,
+                    offline=offline,
                     persist_ledger=persist_ledger,
                 )
             ]
@@ -477,6 +635,7 @@ class HockeyMatchupPredictor:
                     away_team=str(row["away_team"]),
                     game_date=row["game_date"],
                     include_players=include_players,
+                    offline=offline,
                     persist_ledger=persist_ledger,
                 )
             )

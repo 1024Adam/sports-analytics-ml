@@ -295,6 +295,67 @@ def compute_special_teams_net_edge(
     return home_edge - away_edge
 
 
+def _compute_postgame_team_features(team_with_sched: pl.DataFrame) -> pl.DataFrame:
+    """Compute post-game rolling team metrics so upcoming (`FUT`) games can inherit latest state."""
+    from sports_ml.core.shrinkage import bayesian_shrinkage
+    from sports_ml.core.temporal import sort_events_chronologically
+
+    sorted_t = sort_events_chronologically(team_with_sched, extra_tiebreakers=["team"])
+    w = 10
+    f_xg = pl.col("xgf_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    a_xg = pl.col("xga_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    f_cf = pl.col("cf_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    a_cf = pl.col("ca_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    f_ff = pl.col("ff_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    a_ff = pl.col("fa_5v5").cast(pl.Float64).rolling_sum(window_size=w, min_samples=1).over("team")
+    f_hd = (
+        pl.col("hd_xgf_5v5")
+        .cast(pl.Float64)
+        .rolling_sum(window_size=w, min_samples=1)
+        .over("team")
+    )
+    a_hd = (
+        pl.col("hd_xga_5v5")
+        .cast(pl.Float64)
+        .rolling_sum(window_size=w, min_samples=1)
+        .over("team")
+    )
+    toi_5v5 = (
+        pl.col("toi_5v5_minutes")
+        .cast(pl.Float64)
+        .rolling_sum(window_size=w, min_samples=1)
+        .over("team")
+    )
+    n_post = (
+        pl.col("xgf_5v5")
+        .is_not_null()
+        .cast(pl.Int32)
+        .rolling_sum(window_size=w, min_samples=1)
+        .over("team")
+    )
+
+    return sorted_t.with_columns(
+        bayesian_shrinkage(f_xg / (f_xg + a_xg), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
+            "_post_xgf_pct_5v5_w10"
+        ),
+        bayesian_shrinkage(
+            60.0 * f_xg / toi_5v5, n_post, PRIOR_XGF_PER_60, TEAM_SHRINKAGE_K
+        ).alias("_post_xgf_per_60_5v5_w10"),
+        bayesian_shrinkage(
+            60.0 * a_xg / toi_5v5, n_post, PRIOR_XGA_PER_60, TEAM_SHRINKAGE_K
+        ).alias("_post_xga_per_60_5v5_w10"),
+        bayesian_shrinkage(f_cf / (f_cf + a_cf), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
+            "_post_cf_pct_5v5_w10"
+        ),
+        bayesian_shrinkage(f_ff / (f_ff + a_ff), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
+            "_post_ff_pct_5v5_w10"
+        ),
+        bayesian_shrinkage(f_hd / (f_hd + a_hd), n_post, PRIOR_SHARE_50, TEAM_SHRINKAGE_K).alias(
+            "_post_hd_xgf_pct_5v5_w10"
+        ),
+    )
+
+
 def build_stage1_game_features(
     games_df: pl.DataFrame,
     team_game_logs: pl.DataFrame,
@@ -305,6 +366,8 @@ def build_stage1_game_features(
 
     Combines Dynamic Elo, schedule/rest/travel, team 5v5 process/PDO/Special Teams Net Edge,
     starting goalie shrunk GSAx/60, and TOI-weighted active roster strength.
+    For upcoming (`FUT`) games without boxscore rows in `team_game_logs`, inherits each
+    team's strictly prior completed state via backward `join_asof`.
     """
     from sports_ml.core.ratings import PairwiseEloEngine
     from sports_ml.core.schedule import compute_schedule_features
@@ -326,7 +389,7 @@ def build_stage1_game_features(
     elo_df = PairwiseEloEngine().compute_ratings(games_df)
 
     team_feat = build_team_rolling_features(team_game_logs)
-    team_with_sched = compute_schedule_features(team_feat)
+    team_with_sched = _compute_postgame_team_features(compute_schedule_features(team_feat))
     t_ev_col = "game_id" if "game_id" in team_with_sched.columns else "event_id"
 
     core_team_cols = [
@@ -370,6 +433,67 @@ def build_stage1_game_features(
     matchup = elo_df.join(home_team_lookup, on=[event_col, "home_team"], how="left").join(
         away_team_lookup, on=[event_col, "away_team"], how="left"
     )
+
+    # For upcoming FUT games missing from team_game_logs, backfill via causal backward join_asof
+    if not team_with_sched.is_empty():
+        asof_source = team_with_sched.sort("start_time_utc").select(
+            [
+                pl.col("start_time_utc"),
+                pl.col("team"),
+                pl.col("_post_xgf_pct_5v5_w10").alias("xgf_pct_5v5_w10"),
+                pl.col("xgf_pct_5v5_ewma"),
+                pl.col("_post_xgf_per_60_5v5_w10").alias("xgf_per_60_5v5_w10"),
+                pl.col("_post_xga_per_60_5v5_w10").alias("xga_per_60_5v5_w10"),
+                pl.col("_post_cf_pct_5v5_w10").alias("cf_pct_5v5_w10"),
+                pl.col("_post_ff_pct_5v5_w10").alias("ff_pct_5v5_w10"),
+                pl.col("_post_hd_xgf_pct_5v5_w10").alias("hd_xgf_pct_5v5_w10"),
+                pl.col("pdo_5v5_w10"),
+                pl.col("pdo_regression_signal"),
+                pl.col("finishing_above_xg_w10"),
+                pl.col("pp_xgf_per_60"),
+                pl.col("pk_xga_per_60"),
+                pl.col("pp_pct_w10"),
+                pl.col("pk_pct_w10"),
+                pl.col("pp_draw_rate"),
+            ]
+        )
+        asof_cols = [c for c in asof_source.columns if c not in {"start_time_utc", "team"}]
+        matchup = (
+            matchup.sort("start_time_utc")
+            .join_asof(
+                asof_source.rename({"team": "home_team", **{c: f"_asof_{c}_home" for c in asof_cols}}),
+                on="start_time_utc",
+                by="home_team",
+                strategy="backward",
+            )
+            .join_asof(
+                asof_source.rename({"team": "away_team", **{c: f"_asof_{c}_away" for c in asof_cols}}),
+                on="start_time_utc",
+                by="away_team",
+                strategy="backward",
+            )
+        )
+        fill_exprs: list[pl.Expr] = []
+        for c in asof_cols:
+            for side in ("home", "away"):
+                col_s = f"{c}_{side}"
+                asof_s = f"_asof_{c}_{side}"
+                if col_s in matchup.columns and asof_s in matchup.columns:
+                    fill_exprs.append(pl.col(col_s).fill_null(pl.col(asof_s)).alias(col_s))
+        matchup = (
+            matchup.with_columns(fill_exprs)
+            .drop([f"_asof_{c}_{side}" for c in asof_cols for side in ("home", "away")])
+            .with_columns(
+                pl.col("rest_days_home").fill_null(2),
+                pl.col("rest_days_away").fill_null(2),
+                pl.col("is_b2b_home").fill_null(False),
+                pl.col("is_b2b_away").fill_null(False),
+                pl.col("games_last_4d_home").fill_null(2),
+                pl.col("games_last_4d_away").fill_null(2),
+                pl.col("games_last_6d_home").fill_null(3),
+                pl.col("games_last_6d_away").fill_null(3),
+            )
+        )
 
     if goalie_game_logs is not None and not goalie_game_logs.is_empty():
         g_feat = resolve_team_starting_goalie_features(

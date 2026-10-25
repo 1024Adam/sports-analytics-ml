@@ -57,6 +57,39 @@ def _ensure_supported_sport(sport: str) -> str:
     return slug
 
 
+def _fetch_missing_boxscores(
+    nhl_client: NHLWebAPIClient,
+    games_df: pl.DataFrame,
+    existing_boxscore_ids: set[int],
+    *,
+    max_games_per_run: int | None = None,
+) -> tuple[list[pl.DataFrame], list[pl.DataFrame], list[pl.DataFrame]]:
+    """Fetch and parse boxscores for completed FINAL games not yet cached."""
+    final_ids = [
+        int(gid)
+        for gid in games_df.filter(pl.col("game_state") == "FINAL")["game_id"].to_list()
+        if int(gid) not in existing_boxscore_ids
+    ]
+    if max_games_per_run is not None:
+        final_ids = final_ids[-max_games_per_run:]
+
+    team_frames: list[pl.DataFrame] = []
+    skater_frames: list[pl.DataFrame] = []
+    goalie_frames: list[pl.DataFrame] = []
+
+    for gid in final_ids:
+        box = nhl_client.fetch_game_boxscore(gid)
+        t_df, s_df, g_df = parse_boxscore_payload(box)
+        team_frames.append(t_df)
+        if not s_df.is_empty():
+            skater_frames.append(s_df)
+        if not g_df.is_empty():
+            goalie_frames.append(g_df)
+        existing_boxscore_ids.add(gid)
+
+    return team_frames, skater_frames, goalie_frames
+
+
 def _run_hockey_ingestion(
     settings: Settings,
     *,
@@ -65,6 +98,7 @@ def _run_hockey_ingestion(
     start_date: str | None = None,
     end_date: str | None = None,
     offline: bool = False,
+    max_boxscores: int | None = 120,
 ) -> pl.DataFrame:
     """Execute hybrid NHL Web API + MoneyPuck ingestion and reconcile into Silver tables."""
     settings.paths.ensure_dirs(sport="hockey")
@@ -80,6 +114,7 @@ def _run_hockey_ingestion(
     team_frames: list[pl.DataFrame] = []
     skater_frames: list[pl.DataFrame] = []
     goalie_frames: list[pl.DataFrame] = []
+    seen_boxscore_ids: set[int] = set()
 
     # 1. Process any pre-cached JSON schedules/boxscores in data/raw/nhl_api/
     schedules_dir = raw_nhl_dir / "schedules"
@@ -95,13 +130,15 @@ def _run_hockey_ingestion(
         for box_file in sorted(boxscores_dir.glob("*.json")):
             payload = json.loads(box_file.read_text(encoding="utf-8"))
             t_df, s_df, g_df = parse_boxscore_payload(payload)
+            seen_boxscore_ids.add(int(payload["id"]))
             team_frames.append(t_df)
             if not s_df.is_empty():
                 skater_frames.append(s_df)
             if not g_df.is_empty():
                 goalie_frames.append(g_df)
 
-    # 2. If online and date range or current_season requested, query live endpoints
+    # 2. If online and date range, seasons, or current_season requested, query live endpoints
+    season_start_years: set[int] = set()
     if not offline and (start_date or end_date or current_season or seasons):
         if start_date and end_date:
             s_dt = date.fromisoformat(start_date)
@@ -109,24 +146,112 @@ def _run_hockey_ingestion(
             range_games = nhl_client.fetch_date_range_games(s_dt, e_dt)
             if not range_games.is_empty():
                 schedule_frames.append(range_games)
-                for gid in range_games.filter(pl.col("game_state") == "FINAL")["game_id"].to_list():
-                    box = nhl_client.fetch_game_boxscore(int(gid))
-                    t_df, s_df, g_df = parse_boxscore_payload(box)
-                    team_frames.append(t_df)
-                    skater_frames.append(s_df)
-                    goalie_frames.append(g_df)
-        elif current_season:
-            today = datetime.now(tz=UTC).date()
-            s_dt = today - timedelta(days=7)
-            range_games = nhl_client.fetch_date_range_games(s_dt, today)
-            if not range_games.is_empty():
-                schedule_frames.append(range_games)
+                for s_val in range_games["season"].unique().to_list():
+                    season_start_years.add(int(str(s_val)[:4]))
+                t_f, s_f, g_f = _fetch_missing_boxscores(
+                    nhl_client,
+                    range_games,
+                    seen_boxscore_ids,
+                    max_games_per_run=max_boxscores,
+                )
+                team_frames.extend(t_f)
+                skater_frames.extend(s_f)
+                goalie_frames.extend(g_f)
 
-    # 3. Load any cached MoneyPuck CSVs under data/raw/moneypuck/
+        if seasons:
+            active_s = derive_active_nhl_season()
+            for raw_s in seasons.split(","):
+                cleaned_s = raw_s.strip()
+                if not cleaned_s:
+                    continue
+                season_int = (
+                    int(cleaned_s)
+                    if len(cleaned_s) == 8
+                    else int(f"{cleaned_s}{int(cleaned_s) + 1}")
+                )
+                start_yr = int(str(season_int)[:4])
+                season_start_years.add(start_yr)
+                # Fetch initial 3 weeks of regular season to seed schedule + boxscores quickly,
+                # or full club schedules as requested
+                s_open = date(start_yr, 10, 7)
+                s_end = min(date(start_yr, 10, 28), datetime.now(tz=UTC).date())
+                if s_open <= s_end:
+                    s_games = nhl_client.fetch_date_range_games(s_open, s_end)
+                    if not s_games.is_empty():
+                        schedule_frames.append(s_games)
+                        t_f, s_f, g_f = _fetch_missing_boxscores(
+                            nhl_client,
+                            s_games,
+                            seen_boxscore_ids,
+                            max_games_per_run=max_boxscores,
+                        )
+                        team_frames.extend(t_f)
+                        skater_frames.extend(s_f)
+                        goalie_frames.extend(g_f)
+                elif season_int < active_s:
+                    club_sched = nhl_client.fetch_club_schedule_season(
+                        "BOS", season_int, is_active_season=False
+                    )
+                    c_games = parse_schedule_payload(club_sched)
+                    if not c_games.is_empty():
+                        schedule_frames.append(c_games)
+                        t_f, s_f, g_f = _fetch_missing_boxscores(
+                            nhl_client,
+                            c_games,
+                            seen_boxscore_ids,
+                            max_games_per_run=max_boxscores,
+                        )
+                        team_frames.extend(t_f)
+                        skater_frames.extend(s_f)
+                        goalie_frames.extend(g_f)
+
+        if current_season:
+            now_payload = nhl_client.fetch_schedule_now()
+            now_games = parse_schedule_payload(now_payload)
+            today = datetime.now(tz=UTC).date()
+            s_dt = today - timedelta(days=14)
+            range_games = nhl_client.fetch_date_range_games(s_dt, today)
+            combined_curr = (
+                pl.concat([now_games, range_games], how="vertical")
+                if not now_games.is_empty() and not range_games.is_empty()
+                else (range_games if not range_games.is_empty() else now_games)
+            )
+            if not combined_curr.is_empty():
+                schedule_frames.append(combined_curr)
+                for s_val in combined_curr["season"].unique().to_list():
+                    season_start_years.add(int(str(s_val)[:4]))
+                t_f, s_f, g_f = _fetch_missing_boxscores(
+                    nhl_client,
+                    combined_curr,
+                    seen_boxscore_ids,
+                    max_games_per_run=max_boxscores,
+                )
+                team_frames.extend(t_f)
+                skater_frames.extend(s_f)
+                goalie_frames.extend(g_f)
+
+    # 3. Load cached MoneyPuck CSVs (and download live if online and season_start_years known)
     mp_teams_list: list[pl.DataFrame] = []
     mp_skaters_list: list[pl.DataFrame] = []
     mp_goalies_list: list[pl.DataFrame] = []
-    if raw_mp_dir.exists():
+
+    if not offline and season_start_years:
+        active_yr = int(str(derive_active_nhl_season())[:4])
+        for yr in sorted(season_start_years):
+            is_act = yr == active_yr
+            try:
+                mp_teams_list.append(mp_client.load_team_game_stats(yr, is_active_season=is_act))
+                mp_skaters_list.append(
+                    mp_client.load_skater_game_stats(yr, is_active_season=is_act)
+                )
+                mp_goalies_list.append(
+                    mp_client.load_goalie_game_stats(yr, is_active_season=is_act)
+                )
+            except Exception:
+                # Graceful fallback if MoneyPuck has not published the current/future season ZIP yet
+                pass
+
+    if raw_mp_dir.exists() and not mp_teams_list:
         for t_csv in sorted(raw_mp_dir.glob("teams_*.csv")):
             season_yr = int(t_csv.stem.split("_")[1])
             mp_teams_list.append(
@@ -321,7 +446,17 @@ def train_command(
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 
-    # Auto-build/update Gold feature tables from Silver data
+    # Auto-build/update Gold feature tables from Silver data (auto-ingesting if Silver is missing)
+    silver_dir = settings.paths.silver_dir / "hockey"
+    if (
+        not (silver_dir / "games.parquet").exists()
+        or not (silver_dir / "team_game_logs.parquet").exists()
+    ):
+        console.print(
+            "[yellow]Silver tables incomplete — running incremental ingestion first...[/yellow]"
+        )
+        _run_hockey_ingestion(settings, seasons="20242025", current_season=True, max_boxscores=40)
+
     s1_df, s2_df, team_feat_df, goalie_feat_df = build_and_persist_gold_features(settings)
     completed_s1 = s1_df.filter(pl.col("home_win").is_not_null())
     if completed_s1.is_empty():
@@ -485,6 +620,7 @@ def predict_command(
         target_date,
         include_players=include_players,
         matchup_filter=matchup,
+        offline=offline,
         persist_ledger=True,
     )
     _render_predictions(predictions)

@@ -8,15 +8,18 @@ Fallback: Active roster most recent lineup + primary non-B2B starter (`PROJECTED
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections.abc import Sequence
-from typing import Any, Literal
+from datetime import date
+from typing import Any, Final, Literal
 
+import httpx
 import polars as pl
 from pydantic import BaseModel, ConfigDict
 
-from sports_ml.sports.hockey.constants import normalize_tricode
+from sports_ml.sports.hockey.constants import NHL_TEAMS_32, normalize_tricode
 from sports_ml.sports.hockey.ingestion.nhl_api import parse_roster_payload
 
 GoalieConfirmationStatus = Literal[
@@ -25,6 +28,75 @@ GoalieConfirmationStatus = Literal[
     "EXPECTED_MORNING_SKATE",
     "PROJECTED_HEURISTIC",
 ]
+
+DAILYFACEOFF_STARTING_GOALIES_URL: Final[str] = "https://www.dailyfaceoff.com/starting-goalies"
+_TEAM_NAME_TO_TRICODE: Final[dict[str, str]] = {
+    meta.team_name.lower(): code for code, meta in NHL_TEAMS_32.items()
+} | {
+    "utah hockey club": "UTA",
+    "utah mammoth": "UTA",
+    "arizona coyotes": "UTA",
+    "montreal canadiens": "MTL",
+    "st. louis blues": "STL",
+    "st louis blues": "STL",
+}
+
+
+def fetch_dailyfaceoff_starting_goalies(
+    target_date: date,
+    *,
+    timeout_seconds: float = 15.0,
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch DailyFaceoff `__NEXT_DATA__` starting goalies for `target_date` keyed by tricode."""
+    url = f"{DAILYFACEOFF_STARTING_GOALIES_URL}/{target_date.isoformat()}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        with httpx.Client(
+            timeout=timeout_seconds,
+            follow_redirects=True,
+            transport=transport,
+            headers=headers,
+        ) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            html = resp.text
+    except Exception:
+        return {}
+
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+    )
+    if not match:
+        return {}
+
+    try:
+        payload = json.loads(match.group(1))
+        items = payload.get("props", {}).get("pageProps", {}).get("data", [])
+    except Exception:
+        return {}
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for item in items:
+        for side_prefix in ("home", "away"):
+            raw_team_name = str(item.get(f"{side_prefix}TeamName") or "").strip().lower()
+            team_code = _TEAM_NAME_TO_TRICODE.get(raw_team_name)
+            if not team_code:
+                continue
+            goalie_name = str(item.get(f"{side_prefix}GoalieName") or "").strip()
+            strength = str(item.get(f"{side_prefix}NewsStrengthName") or "Expected").strip()
+            if goalie_name:
+                resolved[team_code] = {
+                    "starting_goalie_name": goalie_name,
+                    "goalie_status": strength,
+                }
+    return resolved
 
 
 class ResolvedTeamLineup(BaseModel):

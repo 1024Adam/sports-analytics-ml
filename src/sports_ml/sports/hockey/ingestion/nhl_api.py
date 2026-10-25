@@ -256,6 +256,9 @@ def parse_boxscore_payload(
                 toi_total = parse_toi_minutes(p.get("toi"))
                 toi_pp = parse_toi_minutes(p.get("powerPlayToi"))
                 toi_pk = parse_toi_minutes(p.get("shorthandedToi"))
+                pp_g = int(p.get("powerPlayGoals", 0))
+                if toi_pp == 0.0 and pp_g > 0 and toi_total > 0.0:
+                    toi_pp = min(toi_total * 0.20, 3.5)
                 toi_ev = max(0.0, toi_total - toi_pp - toi_pk)
 
                 goals = int(p.get("goals", 0))

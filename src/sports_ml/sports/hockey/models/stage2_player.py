@@ -261,21 +261,25 @@ class Stage2PlayerProjectionModel:
         self._toi_ev_model = self._make_regressor(n_rows, objective="regression")
         self._toi_ev_model.fit(x_train, y_toi_ev)
 
-        self._toi_pp_model = self._make_regressor(n_rows, objective="tweedie")
+        pp_objective = "tweedie" if float(np.sum(y_toi_pp)) > 0.0 else "regression"
+        self._toi_pp_model = self._make_regressor(n_rows, objective=pp_objective)
         self._toi_pp_model.fit(x_train, y_toi_pp)
 
+        sog_obj = "poisson" if float(np.sum(y_sog)) > 0.0 else "regression"
         self._sog_model = self._make_regressor(
-            n_rows, objective="poisson", monotone_constraints=scoring_constraints
+            n_rows, objective=sog_obj, monotone_constraints=scoring_constraints
         )
         self._sog_model.fit(x_train, y_sog)
 
+        goals_obj = "poisson" if float(np.sum(y_goals)) > 0.0 else "regression"
         self._goals_model = self._make_regressor(
-            n_rows, objective="poisson", monotone_constraints=scoring_constraints
+            n_rows, objective=goals_obj, monotone_constraints=scoring_constraints
         )
         self._goals_model.fit(x_train, y_goals)
 
+        assists_obj = "poisson" if float(np.sum(y_assists)) > 0.0 else "regression"
         self._assists_model = self._make_regressor(
-            n_rows, objective="poisson", monotone_constraints=scoring_constraints
+            n_rows, objective=assists_obj, monotone_constraints=scoring_constraints
         )
         self._assists_model.fit(x_train, y_assists)
 

@@ -148,14 +148,22 @@ sports-analytics-ml/
 │   │   ├── sports-ml-architect.agent.md
 │   │   └── sports-ml-developer.agent.md
 │   ├── skills/
+│   │   ├── evaluate-and-score/
+│   │   │   └── SKILL.md             # /evaluate-and-score backtest & live ledger scoring
 │   │   ├── implement-milestone/
 │   │   │   └── SKILL.md             # /implement-milestone workflow & quality gate
+│   │   ├── ingest-data/
+│   │   │   └── SKILL.md             # /ingest-data NHL API & MoneyPuck Silver sync
 │   │   ├── leak-free-feature-audit/
 │   │   │   └── SKILL.md             # /leak-free-feature-audit rules & pytest template
 │   │   ├── nhl-data-integration/
 │   │   │   └── SKILL.md             # NHL Web API v1, MoneyPuck & 2-Tier lineup specs
-│   │   └── onboard-sport-plugin/
-│   │       └── SKILL.md             # Playbook for adding MLB Baseball & PGA Golf plugins
+│   │   ├── onboard-sport-plugin/
+│   │   │   └── SKILL.md             # Playbook for adding MLB Baseball & PGA Golf plugins
+│   │   ├── predict-matchup/
+│   │   │   └── SKILL.md             # /predict-matchup Stage 1 & Stage 2 CLI workflow
+│   │   └── train-models/
+│   │       └── SKILL.md             # /train-models Gold feature build & model bundle fit
 │   └── workflows/
 │       └── ci.yml                   # Fast offline CI gate (ruff, mypy, pytest)
 ├── docs/

@@ -77,6 +77,22 @@ full_pred = predictor.predict_matchup(
 
 ---
 
+## Copilot Slash-Command Skills (`.github/skills/`)
+
+### Run-Action Skills
+- `/predict-matchup` ([SKILL.md](./.github/skills/predict-matchup/SKILL.md)): Run `sports-ml predict` for a slate date or specific `AWAY@HOME` matchup, optionally with `--include-players` (Stage 2) or `--offline`.
+- `/ingest-data` ([SKILL.md](./.github/skills/ingest-data/SKILL.md)): Run `sports-ml ingest` for `--current-season`, `--start-date`/`--end-date`, `--seasons`, or `--offline` Silver Parquet reconciliation.
+- `/train-models` ([SKILL.md](./.github/skills/train-models/SKILL.md)): Run `sports-ml features build` and `sports-ml train` (`--include-stage2`) and inspect `metadata.json` SHA-256 schema fingerprints.
+- `/evaluate-and-score` ([SKILL.md](./.github/skills/evaluate-and-score/SKILL.md)): Run walk-forward `sports-ml backtest` and score the live `data/predictions/` audit ledger (`sports-ml score-predictions`).
+
+### Engineering & Architecture Skills
+- `/implement-milestone` ([SKILL.md](./.github/skills/implement-milestone/SKILL.md)): Execute and verify roadmap milestones.
+- `/leak-free-feature-audit` ([SKILL.md](./.github/skills/leak-free-feature-audit/SKILL.md)): Audit temporal window functions and run future-mutation invariance tests.
+- `/nhl-data-integration` ([SKILL.md](./.github/skills/nhl-data-integration/SKILL.md)): Reference for Official NHL Web API v1, MoneyPuck CSV/ZIPs, and 2-Tier pre-game lineups.
+- `/onboard-sport-plugin` ([SKILL.md](./.github/skills/onboard-sport-plugin/SKILL.md)): Playbook for adding MLB Baseball or PGA Golf plugins.
+
+---
+
 ## Quality Gate & Anti-Leakage Verification
 ```bash
 uv run ruff check .
