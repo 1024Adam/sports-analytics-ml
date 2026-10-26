@@ -2,17 +2,21 @@
 
 A modular, leak-free, multi-sport machine learning platform built in **Python 3.11+** using **Polars**, **PyArrow**, **Pydantic**, **LightGBM**, **scikit-learn**, and **Typer/Rich**.
 
-Starting with **NHL Hockey**, the platform ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`) and **MoneyPuck**, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
-
-1. **Stage 1 — Mandatory Calibrated Game Outcome Model**: Produces calibrated win probabilities $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$, alongside expected team scoring pace $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
-2. **Stage 2 — Optional Player Matchup Stat Projections**: Conditioned on Stage 1's game environment and opponent strength, predicts skater usage ($\widehat{\text{TOI}}_{\text{ev}}, \widehat{\text{TOI}}_{\text{pp}}$), counting stats ($E[\text{G}], E[\text{A}], E[\text{PTS}], E[\text{SOG}]$), milestone probabilities ($P(\text{G} \ge 1), P(\text{PTS} \ge 1)$), and goalie metrics ($E[\text{SA}], E[\text{SV}], E[\text{GA}], E[\text{SV\%}]$) reconciled via damped proportional scaling ($\gamma = 0.50$).
+Supports **NHL Hockey (`--sport hockey`)** and **English Premier League (EPL) Soccer (`--sport soccer`)**:
+- **NHL Hockey**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`) and **MoneyPuck**, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
+  1. **Stage 1 — Mandatory Calibrated Game Outcome Model**: Produces calibrated win probabilities $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$, alongside expected team scoring pace $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
+  2. **Stage 2 — Optional Player Matchup Stat Projections**: Conditioned on Stage 1's game environment and opponent strength, predicts skater usage ($\widehat{\text{TOI}}_{\text{ev}}, \widehat{\text{TOI}}_{\text{pp}}$), counting stats ($E[\text{G}], E[\text{A}], E[\text{PTS}], E[\text{SOG}]$), milestone probabilities ($P(\text{G} \ge 1), P(\text{PTS} \ge 1)$), and goalie metrics ($E[\text{SA}], E[\text{SV}], E[\text{GA}], E[\text{SV\%}]$) reconciled via damped proportional scaling ($\gamma = 0.50$).
+- **EPL Soccer**: Ingests fixtures, squad availability/set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**, and executes:
+  1. **Stage 1 — Mandatory Calibrated 3-Way (`1X2`) & Goals Environment Model**: Combines 3-way Elo (with promotion/relegation priors), Dixon-Coles bivariate Poisson low-score correlation ($\rho$), and Multiclass LightGBM to produce calibrated probabilities $P(\text{Home Win}) + P(\text{Draw}) + P(\text{Away Win}) = 1.0$ and expected goals $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$, evaluated via **Ranked Probability Score (RPS)**, 3-class Log Loss, and Brier Score.
+  2. **Stage 2 — Optional Outfield & Goalkeeper Projections**: Projects outfield player minutes ($\in [0, 90]$), goals, assists, goal involvements ($G+A$), shots, SOT, milestone probabilities, and goalkeeper saves, goals against, save %, and clean-sheet probability $P(\text{CS})$.
 
 ---
 
 ## Documentation
 
 - [System Architecture Blueprint](./docs/architecture.md)
-- [Data Contracts & Feature Specification](./docs/data-and-features.md)
+- [NHL Data Contracts & Feature Specification](./docs/data-and-features.md)
+- [EPL Soccer Data Contracts & Feature Specification](./docs/soccer-data-and-features.md)
 - [Phased Implementation Roadmap](./docs/roadmap.md)
 
 ---
@@ -39,6 +43,16 @@ uv run sports-ml predict --sport hockey --date 2026-10-25
 
 # 4. Predict a specific matchup with Stage 2 Player Stat Projections (broken down by team & F/D/G)
 uv run sports-ml predict --sport hockey --date 2026-10-25 --matchup TOR@BOS --include-players
+
+# --- EPL Soccer (--sport soccer) ---
+# 1. Backfill historical & active EPL seasons (FPL + Understat + Football-Data)
+uv run sports-ml ingest --sport soccer --seasons 20232024,20242025,20252026 --current-season
+
+# 2. Train Stage 1 (3-Way 1X2 + Goals) and Stage 2 (Outfield & GK Projections)
+uv run sports-ml train --sport soccer --include-stage2
+
+# 3. Predict an EPL matchweek or specific matchup with Stage 2 Outfield & GK Projections
+uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --include-players
 ```
 
 ### 3. Developer & Audit Commands

@@ -13,7 +13,10 @@ from rich.console import Console
 from rich.table import Table
 
 from sports_ml.config import RANDOM_SEED, Settings, get_settings
-from sports_ml.core.evaluation import evaluate_probabilities
+from sports_ml.core.evaluation import (
+    evaluate_multiclass_probabilities,
+    evaluate_probabilities,
+)
 from sports_ml.core.registry import ModelRegistry
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
 from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
@@ -36,6 +39,31 @@ from sports_ml.sports.hockey.models.stage1_game import (
     run_stage1_walk_forward_backtest,
 )
 from sports_ml.sports.hockey.models.stage2_player import Stage2PlayerProjectionModel
+from sports_ml.sports.soccer.features.player import build_soccer_stage2_player_features
+from sports_ml.sports.soccer.ingestion import (
+    FootballDataClient,
+    FPLAPIClient,
+    SoccerSilverReconciler,
+    UnderstatClient,
+    check_soccer_data_sources,
+    derive_active_epl_season,
+    parse_bootstrap_squad_df,
+    parse_bootstrap_teams_map,
+    parse_element_summary_payload,
+    parse_fixtures_payload,
+    parse_football_data_csv,
+    parse_understat_player_matches_payload,
+    parse_understat_team_matches_payload,
+)
+from sports_ml.sports.soccer.models import (
+    SoccerMatchupPrediction,
+    SoccerMatchupPredictor,
+    Stage1SoccerMatchModel,
+    Stage2SoccerPlayerModel,
+    build_and_persist_soccer_gold_features,
+    run_soccer_stage1_walk_forward_backtest,
+    score_soccer_prediction_ledger,
+)
 
 app = typer.Typer(
     name="sports-ml",
@@ -54,8 +82,10 @@ console = Console()
 
 def _ensure_supported_sport(sport: str) -> str:
     slug = sport.strip().lower()
-    if slug != "hockey":
-        raise typer.BadParameter(f"Unsupported sport '{sport}'. Currently active plugin: 'hockey'.")
+    if slug not in {"hockey", "soccer"}:
+        raise typer.BadParameter(
+            f"Unsupported sport '{sport}'. Active plugins: 'hockey', 'soccer'."
+        )
     return slug
 
 
@@ -322,11 +352,188 @@ def _run_hockey_ingestion(
     return pl.DataFrame()
 
 
+def _run_soccer_ingestion(
+    settings: Settings,
+    *,
+    seasons: str | None = None,
+    current_season: bool = False,
+    offline: bool = False,
+    max_player_summaries: int = 80,
+) -> pl.DataFrame:
+    """Execute hybrid FPL + Understat + Football-Data ingestion and reconcile into Silver tables."""
+    import numpy as np
+
+    settings.paths.ensure_dirs(sport="soccer")
+    raw_fpl_dir = settings.paths.raw_dir / "fpl_api"
+    raw_us_dir = settings.paths.raw_dir / "understat"
+    raw_fd_dir = settings.paths.raw_dir / "football_data"
+    silver_dir = settings.paths.silver_dir / "soccer"
+
+    reconciler = SoccerSilverReconciler(silver_dir=silver_dir)
+    fpl_client = FPLAPIClient(cache_dir=raw_fpl_dir)
+    us_client = UnderstatClient(cache_dir=raw_us_dir)
+    fd_client = FootballDataClient(cache_dir=raw_fd_dir)
+
+    active_season = derive_active_epl_season()
+    target_seasons: set[int] = set()
+    if seasons:
+        for raw_s in seasons.split(","):
+            cleaned_s = raw_s.strip()
+            if not cleaned_s:
+                continue
+            s_int = (
+                int(cleaned_s) if len(cleaned_s) == 8 else int(f"{cleaned_s}{int(cleaned_s) + 1}")
+            )
+            target_seasons.add(s_int)
+    if current_season or not target_seasons:
+        target_seasons.add(active_season)
+
+    match_frames: list[pl.DataFrame] = []
+    fd_box_frames: list[pl.DataFrame] = []
+    us_team_frames: list[pl.DataFrame] = []
+    us_player_frames: list[pl.DataFrame] = []
+    outfield_frames: list[pl.DataFrame] = []
+    gk_frames: list[pl.DataFrame] = []
+
+    # 1. Process pre-cached Football-Data CSVs and Understat JSONs
+    if raw_fd_dir.exists():
+        for csv_path in sorted(raw_fd_dir.glob("E0_*.csv")):
+            code = csv_path.stem.split("_")[1]
+            start_yr = 2000 + int(code[:2])
+            s_int = int(f"{start_yr}{start_yr + 1}")
+            m_df, b_df = parse_football_data_csv(csv_path.read_text(encoding="utf-8"), season=s_int)
+            if not m_df.is_empty():
+                match_frames.append(m_df)
+            if not b_df.is_empty():
+                fd_box_frames.append(b_df)
+
+    if raw_us_dir.exists():
+        for us_path in sorted(raw_us_dir.glob("epl_teams_*.json")):
+            start_yr = int(us_path.stem.split("_")[-1])
+            s_int = int(f"{start_yr}{start_yr + 1}")
+            payload = json.loads(us_path.read_text(encoding="utf-8"))
+            us_df = parse_understat_team_matches_payload(payload, season=s_int)
+            if not us_df.is_empty():
+                us_team_frames.append(us_df)
+        for usp_path in sorted(raw_us_dir.glob("epl_players_*.json")):
+            start_yr = int(usp_path.stem.split("_")[-1])
+            s_int = int(f"{start_yr}{start_yr + 1}")
+            payload = json.loads(usp_path.read_text(encoding="utf-8"))
+            usp_df = parse_understat_player_matches_payload(payload, season=s_int)
+            if not usp_df.is_empty():
+                us_player_frames.append(usp_df)
+
+    # 2. Process pre-cached FPL bootstrap, fixtures, and element summaries
+    bootstrap_path = raw_fpl_dir / "bootstrap_static.json"
+    fixtures_path = raw_fpl_dir / "fixtures.json"
+    teams_map: dict[int, str] = {}
+    squad_df = pl.DataFrame()
+
+    if bootstrap_path.exists():
+        bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
+        teams_map = parse_bootstrap_teams_map(bootstrap)
+        squad_df = parse_bootstrap_squad_df(bootstrap)
+
+    if fixtures_path.exists() and teams_map:
+        fixtures_raw = json.loads(fixtures_path.read_text(encoding="utf-8"))
+        fx_df = parse_fixtures_payload(fixtures_raw, teams_map, season=active_season)
+        if not fx_df.is_empty():
+            match_frames.append(fx_df)
+
+    # 3. Live network fetches when online
+    if not offline:
+        for s_int in sorted(target_seasons):
+            is_act = s_int >= active_season
+            with contextlib.suppress(Exception):
+                m_df, b_df = fd_client.fetch_season_csv(s_int, is_active_season=is_act)
+                if not m_df.is_empty():
+                    match_frames.append(m_df)
+                if not b_df.is_empty():
+                    fd_box_frames.append(b_df)
+            with contextlib.suppress(Exception):
+                us_df = us_client.fetch_season_team_matches(s_int)
+                if not us_df.is_empty():
+                    us_team_frames.append(us_df)
+
+        with contextlib.suppress(Exception):
+            bootstrap = fpl_client.fetch_bootstrap_static()
+            teams_map = parse_bootstrap_teams_map(bootstrap)
+            squad_df = parse_bootstrap_squad_df(bootstrap)
+            fixtures_raw = fpl_client.fetch_fixtures()
+            fx_df = parse_fixtures_payload(fixtures_raw, teams_map, season=active_season)
+            if not fx_df.is_empty():
+                match_frames.append(fx_df)
+
+            if not squad_df.is_empty():
+                top_players = squad_df.sort("season_minutes", descending=True).head(
+                    max_player_summaries
+                )
+                for p_row in top_players.iter_rows(named=True):
+                    pid = int(p_row["player_id"])
+                    with contextlib.suppress(Exception):
+                        fpl_client.fetch_element_summary(pid)
+
+    # Parse any cached element summaries
+    summaries_dir = raw_fpl_dir / "element_summaries"
+    if summaries_dir.exists() and not squad_df.is_empty() and teams_map:
+        p_lookup = {
+            int(r["player_id"]): (str(r["player_name"]), str(r["team"]), str(r["position_group"]))
+            for r in squad_df.iter_rows(named=True)
+        }
+        for sum_file in sorted(summaries_dir.glob("*.json")):
+            pid = int(sum_file.stem)
+            if pid not in p_lookup:
+                continue
+            p_name, t_code, pos_grp = p_lookup[pid]
+            sum_payload = json.loads(sum_file.read_text(encoding="utf-8"))
+            out_df, g_df = parse_element_summary_payload(
+                pid, p_name, t_code, pos_grp, sum_payload, teams_map, season=active_season
+            )
+            if not out_df.is_empty():
+                outfield_frames.append(out_df)
+            if not g_df.is_empty():
+                gk_frames.append(g_df)
+
+    reconciled_matches: pl.DataFrame | None = None
+    if match_frames:
+        reconciled_matches = reconciler.reconcile_matches(pl.concat(match_frames, how="vertical"))
+    elif reconciler.matches_path.exists():
+        reconciled_matches = pl.read_parquet(reconciler.matches_path)
+
+    fd_box_all = pl.concat(fd_box_frames, how="vertical") if fd_box_frames else None
+    us_team_all = pl.concat(us_team_frames, how="vertical") if us_team_frames else None
+    us_player_all = pl.concat(us_player_frames, how="vertical") if us_player_frames else None
+
+    team_logs_df: pl.DataFrame | None = None
+    if reconciled_matches is not None and not reconciled_matches.is_empty():
+        team_logs_df = reconciler.reconcile_team_match_logs(
+            reconciled_matches,
+            football_data_box_df=fd_box_all,
+            understat_teams_df=us_team_all,
+        )
+
+    if outfield_frames:
+        reconciler.reconcile_outfield_match_logs(
+            pl.concat(outfield_frames, how="vertical"),
+            understat_players_df=us_player_all,
+        )
+    if gk_frames:
+        reconciler.reconcile_gk_match_logs(
+            pl.concat(gk_frames, how="vertical"),
+            team_logs_df=team_logs_df,
+        )
+
+    _ = np
+    if reconciler.matches_path.exists():
+        return pl.read_parquet(reconciler.matches_path)
+    return pl.DataFrame()
+
+
 @app.command("ingest")
 def ingest_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
     seasons: Annotated[
         str | None,
         typer.Option("--seasons", help="Comma-separated season IDs (e.g., 20232024,20242025)."),
@@ -351,6 +558,20 @@ def ingest_command(
     """Download, cache, and reconcile raw sport feeds into Silver Parquet tables."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+    if slug == "soccer":
+        active_season = derive_active_epl_season()
+        matches_df = _run_soccer_ingestion(
+            settings,
+            seasons=seasons,
+            current_season=current_season,
+            offline=offline,
+        )
+        console.print(
+            f"[bold green]Ingestion complete[/bold green] for sport='{slug}' "
+            f"(active_season={active_season}, silver_matches={matches_df.height})."
+        )
+        return
+
     active_season = derive_active_nhl_season()
     games_df = _run_hockey_ingestion(
         settings,
@@ -368,14 +589,17 @@ def ingest_command(
 
 @features_app.command("build")
 def features_build_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
 ) -> None:
     """Recompute leak-free pre-game Gold feature tables from local Silver Parquet data."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
-    s1_df, s2_df, _, _ = build_and_persist_gold_features(settings)
+    if slug == "soccer":
+        s1_df, s2_df, _, _ = build_and_persist_soccer_gold_features(settings)
+    else:
+        s1_df, s2_df, _, _ = build_and_persist_gold_features(settings)
     console.print(
         f"[bold green]Gold features built[/bold green] for sport='{slug}': "
         f"Stage 1 rows={s1_df.height}, Stage 2 rows={s2_df.height}."
@@ -384,9 +608,9 @@ def features_build_command(
 
 @app.command("backtest")
 def backtest_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
     stage: Annotated[
         str,
         typer.Option("--stage", help="Pipeline stage to evaluate ('1', '2', or 'all')."),
@@ -399,6 +623,66 @@ def backtest_command(
     """Run walk-forward time-series backtesting across historical seasons."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+    if slug == "soccer":
+        s1_df, s2_df, _, _ = build_and_persist_soccer_gold_features(settings)
+        completed_s1 = s1_df.filter(pl.col("outcome_1x2").is_not_null())
+        n_unique_ts = completed_s1["start_time_utc"].n_unique()
+        eff_splits = min(n_splits, max(1, n_unique_ts // 3))
+        val_reserve_groups = max(eff_splits, int(n_unique_ts * 0.3))
+        eff_min_train = max(2, n_unique_ts - val_reserve_groups)
+
+        bt_soccer = run_soccer_stage1_walk_forward_backtest(
+            completed_s1,
+            n_splits=eff_splits,
+            min_train_groups=eff_min_train,
+        )
+        rep_s = bt_soccer.benchmark_report
+        table = Table(title=f"Walk-Forward Backtest ({slug.upper()} 1X2 — Stage {stage})")
+        table.add_column("Benchmark / Model", style="cyan")
+        table.add_column("RPS", justify="right", style="bold green")
+        table.add_column("Log Loss", justify="right")
+        table.add_column("Brier Score", justify="right")
+        table.add_column("ECE", justify="right")
+        table.add_column("Accuracy", justify="right")
+
+        table.add_row(
+            "Stage 1 Calibrated 1X2 Model",
+            f"{rep_s.model.rps:.4f}",
+            f"{rep_s.model.log_loss:.4f}",
+            f"{rep_s.model.brier_score:.4f}",
+            f"{rep_s.model.ece:.4f}",
+            f"{rep_s.model.accuracy:.3f}",
+        )
+        table.add_row(
+            "Empirical EPL Prior (45/24/31)",
+            f"{rep_s.empirical_prior_baseline.rps:.4f}",
+            f"{rep_s.empirical_prior_baseline.log_loss:.4f}",
+            f"{rep_s.empirical_prior_baseline.brier_score:.4f}",
+            f"{rep_s.empirical_prior_baseline.ece:.4f}",
+            f"{rep_s.empirical_prior_baseline.accuracy:.3f}",
+        )
+        table.add_row(
+            "Uniform 1/3 Baseline",
+            f"{rep_s.uniform_baseline.rps:.4f}",
+            f"{rep_s.uniform_baseline.log_loss:.4f}",
+            f"{rep_s.uniform_baseline.brier_score:.4f}",
+            f"{rep_s.uniform_baseline.ece:.4f}",
+            f"{rep_s.uniform_baseline.accuracy:.3f}",
+        )
+        console.print(table)
+
+        if stage in {"2", "all"} and not s2_df.is_empty():
+            s2_soccer_model = Stage2SoccerPlayerModel(random_seed=RANDOM_SEED)
+            s2_soccer_model.fit(s2_df)
+            s2_preds = s2_soccer_model.predict(s2_df)
+            actual_gi = (s2_preds["goals"] + s2_preds["assists"]).cast(pl.Float64)
+            err_arr = (s2_preds["proj_goal_involvements"] - actual_gi).abs().to_numpy()
+            mae_gi = float(err_arr.mean()) if err_arr.size > 0 else 0.0
+            console.print(
+                f"[bold cyan]Stage 2 Outfield Goal Involvements (G+A) MAE[/bold cyan]: {mae_gi:.4f}"
+            )
+        return
+
     s1_df, s2_df, _, _ = build_and_persist_gold_features(settings)
     completed_s1 = s1_df.filter(pl.col("home_win").is_not_null())
 
@@ -457,9 +741,9 @@ def backtest_command(
 
 @app.command("train")
 def train_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
     include_stage2: Annotated[
         bool,
         typer.Option(
@@ -475,6 +759,84 @@ def train_command(
     """Build/refresh Gold features and fit production model artifacts."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+
+    if slug == "soccer":
+        import numpy as np
+
+        silver_dir_s = settings.paths.silver_dir / "soccer"
+        if (
+            not (silver_dir_s / "matches.parquet").exists()
+            or not (silver_dir_s / "team_match_logs.parquet").exists()
+        ):
+            console.print(
+                "[yellow]Soccer Silver tables incomplete — running ingestion first...[/yellow]"
+            )
+            _run_soccer_ingestion(settings, seasons="20242025", current_season=True)
+
+        s1_df, s2_df, team_feat_df, gk_feat_df = build_and_persist_soccer_gold_features(settings)
+        completed_s1 = s1_df.filter(pl.col("outcome_1x2").is_not_null())
+        if completed_s1.is_empty():
+            raise typer.BadParameter(
+                "No completed FINAL matches found in Silver/Gold tables to train on."
+            )
+
+        s1_soccer_model = Stage1SoccerMatchModel(random_seed=RANDOM_SEED)
+        s1_soccer_model.fit(completed_s1)
+        s1_preds = s1_soccer_model.predict(completed_s1)
+
+        probs_mat = np.column_stack(
+            [
+                s1_preds["home_win_prob"].to_numpy(),
+                s1_preds["draw_prob"].to_numpy(),
+                s1_preds["away_win_prob"].to_numpy(),
+            ]
+        )
+        m_metrics = evaluate_multiclass_probabilities(
+            probs_mat,
+            completed_s1["outcome_1x2"].cast(pl.Int64).to_numpy(),
+        )
+
+        s2_soccer_model: Stage2SoccerPlayerModel | None = None
+        s2_soccer_train_df: pl.DataFrame | None = None
+        s2_soccer_cols: list[str] | None = None
+
+        if include_stage2 and not s2_df.is_empty():
+            silver_outfield = pl.read_parquet(silver_dir_s / "outfield_match_logs.parquet")
+            s2_soccer_train_df = build_soccer_stage2_player_features(
+                silver_outfield,
+                team_feat_df,
+                gk_feat_df,
+                stage1_predictions=s1_preds,
+            )
+            s2_soccer_model = Stage2SoccerPlayerModel(random_seed=RANDOM_SEED)
+            s2_soccer_model.fit(s2_soccer_train_df)
+            s2_soccer_cols = s2_soccer_model.feature_columns
+
+        registry = ModelRegistry(artifacts_dir=settings.paths.artifacts_dir)
+        bundle_dir = registry.save_bundle(
+            sport=slug,
+            model_version=version,
+            stage1_model=s1_soccer_model,
+            stage1_train_df=completed_s1,
+            stage1_feature_columns=s1_soccer_model.feature_columns,
+            validation_metrics={
+                "rps": m_metrics.rps,
+                "log_loss": m_metrics.log_loss,
+                "brier_score": m_metrics.brier_score,
+                "ece": m_metrics.ece,
+                "accuracy": m_metrics.accuracy,
+            },
+            stage2_model=s2_soccer_model,
+            stage2_train_df=s2_soccer_train_df,
+            stage2_feature_columns=s2_soccer_cols,
+            update_latest=True,
+        )
+        console.print(
+            f"[bold green]Trained & saved soccer model bundle[/bold green] at '{bundle_dir}' "
+            f"(include_stage2={include_stage2}, rps={m_metrics.rps:.4f}, "
+            f"log_loss={m_metrics.log_loss:.4f})."
+        )
+        return
 
     # Auto-build/update Gold feature tables from Silver data (auto-ingesting if Silver is missing)
     silver_dir = settings.paths.silver_dir / "hockey"
@@ -646,18 +1008,129 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
                 console.print(goalie_table)
 
 
+def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> None:
+    """Render EPL Stage 1 `1X2` and optional Stage 2 projections as Rich terminal tables."""
+    match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
+    match_table.add_column("Date", style="cyan")
+    match_table.add_column("Matchup (Away @ Home)", style="bold")
+    match_table.add_column("P(Away Win)", justify="right", style="yellow")
+    match_table.add_column("P(Draw)", justify="right", style="magenta")
+    match_table.add_column("P(Home Win)", justify="right", style="green")
+    match_table.add_column("E[Away Goals]", justify="right")
+    match_table.add_column("E[Home Goals]", justify="right")
+    match_table.add_column("Lineup Status")
+
+    for pred in predictions:
+        match_table.add_row(
+            pred.match_date.isoformat(),
+            f"{pred.away_team} @ {pred.home_team}",
+            f"{pred.away_win_prob:.1%}",
+            f"{pred.draw_prob:.1%}",
+            f"{pred.home_win_prob:.1%}",
+            f"{pred.expected_away_goals:.2f}",
+            f"{pred.expected_home_goals:.2f}",
+            f"A:{pred.away_lineup_status} / H:{pred.home_lineup_status}",
+        )
+    console.print(match_table)
+
+    for pred in predictions:
+        for warning in pred.warnings:
+            console.print(
+                f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
+            )
+
+        if pred.player_projections is not None:
+            proj = pred.player_projections
+            console.print(
+                f"\n[bold cyan]Stage 2 — EPL Player Projections "
+                f"({pred.away_team} @ {pred.home_team})[/bold cyan]"
+            )
+            team_sections = [
+                (pred.away_team, proj.away_outfield, pred.away_lineup_status),
+                (pred.home_team, proj.home_outfield, pred.home_lineup_status),
+            ]
+            for team_code, outfield_df, lineup_status in team_sections:
+                for pos_code, pos_label in (
+                    ("FWD", "Forwards"),
+                    ("MID", "Midfielders"),
+                    ("DEF", "Defenders"),
+                ):
+                    pos_df = (
+                        outfield_df.filter(pl.col("position_group") == pos_code).sort(
+                            "proj_goal_involvements", descending=True
+                        )
+                        if not outfield_df.is_empty() and "position_group" in outfield_df.columns
+                        else pl.DataFrame()
+                    )
+                    pos_table = Table(title=f"{team_code} — {pos_label} ({pos_df.height})")
+                    pos_table.add_column("Player", no_wrap=True)
+                    pos_table.add_column("Pos", style="cyan")
+                    pos_table.add_column("E[Min]", justify="right")
+                    pos_table.add_column("E[G]", justify="right")
+                    pos_table.add_column("E[A]", justify="right")
+                    pos_table.add_column("E[G+A]", justify="right", style="bold green")
+                    pos_table.add_column("E[Sh]", justify="right")
+                    pos_table.add_column("E[SOT]", justify="right")
+                    pos_table.add_column("P(1+ G)", justify="right")
+                    pos_table.add_column("P(1+ GI)", justify="right")
+
+                    for s_row in pos_df.iter_rows(named=True):
+                        pos_table.add_row(
+                            str(s_row["player_name"]),
+                            str(s_row["position_group"]),
+                            f"{float(s_row['proj_minutes']):.1f}",
+                            f"{float(s_row['proj_goals']):.2f}",
+                            f"{float(s_row['proj_assists']):.2f}",
+                            f"{float(s_row['proj_goal_involvements']):.2f}",
+                            f"{float(s_row['proj_shots']):.2f}",
+                            f"{float(s_row['proj_sot']):.2f}",
+                            f"{float(s_row.get('prob_1plus_goal', 0.0)):.1%}",
+                            f"{float(s_row.get('prob_1plus_gi', 0.0)):.1%}",
+                        )
+                    console.print(pos_table)
+
+                team_gks = (
+                    proj.goalkeepers.filter(pl.col("team") == team_code)
+                    if not proj.goalkeepers.is_empty() and "team" in proj.goalkeepers.columns
+                    else pl.DataFrame()
+                )
+                gk_table = Table(title=f"{team_code} — Goalkeepers ({team_gks.height})")
+                gk_table.add_column("Goalkeeper", no_wrap=True)
+                gk_table.add_column("Pos", style="cyan")
+                gk_table.add_column("Lineup Status")
+                gk_table.add_column("E[SOT Faced]", justify="right")
+                gk_table.add_column("E[GA]", justify="right")
+                gk_table.add_column("E[Saves]", justify="right")
+                gk_table.add_column("E[SV%]", justify="right")
+                gk_table.add_column("P(Clean Sheet)", justify="right", style="bold green")
+
+                for g_row in team_gks.iter_rows(named=True):
+                    g_name = str(g_row.get("player_name") or f"GK {g_row.get('player_id', '')}")
+                    gk_table.add_row(
+                        g_name,
+                        "GKP",
+                        lineup_status,
+                        f"{float(g_row['proj_sot_against']):.1f}",
+                        f"{float(g_row['proj_goals_against']):.2f}",
+                        f"{float(g_row['proj_saves']):.1f}",
+                        f"{float(g_row['proj_save_pct']):.3f}",
+                        f"{float(g_row['prob_clean_sheet']):.1%}",
+                    )
+                console.print(gk_table)
+
+
 @app.command("predict")
 def predict_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
     game_date: Annotated[
         str | None,
         typer.Option("--date", help="Target prediction date (YYYY-MM-DD)."),
     ] = None,
     matchup: Annotated[
         str | None,
-        typer.Option("--matchup", help="Optional matchup filter (e.g., TOR@BOS)."),
+        typer.Option("--matchup", help="Optional matchup filter (e.g., TOR@BOS or MCI@ARS)."),
     ] = None,
     include_players: Annotated[
         bool,
@@ -675,14 +1148,28 @@ def predict_command(
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 
-    if not offline:
-        _run_hockey_ingestion(settings, current_season=True, offline=False)
-
     target_date = (
         date.fromisoformat(game_date) if game_date is not None else datetime.now(tz=UTC).date()
     )
-
     artifact_dir = settings.paths.artifacts_dir / slug / "latest"
+
+    if slug == "soccer":
+        if not offline:
+            _run_soccer_ingestion(settings, current_season=True, offline=False)
+        s_predictor = SoccerMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
+        s_predictions = s_predictor.predict_date(
+            target_date,
+            include_players=include_players,
+            matchup_filter=matchup,
+            offline=offline,
+            persist_ledger=True,
+        )
+        _render_soccer_predictions(s_predictions)
+        return
+
+    if not offline:
+        _run_hockey_ingestion(settings, current_season=True, offline=False)
+
     predictor = HockeyMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
     predictions = predictor.predict_date(
         target_date,
@@ -696,13 +1183,55 @@ def predict_command(
 
 @app.command("score-predictions")
 def score_predictions_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
 ) -> None:
     """Score the live append-only prediction ledger against completed Silver games."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+
+    if slug == "soccer":
+        rep_s = score_soccer_prediction_ledger(settings)
+        table = Table(title=f"Live Prediction Ledger Accuracy ({slug.upper()} 1X2)")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Live Predictions", justify="right", style="bold green")
+        table.add_column("Empirical EPL Prior", justify="right")
+        table.add_column("Uniform 1/3 Baseline", justify="right")
+
+        table.add_row(
+            "Ranked Probability Score (RPS)",
+            f"{rep_s.model.rps:.4f}",
+            f"{rep_s.empirical_prior_baseline.rps:.4f}",
+            f"{rep_s.uniform_baseline.rps:.4f}",
+        )
+        table.add_row(
+            "3-Class Log Loss",
+            f"{rep_s.model.log_loss:.4f}",
+            f"{rep_s.empirical_prior_baseline.log_loss:.4f}",
+            f"{rep_s.uniform_baseline.log_loss:.4f}",
+        )
+        table.add_row(
+            "Multi-Class Brier Score",
+            f"{rep_s.model.brier_score:.4f}",
+            f"{rep_s.empirical_prior_baseline.brier_score:.4f}",
+            f"{rep_s.uniform_baseline.brier_score:.4f}",
+        )
+        table.add_row(
+            "ECE",
+            f"{rep_s.model.ece:.4f}",
+            f"{rep_s.empirical_prior_baseline.ece:.4f}",
+            f"{rep_s.uniform_baseline.ece:.4f}",
+        )
+        table.add_row(
+            "Accuracy",
+            f"{rep_s.model.accuracy:.3f}",
+            f"{rep_s.empirical_prior_baseline.accuracy:.3f}",
+            f"{rep_s.uniform_baseline.accuracy:.3f}",
+        )
+        console.print(table)
+        return
+
     report = score_prediction_ledger(settings)
 
     table = Table(title=f"Live Prediction Ledger Accuracy ({slug.upper()})")
@@ -740,9 +1269,9 @@ def score_predictions_command(
 
 @app.command("check-sources")
 def check_sources_command(
-    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
-        "hockey"
-    ),
+    sport: Annotated[
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+    ] = "hockey",
     team: Annotated[
         str,
         typer.Option("--team", help="Sample NHL team tricode for roster and MoneyPuck probes."),
@@ -751,10 +1280,13 @@ def check_sources_command(
     """Verify live connectivity and schema contracts across all external data feeds."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
-    results = check_hockey_data_sources(
-        settings.paths.raw_dir,
-        team_code=team,
-    )
+    if slug == "soccer":
+        results = check_soccer_data_sources(settings.paths.raw_dir)
+    else:
+        results = check_hockey_data_sources(
+            settings.paths.raw_dir,
+            team_code=team,
+        )
 
     table = Table(title=f"Upstream Data Source Health ({slug.upper()})")
     table.add_column("Source", style="cyan", no_wrap=True)

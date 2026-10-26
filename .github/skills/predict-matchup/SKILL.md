@@ -1,7 +1,7 @@
 ---
 name: predict-matchup
-description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win probabilities, projecting Stage 2 skater and goalie stats (`--include-players`), predicting tonight's NHL slate or a specific matchup (`--matchup AWAY@HOME`), or interpreting pre-prediction confidence warnings."
-argument-hint: "Optional date (YYYY-MM-DD), matchup (e.g., TOR@BOS), --include-players, or --offline..."
+description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win (`hockey`) or 3-way 1X2 (`soccer`) probabilities, projecting Stage 2 player stats (`--include-players`), predicting tonight's NHL/EPL slate or a specific matchup (`--matchup AWAY@HOME`), or interpreting pre-prediction confidence warnings."
+argument-hint: "Optional --sport (hockey|soccer), date (YYYY-MM-DD), matchup (e.g., TOR@BOS or MCI@ARS), --include-players..."
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -39,14 +39,17 @@ Check that a trained model bundle exists at `artifacts/<sport>/latest/metadata.j
 Run the appropriate CLI command via bash:
 
 ```bash
-# Predict full slate for a date (Stage 1 Win Probabilities only)
+# Predict full slate for a date (Stage 1 Probabilities only)
 uv run sports-ml predict --sport hockey --date 2026-10-25
+uv run sports-ml predict --sport soccer --date 2026-10-25
 
 # Predict a specific matchup with Stage 2 Player Stat Projections
 uv run sports-ml predict --sport hockey --date 2026-10-25 --matchup TOR@BOS --include-players
+uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --include-players
 
 # Predict offline using local cached Silver tables only
 uv run sports-ml predict --sport hockey --date 2026-10-25 --matchup TOR@BOS --include-players --offline
+uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --include-players --offline
 ```
 
 ### Step 4: Interpret Output & Confidence Warnings
