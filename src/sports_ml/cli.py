@@ -619,9 +619,7 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
                 goalie_table.add_column("E[SV%]", justify="right", style="bold green")
 
                 for g_row in team_goalies.iter_rows(named=True):
-                    g_name = str(
-                        g_row.get("player_name") or f"Goalie {g_row.get('player_id', '')}"
-                    )
+                    g_name = str(g_row.get("player_name") or f"Goalie {g_row.get('player_id', '')}")
                     goalie_table.add_row(
                         g_name,
                         "G",
