@@ -238,37 +238,50 @@ def _run_hockey_ingestion(
     mp_skaters_list: list[pl.DataFrame] = []
     mp_goalies_list: list[pl.DataFrame] = []
 
+    loaded_teams_yrs: set[int] = set()
+    loaded_skaters_yrs: set[int] = set()
+    loaded_goalies_yrs: set[int] = set()
+
     if not offline and season_start_years:
         active_yr = int(str(derive_active_nhl_season())[:4])
         for yr in sorted(season_start_years):
             is_act = yr == active_yr
             with contextlib.suppress(Exception):
                 mp_teams_list.append(mp_client.load_team_game_stats(yr, is_active_season=is_act))
+                loaded_teams_yrs.add(yr)
             with contextlib.suppress(Exception):
                 mp_skaters_list.append(
                     mp_client.load_skater_game_stats(yr, is_active_season=is_act)
                 )
+                loaded_skaters_yrs.add(yr)
             with contextlib.suppress(Exception):
                 mp_goalies_list.append(
                     mp_client.load_goalie_game_stats(yr, is_active_season=is_act)
                 )
+                loaded_goalies_yrs.add(yr)
 
-    if raw_mp_dir.exists() and not mp_teams_list:
+    if raw_mp_dir.exists():
         for t_csv in sorted(raw_mp_dir.glob("teams_*.csv")):
             season_yr = int(t_csv.stem.split("_")[1])
-            mp_teams_list.append(
-                mp_client.load_team_game_stats(season_yr, csv_bytes=t_csv.read_bytes())
-            )
+            if season_yr not in loaded_teams_yrs:
+                mp_teams_list.append(
+                    mp_client.load_team_game_stats(season_yr, csv_bytes=t_csv.read_bytes())
+                )
+                loaded_teams_yrs.add(season_yr)
         for s_csv in sorted(raw_mp_dir.glob("skaters_*.csv")):
             season_yr = int(s_csv.stem.split("_")[1])
-            mp_skaters_list.append(
-                mp_client.load_skater_game_stats(season_yr, csv_bytes=s_csv.read_bytes())
-            )
+            if season_yr not in loaded_skaters_yrs:
+                mp_skaters_list.append(
+                    mp_client.load_skater_game_stats(season_yr, csv_bytes=s_csv.read_bytes())
+                )
+                loaded_skaters_yrs.add(season_yr)
         for g_csv in sorted(raw_mp_dir.glob("goalies_*.csv")):
             season_yr = int(g_csv.stem.split("_")[1])
-            mp_goalies_list.append(
-                mp_client.load_goalie_game_stats(season_yr, csv_bytes=g_csv.read_bytes())
-            )
+            if season_yr not in loaded_goalies_yrs:
+                mp_goalies_list.append(
+                    mp_client.load_goalie_game_stats(season_yr, csv_bytes=g_csv.read_bytes())
+                )
+                loaded_goalies_yrs.add(season_yr)
 
     mp_teams_df = pl.concat(mp_teams_list, how="vertical") if mp_teams_list else None
     mp_skaters_df = pl.concat(mp_skaters_list, how="vertical") if mp_skaters_list else None

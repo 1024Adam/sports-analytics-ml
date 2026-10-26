@@ -260,7 +260,16 @@ class HockeyMatchupPredictor:
             if "game_date" in team_feat_df.columns:
                 latest_date_str = str(team_feat_df["game_date"].max())
             if "has_moneypuck_xg" in team_feat_df.columns:
-                has_mp = bool(team_feat_df["has_moneypuck_xg"].tail(2).all())
+                matchup_latest_mp: list[bool] = []
+                for t_code in (home_code, away_code):
+                    t_rows = team_feat_df.filter(pl.col("team") == t_code)
+                    if not t_rows.is_empty():
+                        matchup_latest_mp.append(bool(t_rows["has_moneypuck_xg"][-1]))
+                has_mp = (
+                    all(matchup_latest_mp)
+                    if matchup_latest_mp
+                    else bool(team_feat_df["has_moneypuck_xg"].tail(2).all())
+                )
                 if not has_mp:
                     warnings.append(
                         "MoneyPuck xG lag detected on latest games; using NHL API fallback."
