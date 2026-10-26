@@ -56,5 +56,5 @@ Present the results clearly to the user:
    - **Starting Goalie Status**: Whether each starter is `CONFIRMED` (`CONFIRMED_NHL_OFFICIAL` / `CONFIRMED_MORNING_SKATE`) or `PROJECTED_HEURISTIC`.
    - **Data Freshness**: Whether MoneyPuck $xG$ data is current or using the NHL API boxscore fallback (`has_moneypuck_xg = False`).
    - **Prior Shrinkage Flags**: Early-season teams ($n < 8$ games) or low-sample goalies ($n < 15$ starts) where Bayesian prior shrinkage carries $>50\%$ weight.
-3. **Stage 2 Player Projections (if `--include-players`)**: Summarize top projected skaters for both teams (`E[PTS]`, `E[G]`, `E[A]`, `E[SOG]`, `E[TOI]`, `P(1+ PT)`) and starting goalie projections.
+3. **Stage 2 Player Projections (if `--include-players`)**: Present the per-team breakdown (Away team then Home team) across **Forwards**, **Defencemen**, and **Goalies** (`E[PTS]`, `E[G]`, `E[A]`, `E[SOG]`, `E[TOI]`, `P(1+ G)`, `P(1+ PT)` for all expected skaters, and `Status`, `E[SA]`, `E[GA]`, `E[SV]`, `E[SV%]` for starting goalies).
 4. **Audit Ledger Note**: Confirm that the prediction was appended to `data/predictions/hockey_predictions.parquet` for future scoring via `/evaluate-and-score`.

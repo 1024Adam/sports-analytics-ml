@@ -22,6 +22,8 @@ Starting with **NHL Hockey**, the platform ingests schedule, roster, boxscore, a
 ### 1. Install Dependencies
 ```bash
 uv sync --dev
+# Optional: install CLI globally in editable mode so you can run `sports-ml` without `uv run`
+uv tool install --editable .
 ```
 
 ### 2. Streamlined Daily & Setup CLI Workflow (`sports-ml`)
@@ -35,12 +37,15 @@ uv run sports-ml train --sport hockey --include-stage2
 # 3. Predict tonight's slate (connects live by default; use --offline for local cache only)
 uv run sports-ml predict --sport hockey --date 2026-10-25
 
-# 4. Predict a specific matchup with Stage 2 Player Stat Projections enabled
+# 4. Predict a specific matchup with Stage 2 Player Stat Projections (broken down by team & F/D/G)
 uv run sports-ml predict --sport hockey --date 2026-10-25 --matchup TOR@BOS --include-players
 ```
 
 ### 3. Developer & Audit Commands
 ```bash
+# Verify live connectivity and schema contracts across NHL API, MoneyPuck & DailyFaceoff
+uv run sports-ml check-sources --sport hockey
+
 # Recompute Gold pre-game feature matrices locally without network calls
 uv run sports-ml features build --sport hockey
 
