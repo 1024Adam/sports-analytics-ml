@@ -418,45 +418,139 @@ class HockeyMatchupPredictor:
             max_season = max(max_season_val) if max_season_val else target_season
             season_hist = team_hist.filter(pl.col("season") == max_season)
 
-        # When predicting a current-season game, filter to Official NHL active roster if available
-        active_season_now = derive_active_nhl_season()
-        if target_season == active_season_now:
-            roster_ids: set[int] = set()
-            raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
-            cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
-            try:
-                if not offline:
-                    nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
-                    roster_payload = nhl_client.fetch_team_roster(team_code)
-                    roster_df = parse_roster_payload(team_code, roster_payload)
-                    roster_ids = set(
-                        roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
-                    )
-                elif cached_roster_path.exists():
-                    import json
+        # Filter to Official NHL active roster if available (online or cached)
+        roster_ids: set[int] = set()
+        raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
+        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
+        try:
+            if not offline and target_season == derive_active_nhl_season():
+                nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
+                roster_payload = nhl_client.fetch_team_roster(team_code)
+                roster_df = parse_roster_payload(team_code, roster_payload)
+                roster_ids = set(
+                    roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
+                )
+            elif cached_roster_path.exists():
+                import json
 
-                    roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
-                    roster_df = parse_roster_payload(team_code, roster_payload)
-                    roster_ids = set(
-                        roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
-                    )
-            except Exception:
-                roster_ids = set()
+                roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
+                roster_df = parse_roster_payload(team_code, roster_payload)
+                roster_ids = set(
+                    roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
+                )
+        except Exception:
+            roster_ids = set()
 
-            if roster_ids:
-                filtered_by_roster = season_hist.filter(pl.col("player_id").is_in(roster_ids))
-                if not filtered_by_roster.is_empty():
-                    season_hist = filtered_by_roster
+        if roster_ids:
+            filtered_by_roster = season_hist.filter(pl.col("player_id").is_in(roster_ids))
+            if not filtered_by_roster.is_empty():
+                season_hist = filtered_by_roster
 
-        latest_skaters = (
-            season_hist.sort(["start_time_utc", "game_id"])
-            .unique(subset=["player_id"], keep="last")
-            .tail(20)
+        unique_skaters = season_hist.sort(["start_time_utc", "game_id"]).unique(
+            subset=["player_id"], keep="last"
         )
+        forwards = unique_skaters.filter(pl.col("position_group") == "F").tail(12)
+        defencemen = unique_skaters.filter(pl.col("position_group") == "D").tail(6)
+        latest_skaters = pl.concat([forwards, defencemen], how="vertical")
+        if latest_skaters.is_empty():
+            latest_skaters = unique_skaters.tail(18)
+
         return latest_skaters.with_columns(
             pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
             pl.lit(is_home).alias("is_home"),
             pl.lit(opp_code).alias("opponent"),
+        )
+
+    def _enrich_goalie_names(
+        self,
+        goalies_df: pl.DataFrame,
+        team_codes: list[str],
+        *,
+        offline: bool = False,
+    ) -> pl.DataFrame:
+        """Ensure `player_name` is present and populated on `goalies_df`."""
+        if goalies_df.is_empty():
+            return goalies_df.with_columns(pl.lit("", dtype=pl.Utf8).alias("player_name"))
+
+        if "player_name" in goalies_df.columns and not goalies_df["player_name"].is_null().any():
+            return goalies_df
+
+        import json
+
+        target_pids = {int(pid) for pid in goalies_df["player_id"].to_list()}
+        name_map: dict[int, str] = {}
+        raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
+        raw_mp_dir = self.settings.paths.raw_dir / "moneypuck"
+
+        # 1. Check cached or live team rosters
+        for t_code in team_codes:
+            cached_roster = raw_nhl_dir / "rosters" / f"{t_code}_current.json"
+            try:
+                if cached_roster.exists():
+                    r_payload = json.loads(cached_roster.read_text(encoding="utf-8"))
+                elif not offline:
+                    nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
+                    r_payload = nhl_client.fetch_team_roster(t_code)
+                else:
+                    r_payload = None
+                if r_payload:
+                    r_df = parse_roster_payload(t_code, r_payload)
+                    for r_row in r_df.filter(pl.col("position_group") == "G").iter_rows(named=True):
+                        name_map[int(r_row["player_id"])] = str(r_row["player_name"])
+            except Exception:
+                continue
+
+        # 2. Check MoneyPuck goalie CSVs for full names if any target goalie is still unresolved
+        missing_pids = target_pids - name_map.keys()
+        if missing_pids and raw_mp_dir.exists():
+            for g_csv in sorted(raw_mp_dir.glob("goalies_*.csv"), reverse=True):
+                try:
+                    mp_g = pl.read_csv(g_csv, columns=["playerId", "name"]).unique(
+                        subset=["playerId"], keep="last"
+                    )
+                    for row in mp_g.filter(pl.col("playerId").is_in(missing_pids)).iter_rows(
+                        named=True
+                    ):
+                        if row.get("name"):
+                            name_map[int(row["playerId"])] = str(row["name"])
+                    missing_pids = target_pids - name_map.keys()
+                    if not missing_pids:
+                        break
+                except Exception:
+                    continue
+
+        # 3. Check cached NHL boxscore JSONs for remaining goalie IDs
+        missing_pids = target_pids - name_map.keys()
+        box_dir = raw_nhl_dir / "boxscores"
+        if missing_pids and box_dir.exists():
+            for box_file in sorted(box_dir.glob("*.json"), reverse=True):
+                try:
+                    payload = json.loads(box_file.read_text(encoding="utf-8"))
+                    pbg = payload.get("playerByGameStats") or {}
+                    for side in ("homeTeam", "awayTeam"):
+                        for g in (pbg.get(side) or {}).get("goalies", []):
+                            pid = int(g.get("playerId", -1))
+                            if pid in missing_pids:
+                                n_obj = g.get("name", {})
+                                g_name = (
+                                    str(n_obj.get("default"))
+                                    if isinstance(n_obj, dict) and "default" in n_obj
+                                    else str(n_obj or f"Goalie {pid}")
+                                )
+                                name_map[pid] = g_name
+                    missing_pids = target_pids - name_map.keys()
+                    if not missing_pids:
+                        break
+                except Exception:
+                    continue
+
+        names = [
+            name_map.get(int(pid), f"Goalie {int(pid)}")
+            for pid in goalies_df["player_id"].to_list()
+        ]
+        return goalies_df.with_columns(
+            pl.Series("player_name", names, dtype=pl.Utf8),
+            pl.lit("G", dtype=pl.Utf8).alias("position_group"),
         )
 
     def predict_matchup(
@@ -603,6 +697,11 @@ class HockeyMatchupPredictor:
                         matchup_g,
                         skater_projections_df=skater_preds,
                         stage1_predictions_df=s1_pred_df,
+                    )
+                    goalies_pred = self._enrich_goalie_names(
+                        goalies_pred,
+                        [home_code, away_code],
+                        offline=offline,
                     )
                 else:
                     goalies_pred = pl.DataFrame()
