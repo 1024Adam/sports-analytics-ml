@@ -440,6 +440,12 @@ def test_end_to_end_cli_and_predictor_pipeline(
     )
     assert res_pred2.exit_code == 0, res_pred2.stdout
     assert "Stage 2" in res_pred2.stdout
+    assert "TOR — Forwards" in res_pred2.stdout
+    assert "TOR — Defencemen" in res_pred2.stdout
+    assert "TOR — Goalies" in res_pred2.stdout
+    assert "BOS — Forwards" in res_pred2.stdout
+    assert "BOS — Defencemen" in res_pred2.stdout
+    assert "BOS — Goalies" in res_pred2.stdout
 
     # 7. sports-ml score-predictions --sport hockey
     res_score = runner.invoke(app, ["score-predictions", "--sport", "hockey"])

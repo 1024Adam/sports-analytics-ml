@@ -562,36 +562,74 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
 
         if pred.player_projections is not None:
             proj = pred.player_projections
-            skater_table = Table(
-                title=f"Stage 2 — Skater Stat Projections ({pred.away_team} @ {pred.home_team})"
+            console.print(
+                f"\n[bold cyan]Stage 2 — Player Projections "
+                f"({pred.away_team} @ {pred.home_team})[/bold cyan]"
             )
-            skater_table.add_column("Team", style="cyan")
-            skater_table.add_column("Player")
-            skater_table.add_column("Pos")
-            skater_table.add_column("E[TOI]", justify="right")
-            skater_table.add_column("E[G]", justify="right")
-            skater_table.add_column("E[A]", justify="right")
-            skater_table.add_column("E[PTS]", justify="right", style="bold green")
-            skater_table.add_column("E[SOG]", justify="right")
-            skater_table.add_column("P(1+ PT)", justify="right")
+            team_sections = [
+                (pred.away_team, proj.away_skaters, pred.away_goalie_status),
+                (pred.home_team, proj.home_skaters, pred.home_goalie_status),
+            ]
+            for team_code, skaters_df, goalie_status in team_sections:
+                for pos_code, pos_label in (("F", "Forwards"), ("D", "Defencemen")):
+                    pos_df = (
+                        skaters_df.filter(pl.col("position_group") == pos_code).sort(
+                            "proj_points", descending=True
+                        )
+                        if not skaters_df.is_empty() and "position_group" in skaters_df.columns
+                        else pl.DataFrame()
+                    )
+                    pos_table = Table(title=f"{team_code} — {pos_label} ({pos_df.height})")
+                    pos_table.add_column("Player", no_wrap=True)
+                    pos_table.add_column("Pos", style="cyan")
+                    pos_table.add_column("E[TOI]", justify="right")
+                    pos_table.add_column("E[G]", justify="right")
+                    pos_table.add_column("E[A]", justify="right")
+                    pos_table.add_column("E[PTS]", justify="right", style="bold green")
+                    pos_table.add_column("E[SOG]", justify="right")
+                    pos_table.add_column("P(1+ G)", justify="right")
+                    pos_table.add_column("P(1+ PT)", justify="right")
 
-            combined_skaters = pl.concat(
-                [proj.home_skaters.head(6), proj.away_skaters.head(6)],
-                how="vertical",
-            )
-            for s_row in combined_skaters.iter_rows(named=True):
-                skater_table.add_row(
-                    str(s_row["team"]),
-                    str(s_row["player_name"]),
-                    str(s_row["position_group"]),
-                    f"{float(s_row['proj_toi_min']):.1f}",
-                    f"{float(s_row['proj_goals']):.2f}",
-                    f"{float(s_row['proj_assists']):.2f}",
-                    f"{float(s_row['proj_points']):.2f}",
-                    f"{float(s_row['proj_sog']):.2f}",
-                    f"{float(s_row['prob_1plus_point']):.1%}",
+                    for s_row in pos_df.iter_rows(named=True):
+                        pos_table.add_row(
+                            str(s_row["player_name"]),
+                            str(s_row["position_group"]),
+                            f"{float(s_row['proj_toi_min']):.1f}",
+                            f"{float(s_row['proj_goals']):.2f}",
+                            f"{float(s_row['proj_assists']):.2f}",
+                            f"{float(s_row['proj_points']):.2f}",
+                            f"{float(s_row['proj_sog']):.2f}",
+                            f"{float(s_row.get('prob_1plus_goal', 0.0)):.1%}",
+                            f"{float(s_row['prob_1plus_point']):.1%}",
+                        )
+                    console.print(pos_table)
+
+                team_goalies = (
+                    proj.goalies.filter(pl.col("team") == team_code)
+                    if not proj.goalies.is_empty() and "team" in proj.goalies.columns
+                    else pl.DataFrame()
                 )
-            console.print(skater_table)
+                goalie_table = Table(title=f"{team_code} — Goalies ({team_goalies.height})")
+                goalie_table.add_column("Goalie", no_wrap=True)
+                goalie_table.add_column("Pos", style="cyan")
+                goalie_table.add_column("Status")
+                goalie_table.add_column("E[SA]", justify="right")
+                goalie_table.add_column("E[GA]", justify="right")
+                goalie_table.add_column("E[SV]", justify="right")
+                goalie_table.add_column("E[SV%]", justify="right", style="bold green")
+
+                for g_row in team_goalies.iter_rows(named=True):
+                    g_name = str(g_row.get("player_name") or f"Goalie {g_row.get('player_id', '')}")
+                    goalie_table.add_row(
+                        g_name,
+                        "G",
+                        goalie_status,
+                        f"{float(g_row['proj_shots_against']):.1f}",
+                        f"{float(g_row['proj_goals_against']):.2f}",
+                        f"{float(g_row['proj_saves']):.1f}",
+                        f"{float(g_row['proj_save_pct']):.3f}",
+                    )
+                console.print(goalie_table)
 
 
 @app.command("predict")
