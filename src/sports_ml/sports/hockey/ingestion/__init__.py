@@ -1,5 +1,13 @@
 """NHL data ingestion and Silver lakehouse reconciliation (`sports/hockey/ingestion/`)."""
 
+from sports_ml.sports.hockey.ingestion.health import (
+    DataSourceHealthResult,
+    check_dailyfaceoff_source,
+    check_hockey_data_sources,
+    check_moneypuck_source,
+    check_nhl_roster_source,
+    check_nhl_schedule_source,
+)
 from sports_ml.sports.hockey.ingestion.lineups import (
     GoalieConfirmationStatus,
     PreGameLineupResolver,
@@ -24,6 +32,7 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
 from sports_ml.sports.hockey.ingestion.reconciler import HockeySilverReconciler
 
 __all__ = [
+    "DataSourceHealthResult",
     "GoalieConfirmationStatus",
     "HockeySilverReconciler",
     "MoneyPuckClient",
@@ -31,6 +40,11 @@ __all__ = [
     "NHL_WEB_API_BASE_URL",
     "PreGameLineupResolver",
     "ResolvedTeamLineup",
+    "check_dailyfaceoff_source",
+    "check_hockey_data_sources",
+    "check_moneypuck_source",
+    "check_nhl_roster_source",
+    "check_nhl_schedule_source",
     "derive_active_nhl_season",
     "normalize_player_name",
     "parse_boxscore_payload",
