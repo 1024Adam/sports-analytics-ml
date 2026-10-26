@@ -150,4 +150,14 @@ def resolve_team_starting_goalie_features(
         [event_col, "team", "is_starter", "toi_min", "player_id"],
         descending=[False, False, True, True, False],
     )
-    return sorted_starters.unique(subset=[event_col, "team"], keep="first")
+    deduped = sorted_starters.unique(
+        subset=[event_col, "team"],
+        keep="first",
+        maintain_order=True,
+    )
+    sort_cols = (
+        ["start_time_utc", event_col, "team"]
+        if "start_time_utc" in deduped.columns
+        else [event_col, "team"]
+    )
+    return deduped.sort(sort_cols)

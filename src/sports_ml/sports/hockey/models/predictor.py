@@ -33,6 +33,7 @@ from sports_ml.sports.hockey.features.team import (
 )
 from sports_ml.sports.hockey.ingestion.lineups import (
     fetch_dailyfaceoff_starting_goalies,
+    normalize_player_name,
 )
 from sports_ml.sports.hockey.ingestion.nhl_api import (
     NHLWebAPIClient,
@@ -447,7 +448,7 @@ class HockeyMatchupPredictor:
                 season_hist = filtered_by_roster
 
         unique_skaters = season_hist.sort(["start_time_utc", "game_id"]).unique(
-            subset=["player_id"], keep="last"
+            subset=["player_id"], keep="last", maintain_order=True
         )
         forwards = unique_skaters.filter(pl.col("position_group") == "F").tail(12)
         defencemen = unique_skaters.filter(pl.col("position_group") == "D").tail(6)
@@ -456,6 +457,90 @@ class HockeyMatchupPredictor:
             latest_skaters = unique_skaters.tail(18)
 
         return latest_skaters.with_columns(
+            pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
+            pl.lit(is_home).alias("is_home"),
+            pl.lit(opp_code).alias("opponent"),
+        )
+
+    def _select_active_team_starting_goalie(
+        self,
+        starters_df: pl.DataFrame,
+        team_code: str,
+        opp_code: str,
+        is_home: bool,
+        game_id_val: int | None,
+        game_date: date,
+        *,
+        offline: bool = False,
+    ) -> pl.DataFrame:
+        """Select active starting goalie for `team_code` on `game_date`."""
+        team_hist = starters_df.filter(pl.col("team") == team_code)
+        if team_hist.is_empty():
+            return team_hist
+
+        target_season = derive_active_nhl_season(game_date)
+        season_hist = (
+            team_hist.filter(pl.col("season") == target_season)
+            if "season" in team_hist.columns
+            else team_hist
+        )
+        if season_hist.is_empty():
+            if "season" in team_hist.columns:
+                max_season_val = team_hist["season"].cast(pl.Int32).to_list()
+                max_season = max(max_season_val) if max_season_val else target_season
+                season_hist = team_hist.filter(pl.col("season") == max_season)
+            else:
+                season_hist = team_hist
+
+        roster_goalie_ids: set[int] = set()
+        name_to_id: dict[str, int] = {}
+        raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
+        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
+        try:
+            roster_payload = None
+            if not offline and target_season == derive_active_nhl_season():
+                nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
+                roster_payload = nhl_client.fetch_team_roster(team_code)
+            elif cached_roster_path.exists():
+                import json
+
+                roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
+            if roster_payload:
+                roster_df = parse_roster_payload(team_code, roster_payload)
+                g_roster = roster_df.filter(pl.col("position_group") == "G")
+                roster_goalie_ids = {int(pid) for pid in g_roster["player_id"].to_list()}
+                for r_row in g_roster.iter_rows(named=True):
+                    name_to_id[normalize_player_name(str(r_row["player_name"]))] = int(
+                        r_row["player_id"]
+                    )
+        except Exception:
+            roster_goalie_ids = set()
+
+        # Check if DailyFaceoff morning skate specifies a specific starter for game_date
+        preferred_goalie_id: int | None = None
+        if not offline and name_to_id:
+            df_starters = fetch_dailyfaceoff_starting_goalies(game_date)
+            entry = df_starters.get(team_code)
+            if entry is not None:
+                df_name = normalize_player_name(str(entry.get("starting_goalie_name", "")))
+                preferred_goalie_id = name_to_id.get(df_name)
+
+        if preferred_goalie_id is not None:
+            pref_rows = season_hist.filter(pl.col("player_id") == preferred_goalie_id)
+            if not pref_rows.is_empty():
+                season_hist = pref_rows
+        elif roster_goalie_ids:
+            filtered_by_roster = season_hist.filter(pl.col("player_id").is_in(roster_goalie_ids))
+            if not filtered_by_roster.is_empty():
+                season_hist = filtered_by_roster
+
+        sort_cols = (
+            ["start_time_utc", "game_id"]
+            if {"start_time_utc", "game_id"}.issubset(season_hist.columns)
+            else [c for c in ("game_date", "game_id", "event_id") if c in season_hist.columns]
+        )
+        latest_goalie = season_hist.sort(sort_cols).tail(1) if sort_cols else season_hist.tail(1)
+        return latest_goalie.with_columns(
             pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
             pl.lit(is_home).alias("is_home"),
             pl.lit(opp_code).alias("opponent"),
@@ -681,18 +766,25 @@ class HockeyMatchupPredictor:
                         & pl.col("team").is_in([home_code, away_code])
                     )
                     if matchup_g.is_empty():
-                        matchup_g = (
-                            starters.filter(pl.col("team").is_in([home_code, away_code]))
-                            .unique(subset=["team"], keep="last")
-                            .with_columns(
-                                pl.lit(game_id_val or -1, dtype=pl.Int64).alias("game_id"),
-                                (pl.col("team") == home_code).alias("is_home"),
-                                pl.when(pl.col("team") == home_code)
-                                .then(pl.lit(away_code))
-                                .otherwise(pl.lit(home_code))
-                                .alias("opponent"),
-                            )
+                        home_g = self._select_active_team_starting_goalie(
+                            starters,
+                            home_code,
+                            away_code,
+                            True,
+                            game_id_val,
+                            game_date,
+                            offline=offline,
                         )
+                        away_g = self._select_active_team_starting_goalie(
+                            starters,
+                            away_code,
+                            home_code,
+                            False,
+                            game_id_val,
+                            game_date,
+                            offline=offline,
+                        )
+                        matchup_g = pl.concat([home_g, away_g], how="vertical")
                     goalies_pred = self.stage2_model.predict_goalies(
                         matchup_g,
                         skater_projections_df=skater_preds,
