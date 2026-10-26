@@ -390,7 +390,10 @@ def backtest_command(
 
     n_unique_ts = completed_s1["start_time_utc"].n_unique()
     eff_splits = min(n_splits, max(1, n_unique_ts // 3))
-    eff_min_train = max(2, n_unique_ts - eff_splits)
+    # Reserve >= 30% of the timeline (or >= 1 group/fold) for out-of-sample validation so
+    # folds aren't starved down to a single timestamp when the dataset is large.
+    val_reserve_groups = max(eff_splits, int(n_unique_ts * 0.3))
+    eff_min_train = max(2, n_unique_ts - val_reserve_groups)
 
     bt = run_stage1_walk_forward_backtest(
         completed_s1,
@@ -533,21 +536,21 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
     game_table.add_column("Date", style="cyan")
     game_table.add_column("Matchup", style="bold")
-    game_table.add_column("P(Home Win)", justify="right", style="green")
     game_table.add_column("P(Away Win)", justify="right", style="yellow")
-    game_table.add_column("E[Home Goals]", justify="right")
+    game_table.add_column("P(Home Win)", justify="right", style="green")
     game_table.add_column("E[Away Goals]", justify="right")
+    game_table.add_column("E[Home Goals]", justify="right")
     game_table.add_column("Goalie Status")
 
     for pred in predictions:
         game_table.add_row(
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
-            f"{pred.home_win_prob:.1%}",
             f"{pred.away_win_prob:.1%}",
-            f"{pred.expected_home_goals:.2f}",
+            f"{pred.home_win_prob:.1%}",
             f"{pred.expected_away_goals:.2f}",
-            f"H:{pred.home_goalie_status} / A:{pred.away_goalie_status}",
+            f"{pred.expected_home_goals:.2f}",
+            f"A:{pred.away_goalie_status} / H:{pred.home_goalie_status}",
         )
     console.print(game_table)
 
