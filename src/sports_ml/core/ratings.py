@@ -16,7 +16,11 @@ from sports_ml.core.temporal import sort_events_chronologically
 
 
 class EloConfig(BaseModel):
-    """Configuration for pairwise Elo rating updates."""
+    """Configuration for pairwise Elo rating updates.
+
+    Supports both binary head-to-head sports (NHL, MLB) and 3-way (`1X2`) match
+    sports with draws and promotion/relegation (EPL Soccer).
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -26,11 +30,36 @@ class EloConfig(BaseModel):
     shootout_winner_score: float = 0.60
     offseason_retention: float = 0.72
     use_mov_multiplier: bool = True
+    draw_param: float = 0.0
+    promoted_team_rating: float | None = None
 
 
 def compute_elo_win_probability(elo_diff: float) -> float:
     """Compute analytical logistic Elo win probability `1 / (1 + 10 ** (-elo_diff / 400))`."""
     return 1.0 / (1.0 + math.pow(10.0, -elo_diff / 400.0))
+
+
+def compute_elo_1x2_probabilities(
+    elo_diff: float,
+    draw_param: float = 0.26,
+) -> tuple[float, float, float]:
+    """Compute analytical 3-way (`1X2`) Elo probabilities `(p_home, p_draw, p_away)`.
+
+    Given logistic expected score `e_home = 1 / (1 + 10 ** (-elo_diff / 400))` and
+    baseline draw parameter `nu in [0.0, 0.5)`:
+        `p_draw = nu * 4.0 * e_home * (1.0 - e_home)`
+        `p_home = e_home - 0.5 * p_draw`
+        `p_away = (1.0 - e_home) - 0.5 * p_draw`
+
+    Guarantees `p_home + p_draw + p_away == 1.0` and `e_home == p_home + 0.5 * p_draw`.
+    """
+    if not (0.0 <= draw_param < 0.5):
+        raise ValueError(f"draw_param must be in [0.0, 0.5), got {draw_param}.")
+    e_home = compute_elo_win_probability(elo_diff)
+    p_draw = draw_param * 4.0 * e_home * (1.0 - e_home)
+    p_home = e_home - 0.5 * p_draw
+    p_away = (1.0 - e_home) - 0.5 * p_draw
+    return (p_home, p_draw, p_away)
 
 
 def compute_mov_multiplier(goal_diff: int | float, elo_diff: float) -> float:
@@ -40,7 +69,7 @@ def compute_mov_multiplier(goal_diff: int | float, elo_diff: float) -> float:
 
 
 class PairwiseEloEngine:
-    """Dynamic pairwise Elo engine supporting HFA, MOV scaling, OT/SO dampening, and regression."""
+    """Dynamic pairwise Elo engine supporting HFA, MOV, OT/SO dampening, 1X2 draws & promotion."""
 
     def __init__(
         self,
@@ -57,9 +86,23 @@ class PairwiseEloEngine:
         ret = self.config.offseason_retention
         return ret * rating + (1.0 - ret) * self.config.base_rating
 
-    def regress_ratings_offseason(self, ratings: Mapping[str, float]) -> dict[str, float]:
-        """Regress a dictionary of entity Elo ratings toward `base_rating` between seasons."""
-        return {entity: self.regress_rating(rating) for entity, rating in ratings.items()}
+    def regress_ratings_offseason(
+        self,
+        ratings: Mapping[str, float],
+        *,
+        active_entities: set[str] | None = None,
+    ) -> dict[str, float]:
+        """Regress a dictionary of entity Elo ratings toward `base_rating` between seasons.
+
+        If `active_entities` is provided, only entities active in the previous season are
+        retained so relegated clubs that later re-promote enter at `promoted_team_rating`.
+        """
+        source = (
+            {k: v for k, v in ratings.items() if k in active_entities}
+            if active_entities is not None
+            else ratings
+        )
+        return {entity: self.regress_rating(rating) for entity, rating in source.items()}
 
     def compute_ratings(
         self,
@@ -76,16 +119,24 @@ class PairwiseEloEngine:
         without mutating post-game ratings.
         """
         sorted_df = sort_events_chronologically(games_df)
+        emit_draw = self.config.draw_param > 0.0
         if sorted_df.is_empty():
-            return sorted_df.with_columns(
+            empty_cols = [
                 pl.lit(None, dtype=pl.Float64).alias("elo_home_pre"),
                 pl.lit(None, dtype=pl.Float64).alias("elo_away_pre"),
                 pl.lit(None, dtype=pl.Float64).alias("elo_diff_pre"),
                 pl.lit(None, dtype=pl.Float64).alias("elo_home_win_prob"),
-                pl.lit(None, dtype=pl.Float64).alias("elo_away_win_prob"),
-                pl.lit(None, dtype=pl.Float64).alias("elo_home_post"),
-                pl.lit(None, dtype=pl.Float64).alias("elo_away_post"),
+            ]
+            if emit_draw:
+                empty_cols.append(pl.lit(None, dtype=pl.Float64).alias("elo_draw_prob"))
+            empty_cols.extend(
+                [
+                    pl.lit(None, dtype=pl.Float64).alias("elo_away_win_prob"),
+                    pl.lit(None, dtype=pl.Float64).alias("elo_home_post"),
+                    pl.lit(None, dtype=pl.Float64).alias("elo_away_post"),
+                ]
             )
+            return sorted_df.with_columns(*empty_cols)
 
         home_col = "home_team" if "home_team" in sorted_df.columns else "home_entity"
         away_col = "away_team" if "away_team" in sorted_df.columns else "away_entity"
@@ -94,11 +145,14 @@ class PairwiseEloEngine:
 
         ratings: dict[str, float] = dict(initial_ratings) if initial_ratings is not None else {}
         current_season: int | None = None
+        has_completed_prior_season = False
+        season_active_entities: set[str] = set()
 
         elo_home_pre_list: list[float] = []
         elo_away_pre_list: list[float] = []
         elo_diff_pre_list: list[float] = []
         elo_home_prob_list: list[float] = []
+        elo_draw_prob_list: list[float] = []
         elo_away_prob_list: list[float] = []
         elo_home_post_list: list[float] = []
         elo_away_post_list: list[float] = []
@@ -106,16 +160,37 @@ class PairwiseEloEngine:
         for row in sorted_df.iter_rows(named=True):
             season_val = int(row["season"])
             if current_season is not None and season_val != current_season:
-                ratings = self.regress_ratings_offseason(ratings)
+                ratings = self.regress_ratings_offseason(
+                    ratings,
+                    active_entities=(
+                        season_active_entities
+                        if self.config.promoted_team_rating is not None
+                        else None
+                    ),
+                )
+                has_completed_prior_season = True
+                season_active_entities = set()
             current_season = season_val
 
             event_id = int(row["event_id"])
             home_entity = str(row[home_col])
             away_entity = str(row[away_col])
+            season_active_entities.add(home_entity)
+            season_active_entities.add(away_entity)
+
+            default_new_entity_rating = (
+                self.config.promoted_team_rating
+                if (has_completed_prior_season and self.config.promoted_team_rating is not None)
+                else self.config.base_rating
+            )
 
             # 1. Record strictly pre-event ratings
-            r_home_pre = ratings.get(home_entity, self.config.base_rating)
-            r_away_pre = ratings.get(away_entity, self.config.base_rating)
+            if home_entity not in ratings:
+                ratings[home_entity] = default_new_entity_rating
+            if away_entity not in ratings:
+                ratings[away_entity] = default_new_entity_rating
+            r_home_pre = ratings[home_entity]
+            r_away_pre = ratings[away_entity]
 
             starter_delta_home = float(row.get("home_starter_elo_delta") or 0.0)
             starter_delta_away = float(row.get("away_starter_elo_delta") or 0.0)
@@ -138,13 +213,21 @@ class PairwiseEloEngine:
                 + venue_delta
                 - (r_away_pre + starter_delta_away)
             )
-            p_home = compute_elo_win_probability(elo_diff)
-            p_away = 1.0 - p_home
+            expected_home_score = compute_elo_win_probability(elo_diff)
+            if emit_draw:
+                p_home, p_draw, p_away = compute_elo_1x2_probabilities(
+                    elo_diff, draw_param=self.config.draw_param
+                )
+            else:
+                p_home = expected_home_score
+                p_draw = 0.0
+                p_away = 1.0 - p_home
 
             elo_home_pre_list.append(r_home_pre)
             elo_away_pre_list.append(r_away_pre)
             elo_diff_pre_list.append(elo_diff)
             elo_home_prob_list.append(p_home)
+            elo_draw_prob_list.append(p_draw)
             elo_away_prob_list.append(p_away)
 
             # 2. Check if game is completed before applying post-event update
@@ -191,7 +274,7 @@ class PairwiseEloEngine:
                 else 1.0
             )
 
-            delta = self.config.k_factor * mov_mult * (actual_s_home - p_home)
+            delta = self.config.k_factor * mov_mult * (actual_s_home - expected_home_score)
             r_home_post = r_home_pre + delta
             r_away_post = r_away_pre - delta
 
@@ -201,15 +284,22 @@ class PairwiseEloEngine:
             elo_home_post_list.append(r_home_post)
             elo_away_post_list.append(r_away_post)
 
-        return sorted_df.with_columns(
+        out_cols = [
             pl.Series("elo_home_pre", elo_home_pre_list, dtype=pl.Float64),
             pl.Series("elo_away_pre", elo_away_pre_list, dtype=pl.Float64),
             pl.Series("elo_diff_pre", elo_diff_pre_list, dtype=pl.Float64),
             pl.Series("elo_home_win_prob", elo_home_prob_list, dtype=pl.Float64),
-            pl.Series("elo_away_win_prob", elo_away_prob_list, dtype=pl.Float64),
-            pl.Series("elo_home_post", elo_home_post_list, dtype=pl.Float64),
-            pl.Series("elo_away_post", elo_away_post_list, dtype=pl.Float64),
+        ]
+        if emit_draw:
+            out_cols.append(pl.Series("elo_draw_prob", elo_draw_prob_list, dtype=pl.Float64))
+        out_cols.extend(
+            [
+                pl.Series("elo_away_win_prob", elo_away_prob_list, dtype=pl.Float64),
+                pl.Series("elo_home_post", elo_home_post_list, dtype=pl.Float64),
+                pl.Series("elo_away_post", elo_away_post_list, dtype=pl.Float64),
+            ]
         )
+        return sorted_df.with_columns(*out_cols)
 
 
 class FieldSkillConfig(BaseModel):

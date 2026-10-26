@@ -30,5 +30,8 @@ jobs:
       - name: Install dependencies from lockfile
         run: uv sync --locked
 
-      - name: Probe NHL API, MoneyPuck & DailyFaceoff connectivity
+      - name: Probe NHL Hockey upstream data sources (NHL API, MoneyPuck & DailyFaceoff)
         run: uv run sports-ml check-sources --sport hockey
+
+      - name: Probe EPL Soccer upstream data sources (FPL API, Understat & Football-Data)
+        run: uv run sports-ml check-sources --sport soccer

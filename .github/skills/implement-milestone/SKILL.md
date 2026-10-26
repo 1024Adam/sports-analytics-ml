@@ -1,7 +1,7 @@
 ---
 name: implement-milestone
-description: "Use when: executing a numbered milestone from docs/roadmap.md (e.g., Milestone 1 through Milestone 6), building its deliverables, running ruff/mypy/pytest verification gates, and updating milestone completion status."
-argument-hint: "Milestone number (1-6) from docs/roadmap.md to implement and verify..."
+description: "Use when: executing a numbered milestone from docs/roadmap.md (e.g., Milestone 1 through Milestone 11), building its deliverables, running ruff/mypy/pytest verification gates, and updating milestone completion status."
+argument-hint: "Milestone number (1-11) from docs/roadmap.md to implement and verify..."
 user-invocable: true
 disable-model-invocation: false
 ---

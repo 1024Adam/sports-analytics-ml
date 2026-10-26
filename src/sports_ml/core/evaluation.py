@@ -12,7 +12,10 @@ from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict
 from sklearn.metrics import brier_score_loss, log_loss
 
-from sports_ml.core.calibration import clip_probabilities
+from sports_ml.core.calibration import (
+    clip_probabilities,
+    normalize_multiclass_probabilities,
+)
 
 
 class EvaluationMetrics(BaseModel):
@@ -128,5 +131,164 @@ def compare_against_baselines(
         model=model_metrics,
         coin_flip_baseline=coin_metrics,
         home_win_rate_baseline=home_metrics,
+        elo_baseline=elo_metrics,
+    )
+
+
+class MulticlassEvaluationMetrics(BaseModel):
+    """Summary metrics for 3-way (`1X2`) or ordinal multiclass probability predictions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rps: float
+    log_loss: float
+    brier_score: float
+    ece: float
+    accuracy: float
+
+
+class MulticlassBenchmarkReport(BaseModel):
+    """Comparison of Stage 1 multiclass (`1X2`) model metrics against canonical baselines."""
+
+    model_config = ConfigDict(frozen=True)
+
+    model: MulticlassEvaluationMetrics
+    uniform_baseline: MulticlassEvaluationMetrics
+    empirical_prior_baseline: MulticlassEvaluationMetrics
+    elo_baseline: MulticlassEvaluationMetrics | None = None
+
+    @property
+    def beats_empirical_prior_rps(self) -> bool:
+        return self.model.rps < self.empirical_prior_baseline.rps
+
+    @property
+    def beats_empirical_prior_brier(self) -> bool:
+        return self.model.brier_score < self.empirical_prior_baseline.brier_score
+
+    @property
+    def beats_empirical_prior_log_loss(self) -> bool:
+        return self.model.log_loss < self.empirical_prior_baseline.log_loss
+
+
+def ranked_probability_score(
+    probs: NDArray[np.float64],
+    y_true: NDArray[np.int64],
+) -> float:
+    """Compute mean Ranked Probability Score (RPS) for ordered multiclass outcomes.
+
+    For `K` ordered outcome classes (e.g., `0 = Home Win`, `1 = Draw`, `2 = Away Win`):
+        `RPS = (1 / (K - 1)) * sum_{k=1}^{K-1} (F_k - O_k) ** 2`
+    where `F_k` is the cumulative predicted probability through class `k - 1` and
+    `O_k` is the cumulative indicator `1[y_true <= k - 1]`.
+    """
+    p = normalize_multiclass_probabilities(np.asarray(probs, dtype=np.float64))
+    y = np.asarray(y_true, dtype=np.int64).ravel()
+    n_samples, n_classes = p.shape
+    if y.size != n_samples or n_samples == 0:
+        raise ValueError("probs and y_true must be non-empty and have matching sample counts.")
+    if np.any((y < 0) | (y >= n_classes)):
+        raise ValueError(f"y_true entries must lie in [0, {n_classes - 1}].")
+
+    one_hot = np.zeros_like(p, dtype=np.float64)
+    one_hot[np.arange(n_samples), y] = 1.0
+
+    cum_p = np.cumsum(p, axis=1)[:, :-1]
+    cum_o = np.cumsum(one_hot, axis=1)[:, :-1]
+    per_match_rps = np.sum((cum_p - cum_o) ** 2, axis=1) / float(n_classes - 1)
+    return float(np.mean(per_match_rps))
+
+
+def multiclass_brier_score(
+    probs: NDArray[np.float64],
+    y_true: NDArray[np.int64],
+) -> float:
+    """Compute mean multi-class Brier score `(1 / N) * sum_i sum_c (p_{i,c} - y_{i,c}) ** 2`."""
+    p = normalize_multiclass_probabilities(np.asarray(probs, dtype=np.float64))
+    y = np.asarray(y_true, dtype=np.int64).ravel()
+    n_samples, n_classes = p.shape
+    if y.size != n_samples or n_samples == 0:
+        raise ValueError("probs and y_true must be non-empty and have matching sample counts.")
+
+    one_hot = np.zeros_like(p, dtype=np.float64)
+    one_hot[np.arange(n_samples), y] = 1.0
+    return float(np.mean(np.sum((p - one_hot) ** 2, axis=1)))
+
+
+def multiclass_expected_calibration_error(
+    probs: NDArray[np.float64],
+    y_true: NDArray[np.int64],
+    n_bins: int = 10,
+) -> float:
+    """Compute class-averaged Expected Calibration Error (ECE) across all `K` outcome classes."""
+    p = normalize_multiclass_probabilities(np.asarray(probs, dtype=np.float64))
+    y = np.asarray(y_true, dtype=np.int64).ravel()
+    n_classes = p.shape[1]
+    class_eces = [
+        expected_calibration_error(p[:, c_idx], (y == c_idx).astype(np.int64), n_bins=n_bins)
+        for c_idx in range(n_classes)
+    ]
+    return float(np.mean(class_eces))
+
+
+def evaluate_multiclass_probabilities(
+    probs: NDArray[np.float64],
+    y_true: NDArray[np.int64],
+    n_bins: int = 10,
+) -> MulticlassEvaluationMetrics:
+    """Compute RPS, 3-class Log Loss, multi-class Brier Score, ECE, and accuracy."""
+    p = normalize_multiclass_probabilities(np.asarray(probs, dtype=np.float64))
+    y = np.asarray(y_true, dtype=np.int64).ravel()
+    n_samples, n_classes = p.shape
+    if y.size != n_samples or n_samples == 0:
+        raise ValueError("probs and y_true must be non-empty and have matching sample counts.")
+
+    rps_val = ranked_probability_score(p, y)
+    ll_val = float(log_loss(y, p, labels=list(range(n_classes))))
+    bs_val = multiclass_brier_score(p, y)
+    ece_val = multiclass_expected_calibration_error(p, y, n_bins=n_bins)
+    preds = np.argmax(p, axis=1)
+    acc_val = float(np.mean(preds == y))
+
+    return MulticlassEvaluationMetrics(
+        rps=rps_val,
+        log_loss=ll_val,
+        brier_score=bs_val,
+        ece=ece_val,
+        accuracy=acc_val,
+    )
+
+
+def compare_multiclass_against_baselines(
+    model_probs: NDArray[np.float64],
+    y_true: NDArray[np.int64],
+    *,
+    empirical_prior: tuple[float, float, float] = (0.45, 0.24, 0.31),
+    elo_probs: NDArray[np.float64] | None = None,
+    n_bins: int = 10,
+) -> MulticlassBenchmarkReport:
+    """Evaluate `1X2` model probabilities against uniform, empirical EPL prior, and Elo."""
+    p = normalize_multiclass_probabilities(np.asarray(model_probs, dtype=np.float64))
+    y = np.asarray(y_true, dtype=np.int64).ravel()
+    n_samples, n_classes = p.shape
+
+    model_metrics = evaluate_multiclass_probabilities(p, y, n_bins=n_bins)
+    uniform_probs = np.full((n_samples, n_classes), 1.0 / float(n_classes), dtype=np.float64)
+    prior_vec = np.asarray(empirical_prior, dtype=np.float64).ravel()
+    if prior_vec.size != n_classes:
+        raise ValueError(f"empirical_prior must have length {n_classes}, got {prior_vec.size}.")
+    prior_probs = np.tile(prior_vec / float(np.sum(prior_vec)), (n_samples, 1))
+
+    uniform_metrics = evaluate_multiclass_probabilities(uniform_probs, y, n_bins=n_bins)
+    prior_metrics = evaluate_multiclass_probabilities(prior_probs, y, n_bins=n_bins)
+    elo_metrics = (
+        evaluate_multiclass_probabilities(elo_probs, y, n_bins=n_bins)
+        if elo_probs is not None
+        else None
+    )
+
+    return MulticlassBenchmarkReport(
+        model=model_metrics,
+        uniform_baseline=uniform_metrics,
+        empirical_prior_baseline=prior_metrics,
         elo_baseline=elo_metrics,
     )

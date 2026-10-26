@@ -112,6 +112,158 @@ class ProbabilityCalibrator:
         return clip_probabilities(probs_1d)
 
 
+def normalize_multiclass_probabilities(
+    probs: NDArray[np.float64],
+    eps: float = PROB_EPS,
+) -> NDArray[np.float64]:
+    """Clip and row-normalize a `(N, K)` probability matrix onto the open simplex.
+
+    Guarantees every entry lies strictly in `(eps, 1.0 - eps)` and every row sums
+    to `1.0` within floating-point precision.
+    """
+    arr = np.asarray(probs, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise ValueError(f"probs must be a 2D array with at least 2 classes, got {arr.shape}.")
+    clipped = np.clip(arr, eps, 1.0 - eps)
+    row_sums = np.sum(clipped, axis=1, keepdims=True)
+    safe_sums = np.where(row_sums > 0.0, row_sums, 1.0)
+    normalized = clipped / safe_sums
+    # Final guard to keep entries strictly inside (eps, 1 - eps) while preserving sum = 1
+    normalized = np.clip(normalized, eps, 1.0 - eps)
+    normalized = normalized / np.sum(normalized, axis=1, keepdims=True)
+    return np.asarray(normalized, dtype=np.float64)
+
+
+class MulticlassProbabilityCalibrator:
+    """Out-of-fold multiclass (`1X2`) probability calibrator with simplex normalization.
+
+    Supports both `"sigmoid"` (Dirichlet / multinomial log-probability Platt scaling)
+    and `"isotonic"` (per-class one-vs-rest isotonic regression followed by simplex
+    renormalization) fitted strictly on held-out validation folds.
+    """
+
+    def __init__(
+        self,
+        method: CalibrationMethod = "sigmoid",
+        n_classes: int = 3,
+        random_seed: int = RANDOM_SEED,
+    ) -> None:
+        if n_classes < 2:
+            raise ValueError(f"n_classes must be >= 2, got {n_classes}.")
+        self.method: CalibrationMethod = method
+        self.n_classes = n_classes
+        self.random_seed = random_seed
+        self._multinomial_model: LogisticRegression | None = None
+        self._isotonic_models: list[IsotonicRegression] | None = None
+        self._is_fitted: bool = False
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._is_fitted
+
+    def fit(
+        self,
+        raw_probs: NDArray[np.float64],
+        y_true: NDArray[np.int64],
+    ) -> MulticlassProbabilityCalibrator:
+        """Fit multiclass calibrator on out-of-fold validation predictions `(N, K)`."""
+        probs_2d = normalize_multiclass_probabilities(np.asarray(raw_probs, dtype=np.float64))
+        y_1d = np.asarray(y_true, dtype=np.int64).ravel()
+
+        if probs_2d.shape[1] != self.n_classes:
+            raise ValueError(
+                f"Expected raw_probs with {self.n_classes} columns, got {probs_2d.shape[1]}."
+            )
+        if probs_2d.shape[0] != y_1d.shape[0] or probs_2d.shape[0] == 0:
+            raise ValueError("raw_probs and y_true must be non-empty and have matching row counts.")
+
+        unique_classes = np.unique(y_1d)
+        if unique_classes.size < self.n_classes:
+            self._multinomial_model = None
+            self._isotonic_models = None
+            self._is_fitted = True
+            return self
+
+        if self.method == "isotonic":
+            iso_list: list[IsotonicRegression] = []
+            for c_idx in range(self.n_classes):
+                iso = IsotonicRegression(
+                    y_min=PROB_EPS,
+                    y_max=1.0 - PROB_EPS,
+                    out_of_bounds="clip",
+                )
+                y_bin = (y_1d == c_idx).astype(np.float64)
+                iso.fit(probs_2d[:, c_idx], y_bin)
+                iso_list.append(iso)
+            cols = [
+                np.asarray(iso_list[c_idx].predict(probs_2d[:, c_idx]), dtype=np.float64)
+                for c_idx in range(self.n_classes)
+            ]
+            # Blend 50% isotonic + 50% raw prior to prevent step-function boundary log-loss spikes
+            iso_blended = normalize_multiclass_probabilities(
+                0.50 * np.column_stack(cols) + 0.50 * probs_2d
+            )
+            self._isotonic_models = iso_list
+            self._multinomial_model = None
+        else:
+            # Guard against tiny validation folds where multinomial regression can overfit
+            if probs_2d.shape[0] < 120:
+                self._multinomial_model = None
+                self._isotonic_models = None
+            else:
+                log_p = np.log(probs_2d)
+                lr = LogisticRegression(
+                    C=0.35,
+                    solver="lbfgs",
+                    random_state=self.random_seed,
+                )
+                lr.fit(log_p, y_1d)
+                # Ensure diagonal class weights remain positive (monotonic preserving)
+                diag_weights = np.diag(lr.coef_)
+                if bool(np.all(diag_weights > 0.10)):
+                    self._multinomial_model = lr
+                else:
+                    self._multinomial_model = None
+                self._isotonic_models = None
+            iso_blended = probs_2d
+        _ = iso_blended
+
+        self._is_fitted = True
+        return self
+
+    def predict_proba(self, raw_probs: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Transform raw `(N, K)` probabilities into calibrated simplex probabilities."""
+        if not self._is_fitted:
+            raise RuntimeError(
+                "MulticlassProbabilityCalibrator must be fitted before calling predict_proba."
+            )
+
+        probs_2d = normalize_multiclass_probabilities(np.asarray(raw_probs, dtype=np.float64))
+        if probs_2d.shape[1] != self.n_classes:
+            raise ValueError(
+                f"Expected raw_probs with {self.n_classes} columns, got {probs_2d.shape[1]}."
+            )
+
+        if self._isotonic_models is not None:
+            cols = [
+                np.asarray(
+                    self._isotonic_models[c_idx].predict(probs_2d[:, c_idx]),
+                    dtype=np.float64,
+                )
+                for c_idx in range(self.n_classes)
+            ]
+            iso_raw = normalize_multiclass_probabilities(np.column_stack(cols))
+            return normalize_multiclass_probabilities(0.65 * iso_raw + 0.35 * probs_2d)
+
+        if self._multinomial_model is not None:
+            log_p = np.log(probs_2d)
+            pred_matrix = np.asarray(self._multinomial_model.predict_proba(log_p), dtype=np.float64)
+            # Damped blend (50% multinomial Platt + 50% structural prior) prevents small-fold shift
+            return normalize_multiclass_probabilities(0.50 * pred_matrix + 0.50 * probs_2d)
+
+        return probs_2d
+
+
 def calibrate_multi_entrant_group(
     raw_scores: NDArray[np.float64],
     temperature: float = 1.0,

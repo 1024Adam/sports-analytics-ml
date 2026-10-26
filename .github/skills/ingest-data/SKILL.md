@@ -1,7 +1,7 @@
 ---
 name: ingest-data
-description: "Use when: running data ingestion (`sports-ml ingest`), verifying upstream feed connectivity (`sports-ml check-sources`), backfilling historical NHL seasons, syncing the active season to date (`--current-season`), fetching a specific date window (`--start-date` / `--end-date`), or reconciling Official NHL Web API and MoneyPuck CSV caches into Silver Parquet tables."
-argument-hint: "Specify --current-season, --seasons (e.g., 20232024,20242025), --start-date / --end-date, or check-sources..."
+description: "Use when: running data ingestion (`sports-ml ingest`), verifying upstream feed connectivity (`sports-ml check-sources`), backfilling historical NHL or EPL seasons, syncing the active season to date (`--current-season`), fetching a specific date window (`--start-date` / `--end-date`), or reconciling raw caches into Silver Parquet tables for `--sport hockey` or `--sport soccer`."
+argument-hint: "Specify --sport (hockey|soccer), --current-season, --seasons (e.g., 20232024,20242025), or check-sources..."
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -34,20 +34,24 @@ Choose the appropriate ingestion mode based on the user's request:
 Execute the appropriate command via bash:
 
 ```bash
-# Verify live connectivity and schema contracts across NHL API, MoneyPuck & DailyFaceoff
+# Verify live connectivity and schema contracts (NHL Hockey or EPL Soccer)
 uv run sports-ml check-sources --sport hockey
+uv run sports-ml check-sources --sport soccer
 
 # Sync active season to date
 uv run sports-ml ingest --sport hockey --current-season
+uv run sports-ml ingest --sport soccer --current-season
 
-# Sync a specific date window
+# Sync a specific date window (Hockey)
 uv run sports-ml ingest --sport hockey --start-date 2024-10-10 --end-date 2024-10-24
 
 # Backfill multiple seasons + current season
 uv run sports-ml ingest --sport hockey --seasons 20232024,20242025,20252026 --current-season
+uv run sports-ml ingest --sport soccer --seasons 20232024,20242025,20252026 --current-season
 
 # Reconcile local raw cache into Silver tables offline
 uv run sports-ml ingest --sport hockey --offline
+uv run sports-ml ingest --sport soccer --offline
 ```
 
 ### Step 3: Verify Silver Lakehouse Tables

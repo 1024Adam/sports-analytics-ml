@@ -9,7 +9,7 @@ disable-model-invocation: false
 # Onboard New Sport Plugin Playbook
 
 ## When to Use
-- When extending `sports-analytics-ml` beyond NHL Hockey to a new sport such as **Baseball (MLB)** or **Golf (PGA)**.
+- When extending `sports-analytics-ml` beyond NHL Hockey to a new sport such as **Soccer (EPL)**, **Baseball (MLB)**, or **Golf (PGA)**.
 - Use with `sports-ml-architect` when designing the new sport's data/feature spec in `docs/`, or with `sports-ml-developer` when scaffolding `src/sports_ml/sports/<sport>/`.
 
 ---
@@ -19,6 +19,7 @@ Verify which competition topology and exposure basis the new sport uses in `src/
 
 | Sport | Topology (`contracts.py`) | Temporal Ordering Key | Exposure Basis (`pregame_exposure_rate`) | Specialist / Venue Hooks |
 | :--- | :--- | :--- | :--- | :--- |
+| **Soccer (EPL)** | `head_to_head` (3-way `1X2`: Home Win, Draw, Away Win) | `(start_time_utc, event_seq, event_id)` | Outfield & GK: per 90 min (`scale=90.0`) | Starting Goalkeeper ($\text{GSAA}/90$, $\text{PSxG}-\text{GA}$), Promoted-Club Elo Prior, Set-Piece/Penalty Takers |
 | **Baseball (MLB)** | `head_to_head` | `(start_time_utc, event_seq, event_id)` (`event_seq=1,2` for doubleheaders) | Batters: per PA (`scale=1.0`); Pitchers: per 9 IP (`scale=9.0`) | Starting Pitcher ($xFIP$, Stuff+, K-BB%), Bullpen 3-day workload, Ballpark & Weather factors |
 | **Golf (PGA)** | `multi_entrant_field` (tournament) & `head_to_head` (matchups) | `(start_time_utc, event_seq, event_id)` (`event_seq=1..4` for Rounds 1–4) | Per 18-hole round (`scale=1.0`) for Strokes Gained (`SG:OTT`, `SG:APP`, `SG:ATG`, `SG:PUTT`) | Course-fit weights (driving distance/accuracy, approach buckets, turf type) & Field Strength |
 

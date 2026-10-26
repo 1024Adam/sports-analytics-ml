@@ -1,7 +1,7 @@
 ---
 name: train-models
-description: "Use when: building pre-game Gold feature tables (`sports-ml features build`) or training production Stage 1 and Stage 2 model bundles (`sports-ml train`), updating model artifacts in `artifacts/hockey/`, or refreshing SHA-256 schema fingerprints (`metadata.json`)."
-argument-hint: "Optional --include-stage2, --version <tag>, or features-only..."
+description: "Use when: building pre-game Gold feature tables (`sports-ml features build`) or training production Stage 1 and Stage 2 model bundles (`sports-ml train`) for `--sport hockey` or `--sport soccer`, updating model artifacts in `artifacts/<sport>/`, or refreshing SHA-256 schema fingerprints (`metadata.json`)."
+argument-hint: "Optional --sport (hockey|soccer), --include-stage2, --version <tag>, or features-only..."
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -30,11 +30,13 @@ Check that `data/silver/hockey/games.parquet` and `data/silver/hockey/team_game_
 Choose whether to include Stage 2 player projection models (`--include-stage2` is recommended so both Stage 1 and Stage 2 are ready for inference):
 
 ```bash
-# Train both Stage 1 (Win Probability + Team Goals) and Stage 2 (Skater & Goalie Projections)
+# Train both Stage 1 and Stage 2 models (Hockey or Soccer)
 uv run sports-ml train --sport hockey --include-stage2 --version v1
+uv run sports-ml train --sport soccer --include-stage2 --version v1
 
-# Train Stage 1 (Mandatory Calibrated Win Probability) only
+# Train Stage 1 only
 uv run sports-ml train --sport hockey --no-include-stage2 --version v1
+uv run sports-ml train --sport soccer --no-include-stage2 --version v1
 ```
 
 ### Step 4: Inspect Saved Bundle & `metadata.json` Fingerprint
