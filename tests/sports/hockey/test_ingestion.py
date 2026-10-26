@@ -27,6 +27,7 @@ from sports_ml.sports.hockey.ingestion import (
     MoneyPuckClient,
     NHLWebAPIClient,
     PreGameLineupResolver,
+    check_hockey_data_sources,
     derive_active_nhl_season,
     parse_boxscore_payload,
     parse_roster_payload,
@@ -479,3 +480,60 @@ def test_two_tier_pregame_lineup_goalie_and_injury_resolver() -> None:
 
     # Verify json serializability of ResolvedTeamLineup
     assert json.loads(tier2_res.model_dump_json())["team"] == "BOS"
+
+
+def test_data_source_health_probes_success_and_failure(tmp_path: Path) -> None:
+    """Verify upstream health probes validate NHL API, MoneyPuck, and DailyFaceoff contracts."""
+    mp_teams_csv = (
+        b"gameId,team,situation,xGoalsFor,xGoalsAgainst,shotAttemptsFor,shotAttemptsAgainst,"
+        b"unblockedShotAttemptsFor,unblockedShotAttemptsAgainst,highDangerxGoalsFor,"
+        b"highDangerxGoalsAgainst,iceTime,goalsFor,goalsAgainst\n"
+        b"2024020001,BOS,5on5,2.75,1.85,55,44,41,32,1.20,0.75,2940,3,1\n"
+        b"2024020001,BOS,5on4,0.85,0.05,12,1,9,1,0.45,0.0,360,1,0\n"
+        b"2024020001,BOS,4on5,0.05,0.60,2,10,1,8,0.0,0.30,240,0,1\n"
+    )
+    df_html = (
+        '<html><body><script id="__NEXT_DATA__" type="application/json">'
+        '{"props":{"pageProps":{"data":[{"homeTeamName":"Boston Bruins",'
+        '"homeGoalieName":"Jeremy Swayman","homeNewsStrengthName":"Confirmed"}]}}}'
+        "</script></body></html>"
+    )
+
+    def _healthy_nhl(req: httpx.Request) -> httpx.Response:
+        if "schedule" in req.url.path:
+            return httpx.Response(200, json=_sample_schedule_payload())
+        if "roster" in req.url.path:
+            return httpx.Response(200, json=_sample_roster_payload())
+        return httpx.Response(404)
+
+    def _healthy_mp(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=mp_teams_csv)
+
+    def _healthy_df(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=df_html)
+
+    results = check_hockey_data_sources(
+        tmp_path,
+        target_date=date(2024, 10, 10),
+        team_code="BOS",
+        nhl_transport=httpx.MockTransport(_healthy_nhl),
+        moneypuck_transport=httpx.MockTransport(_healthy_mp),
+        dailyfaceoff_transport=httpx.MockTransport(_healthy_df),
+    )
+    assert len(results) == 4
+    assert all(r.healthy for r in results)
+
+    # Simulate broken DailyFaceoff HTML (missing __NEXT_DATA__)
+    def _broken_df(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>Redesign without Next data</body></html>")
+
+    broken_results = check_hockey_data_sources(
+        tmp_path,
+        target_date=date(2024, 10, 10),
+        team_code="BOS",
+        nhl_transport=httpx.MockTransport(_healthy_nhl),
+        moneypuck_transport=httpx.MockTransport(_healthy_mp),
+        dailyfaceoff_transport=httpx.MockTransport(_broken_df),
+    )
+    assert broken_results[3].healthy is False
+    assert "__NEXT_DATA__" in broken_results[3].details

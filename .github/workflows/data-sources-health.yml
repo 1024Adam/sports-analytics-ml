@@ -1,0 +1,34 @@
+name: Data Sources Health
+
+on:
+  schedule:
+    # Run daily at 14:00 UTC (10:00 AM EDT / morning skate window)
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-data-sources:
+    name: Verify Upstream Data Sources & Schemas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies from lockfile
+        run: uv sync --locked
+
+      - name: Probe NHL API, MoneyPuck & DailyFaceoff connectivity
+        run: uv run sports-ml check-sources --sport hockey

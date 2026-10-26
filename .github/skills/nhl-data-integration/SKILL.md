@@ -9,7 +9,8 @@ disable-model-invocation: false
 # NHL Data Integration Playbook
 
 ## When to Use
-- Implementing or updating `src/sports_ml/sports/hockey/ingestion/` (`nhl_api.py`, `moneypuck.py`, `lineups.py`, `reconciler.py`) or `constants.py`.
+- Implementing or updating `src/sports_ml/sports/hockey/ingestion/` (`nhl_api.py`, `moneypuck.py`, `lineups.py`, `health.py`, `reconciler.py`) or `constants.py`.
+- Running or updating upstream data source health & schema probes (`sports-ml check-sources`).
 - Creating deterministic offline JSON/CSV fixtures in `tests/sports/hockey/test_ingestion.py`.
 - Debugging schema mismatches, missing advanced stats, or team/player ID mapping issues.
 
@@ -86,3 +87,14 @@ When `sports-ml predict` runs for an upcoming matchup:
    - Fetch daytime starting goalie & line combinations / injury list (e.g., DailyFaceoff starting goalies & team line combinations).
    - Match player names to NHL 7-digit `player_id`s (using normalized case/diacritic stripping + team filter), exclude injured/scratched players, and tag goalie status as `"CONFIRMED_MORNING_SKATE"` or `"EXPECTED_MORNING_SKATE"`.
    - If predicting future days before morning skates are posted, fall back to the active roster's most recent game lineup and primary non-B2B starter (`"PROJECTED_HEURISTIC"`).
+
+---
+
+## 5. Upstream Connectivity & Schema Probes (`health.py` / `check-sources`)
+
+Run `uv run sports-ml check-sources --sport hockey` (also executed daily by `.github/workflows/data-sources-health.yml`) to verify live reachability and schema contracts across all three external providers:
+- `check_nhl_schedule_source`: Validates `/v1/schedule/now` and `parse_schedule_payload` against `SILVER_GAMES_SCHEMA`.
+- `check_nhl_roster_source`: Validates `/v1/roster/{TEAM}/current` and ensures active players across `F`, `D`, and `G`.
+- `check_moneypuck_source`: Validates `regular/teams/{TEAM}.csv` and situational xG/Corsi columns.
+- `check_dailyfaceoff_source`: Validates `dailyfaceoff.com/starting-goalies/{YYYY-MM-DD}` and the embedded `<script id="__NEXT_DATA__">` JSON structure.
+

@@ -165,7 +165,8 @@ sports-analytics-ml/
 │   │   └── train-models/
 │   │       └── SKILL.md             # /train-models Gold feature build & model bundle fit
 │   └── workflows/
-│       └── ci.yml                   # Fast offline CI gate (ruff, mypy, pytest)
+│       ├── ci.yml                   # Fast offline CI gate (ruff, mypy, pytest)
+│       └── data-sources-health.yml  # Daily scheduled canary for NHL API, MoneyPuck & DailyFaceoff
 ├── docs/
 │   ├── architecture.md              # This system architecture blueprint
 │   ├── data-and-features.md         # Schemas, data sources & mathematical feature specs
@@ -185,7 +186,7 @@ sports-analytics-ml/
 ├── src/
 │   └── sports_ml/
 │       ├── __init__.py
-│       ├── cli.py                   # Typer/Click CLI (`sports-ml ingest|features|train|backtest|predict`)
+│       ├── cli.py                   # Typer/Click CLI (`sports-ml ingest|features|train|backtest|predict|score-predictions|check-sources`)
 │       ├── config.py                # Pydantic settings (paths, seasons, hyperparameters)
 │       ├── core/                    # SPORT-AGNOSTIC ML ENGINE
 │       │   ├── __init__.py
@@ -207,6 +208,7 @@ sports-analytics-ml/
 │               │   ├── nhl_api.py   # Async/cached client for api-web.nhle.com (schedule, boxscore, roster)
 │               │   ├── moneypuck.py # Downloader & parser for MoneyPuck teams/skaters/goalies CSVs
 │               │   ├── lineups.py   # 2-Tier live pre-game lineup, starting goalie & injury resolver
+│               │   ├── health.py    # Upstream connectivity & schema contract probes (`check-sources`)
 │               │   └── reconciler.py# Joins NHL API & MoneyPuck into Bronze/Silver Parquet tables
 │               ├── features/
 │               │   ├── team.py      # 5v5 xG%, Corsi, Fenwick, PDO, Special Teams rolling features
@@ -271,8 +273,12 @@ Used when experimenting with new features, auditing data, or measuring out-of-sa
 | `sports-ml backtest` | **"Time Machine" Evaluator**: Simulates training and predicting across historical seasons month-by-month to score Log Loss, Brier Score, and calibration against baselines. | **No** (Evaluation / R&D only) |
 | `sports-ml train` | Fits the production LightGBM + Calibrator bundle on all completed games and saves to `artifacts/` with a `metadata.json` schema fingerprint. | Run once initially, then periodically (e.g., weekly/monthly) |
 | `sports-ml score-predictions` | Joins the append-only live prediction ledger (`data/predictions/`) against completed game/player boxscores to score real-world pre-game predictions. | **No** (Live season audit only) |
+| `sports-ml check-sources` | Verifies live HTTP reachability and Polars/JSON schema contracts across Official NHL Web API, MoneyPuck CSVs, and DailyFaceoff `__NEXT_DATA__`. | **No** (Daily scheduled canary / diagnostics) |
 
 ```bash
+# Verify live connectivity and schema contracts across all external feeds
+sports-ml check-sources --sport hockey
+
 # Sync only the current season to date (or a specific date window)
 sports-ml ingest --sport hockey --current-season
 sports-ml ingest --sport hockey --start-date 2026-10-17 --end-date 2026-10-25
@@ -357,16 +363,19 @@ All unit tests in `tests/` run **100% offline** in seconds using deterministic s
 4. **Ingestion Parser & Fallback Tests (`test_ingestion.py`)**:
    * Validates NHL API JSON and MoneyPuck CSV reconciliation, historical team tricode normalization (`ARI` $\rightarrow$ `UTA`, `S.J` $\rightarrow$ `SJS`), and graceful fallback when MoneyPuck data lags behind NHL API boxscores.
 
-### 8.3 GitHub Actions Continuous Integration (`.github/workflows/ci.yml`)
-A single, fast, least-privilege CI workflow runs on every `push` and `pull_request` to `main`:
-* **Permissions**: `contents: read` (least privilege).
-* **Environment**: Ubuntu runner, Python 3.11+ with `uv` / lockfile (`uv.lock`) dependency caching.
-* **Verification Steps (< 60 seconds, 100% offline)**:
-  1. **Git Hygiene / Large-File Check**: Fails if any files under `data/`, `artifacts/`, or binary `.parquet`/`.pkl` files are tracked in git.
-  2. `ruff check .` (linting)
-  3. `ruff format --check .` (formatting check)
-  4. `mypy src tests` (static type checking)
-  5. `pytest --cov=sports_ml` (unit, schema, and anti-leakage test suite)
+### 8.3 GitHub Actions Continuous Integration (`.github/workflows/ci.yml` & `data-sources-health.yml`)
+1. **PR & Push Quality Gate (`.github/workflows/ci.yml`)**:
+   A fast, least-privilege CI workflow runs on every `push` and `pull_request` to `main`:
+   * **Permissions**: `contents: read` (least privilege).
+   * **Environment**: Ubuntu runner, Python 3.11+ with `uv` / lockfile (`uv.lock`) dependency caching.
+   * **Verification Steps (< 60 seconds, 100% offline)**:
+     1. **Git Hygiene / Large-File Check**: Fails if any files under `data/`, `artifacts/`, or binary `.parquet`/`.pkl` files are tracked in git.
+     2. `ruff check .` (linting)
+     3. `ruff format --check .` (formatting check)
+     4. `mypy src tests` (static type checking)
+     5. `pytest --cov=sports_ml` (unit, schema, and anti-leakage test suite)
+2. **Daily Upstream Connectivity Canary (`.github/workflows/data-sources-health.yml`)**:
+   Runs daily at `14:00 UTC` (and on manual `workflow_dispatch`) to execute `uv run sports-ml check-sources --sport hockey`, verifying live reachability and schema contracts across the Official NHL Web API (`/v1/schedule/now`, `/v1/roster/{TEAM}/current`), MoneyPuck game-by-game CSVs, and DailyFaceoff `__NEXT_DATA__` JSON without coupling PR checks to third-party uptime.
 
 ---
 

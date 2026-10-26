@@ -16,6 +16,7 @@ from sports_ml.config import RANDOM_SEED, Settings, get_settings
 from sports_ml.core.evaluation import evaluate_probabilities
 from sports_ml.core.registry import ModelRegistry
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
+from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
 from sports_ml.sports.hockey.ingestion.moneypuck import MoneyPuckClient
 from sports_ml.sports.hockey.ingestion.nhl_api import (
     NHLWebAPIClient,
@@ -722,3 +723,44 @@ def score_predictions_command(
         f"{report.coin_flip_baseline.accuracy:.3f}",
     )
     console.print(table)
+
+
+@app.command("check-sources")
+def check_sources_command(
+    sport: Annotated[str, typer.Option("--sport", help="Sport plugin slug (e.g., hockey).")] = (
+        "hockey"
+    ),
+    team: Annotated[
+        str,
+        typer.Option("--team", help="Sample NHL team tricode for roster and MoneyPuck probes."),
+    ] = "BOS",
+) -> None:
+    """Verify live connectivity and schema contracts across all external data feeds."""
+    slug = _ensure_supported_sport(sport)
+    settings = get_settings()
+    results = check_hockey_data_sources(
+        settings.paths.raw_dir,
+        team_code=team,
+    )
+
+    table = Table(title=f"Upstream Data Source Health ({slug.upper()})")
+    table.add_column("Source", style="cyan", no_wrap=True)
+    table.add_column("Status", justify="center")
+    table.add_column("Latency", justify="right")
+    table.add_column("Details")
+
+    all_healthy = True
+    for res in results:
+        status_str = "[bold green]PASS[/bold green]" if res.healthy else "[bold red]FAIL[/bold red]"
+        if not res.healthy:
+            all_healthy = False
+        table.add_row(
+            res.source,
+            status_str,
+            f"{res.latency_ms:.0f} ms",
+            res.details,
+        )
+
+    console.print(table)
+    if not all_healthy:
+        raise typer.Exit(code=1)
