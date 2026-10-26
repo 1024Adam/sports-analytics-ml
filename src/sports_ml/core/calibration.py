@@ -258,7 +258,8 @@ class MulticlassProbabilityCalibrator:
         if self._multinomial_model is not None:
             log_p = np.log(probs_2d)
             pred_matrix = np.asarray(self._multinomial_model.predict_proba(log_p), dtype=np.float64)
-            return normalize_multiclass_probabilities(pred_matrix)
+            # Damped blend (50% multinomial Platt + 50% structural prior) prevents small-fold shift
+            return normalize_multiclass_probabilities(0.50 * pred_matrix + 0.50 * probs_2d)
 
         return probs_2d
 

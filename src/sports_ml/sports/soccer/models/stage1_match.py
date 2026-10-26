@@ -192,13 +192,13 @@ class Stage1SoccerMatchModel:
         self,
         *,
         calibration_method: CalibrationMethod = "sigmoid",
-        elo_blend_weight: float = 0.40,
-        dixon_coles_blend_weight: float = 0.25,
+        elo_blend_weight: float = 0.55,
+        dixon_coles_blend_weight: float = 0.30,
         dixon_coles_rho: float = -0.11,
         draw_param: float = 0.26,
-        n_estimators: int = 80,
-        learning_rate: float = 0.04,
-        num_leaves: int = 12,
+        n_estimators: int = 55,
+        learning_rate: float = 0.03,
+        num_leaves: int = 7,
         random_seed: int = RANDOM_SEED,
     ) -> None:
         self.calibration_method: CalibrationMethod = calibration_method
@@ -309,7 +309,7 @@ class Stage1SoccerMatchModel:
             else np.zeros(n, dtype=np.float64)
         )
 
-        comp_diff = elo_diff + 140.0 * npxgd_diff + 45.0 * gk_diff + 90.0 * fwd_diff
+        comp_diff = elo_diff + 85.0 * npxgd_diff + 35.0 * gk_diff + 55.0 * fwd_diff
         out = np.zeros((n, 3), dtype=np.float64)
         for i in range(n):
             p_h, p_d, p_a = compute_elo_1x2_probabilities(
@@ -463,8 +463,8 @@ class Stage1SoccerMatchModel:
             x_fit = x_train
             y_fit = y_train
 
-        min_child = max(2, min(20, x_fit.shape[0] // 8))
-        leaves = max(3, min(self.num_leaves, max(3, x_fit.shape[0] // 4)))
+        min_child = max(5, min(35, x_fit.shape[0] // 8))
+        leaves = max(3, min(self.num_leaves, max(3, x_fit.shape[0] // 6)))
 
         clf = LGBMClassifier(
             objective="multiclass",
@@ -473,6 +473,11 @@ class Stage1SoccerMatchModel:
             learning_rate=self.learning_rate,
             num_leaves=leaves,
             min_child_samples=min_child,
+            colsample_bytree=0.70,
+            subsample=0.80,
+            subsample_freq=1,
+            reg_alpha=1.0,
+            reg_lambda=5.0,
             random_state=self.random_seed,
             n_jobs=1,
             verbose=-1,
