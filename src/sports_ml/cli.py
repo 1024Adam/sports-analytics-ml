@@ -358,7 +358,7 @@ def _run_soccer_ingestion(
     seasons: str | None = None,
     current_season: bool = False,
     offline: bool = False,
-    max_player_summaries: int = 80,
+    max_player_summaries_per_team: int = 25,
 ) -> pl.DataFrame:
     """Execute hybrid FPL + Understat + Football-Data ingestion and reconcile into Silver tables."""
     import numpy as np
@@ -465,8 +465,11 @@ def _run_soccer_ingestion(
                 match_frames.append(fx_df)
 
             if not squad_df.is_empty():
-                top_players = squad_df.sort("season_minutes", descending=True).head(
-                    max_player_summaries
+                top_players = (
+                    squad_df.filter(pl.col("season_minutes") > 0)
+                    .sort(["team", "season_minutes"], descending=[False, True])
+                    .group_by("team", maintain_order=True)
+                    .head(max_player_summaries_per_team)
                 )
                 for p_row in top_players.iter_rows(named=True):
                     pid = int(p_row["player_id"])
