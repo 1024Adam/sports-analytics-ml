@@ -124,8 +124,9 @@ def pregame_exposure_rate(
 ) -> pl.Expr:
     """Compute a strictly shifted exposure-normalized rate (`scale * sum(num) / sum(exp)`).
 
-    Supports per-60 TOI (`scale_factor=60.0` in NHL), per-9 IP (`scale_factor=9.0` in MLB),
-    per-PA (`scale_factor=1.0` in MLB), and per-round Strokes Gained (`scale_factor=1.0` in PGA).
+    Supports per-90 match minutes (`scale_factor=90.0` in EPL Soccer), per-60 TOI
+    (`scale_factor=60.0` in NHL), per-9 IP (`scale_factor=9.0` in MLB), per-PA
+    (`scale_factor=1.0` in MLB), and per-round Strokes Gained (`scale_factor=1.0` in PGA).
     """
     if window < 1:
         raise ValueError(f"window must be >= 1, got {window}.")

@@ -144,26 +144,26 @@ Phase 2 extends `sports-analytics-ml` to **English Premier League (EPL) Soccer (
 ---
 
 ## Milestone 7: Core Multi-Outcome (`1X2`) Extensions & Soccer Plugin Foundation (`core/` & `sports/soccer/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Extend the sport-agnostic `src/sports_ml/core/` engine to support 3-way (`1X2`: Home Win, Draw, Away Win) competition outcomes, promotion/relegation Elo priors, Ranked Probability Score (RPS) evaluation, and per-90 exposure rates, while establishing the EPL data specification and `SoccerAdapter`.
 
 ### Deliverables
-- [ ] `docs/soccer-data-and-features.md`: Comprehensive EPL data & feature specification defining Silver Parquet schemas (`matches.parquet`, `team_match_logs.parquet`, `outfield_match_logs.parquet`, `gk_match_logs.parquet`), Bayesian shrinkage constants $k$, promoted-club Elo priors, and Stage 1 (`1X2` + $\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}}$) / Stage 2 targets.
-- [ ] `src/sports_ml/core/ratings.py`: Extend `EloConfig` and `PairwiseEloEngine` to support:
+- [x] `docs/soccer-data-and-features.md`: Comprehensive EPL data & feature specification defining Silver Parquet schemas (`matches.parquet`, `team_match_logs.parquet`, `outfield_match_logs.parquet`, `gk_match_logs.parquet`), Bayesian shrinkage constants $k$, promoted-club Elo priors, and Stage 1 (`1X2` + $\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}}$) / Stage 2 targets.
+- [x] `src/sports_ml/core/ratings.py`: Extend `EloConfig` and `PairwiseEloEngine` to support:
   - Analytical 3-way (`1X2`) Elo win/draw/loss probabilities (`elo_home_win_prob`, `elo_draw_prob`, `elo_away_win_prob` summing to `1.0`, parameterized by a baseline draw parameter $\nu$ where $P(\text{Draw})$ peaks at $\Delta \text{Elo} = 0$ and decays with rating disparity).
   - **Promotion / Relegation Offseason Handler**: Between seasons, returning clubs regress toward `base_rating` (`1500.0`), while newly promoted EFL Championship clubs initialize at a configurable `promoted_team_rating` (default `1390.0`).
-- [ ] `src/sports_ml/core/calibration.py`: Add `MulticlassProbabilityCalibrator` supporting out-of-fold 3-way (`1X2`) temperature scaling / Dirichlet-Platt / isotonic calibration with strict simplex normalization ($\sum_{c \in \{H, D, A\}} P_c = 1.0$, $P_c \in (\epsilon, 1-\epsilon)$).
-- [ ] `src/sports_ml/core/evaluation.py`: Add `MulticlassEvaluationMetrics`, `MulticlassBenchmarkReport`, `ranked_probability_score` (**RPS** — ordinal multi-outcome error metric over $(H, D, A)$), 3-class **Log Loss**, multi-class **Brier Score**, multiclass **ECE**, accuracy, and baseline comparisons (uniform `1/3`, empirical EPL prior `~45% H / 24% D / 31% A`, and Elo-1X2 baseline).
-- [ ] `src/sports_ml/core/temporal.py`: Document and verify `pregame_exposure_rate(..., scale_factor=90.0)` for per-90-minute soccer rate normalization.
-- [ ] `src/sports_ml/sports/soccer/constants.py`: Historical & current EPL club registry (all current and recent promoted/relegated clubs with canonical 3-letter codes `ARS`, `AVL`, `BOU`, `BRE`, `BHA`, `CHE`, `CRY`, `EVE`, `FUL`, `IPS`, `LEI`, `LIV`, `MCI`, `MUN`, `NEW`, `NFO`, `SOU`, `TOT`, `WHU`, `WOL`, `LUT`, `BUR`, `SHU`, `LEE`, `SUN`, etc.), cross-source team name alias normalizer (FPL $\leftrightarrow$ Understat $\leftrightarrow$ Football-Data.co.uk), and UK stadium latitude/longitude/timezone (`Europe/London`) coordinates.
-- [ ] `src/sports_ml/sports/soccer/adapter.py`: `SoccerAdapter` (`sport_slug = "soccer"`, `topology = "head_to_head"`) implementing `SportAdapter` protocol.
+- [x] `src/sports_ml/core/calibration.py`: Add `MulticlassProbabilityCalibrator` supporting out-of-fold 3-way (`1X2`) temperature scaling / Dirichlet-Platt / isotonic calibration with strict simplex normalization ($\sum_{c \in \{H, D, A\}} P_c = 1.0$, $P_c \in (\epsilon, 1-\epsilon)$).
+- [x] `src/sports_ml/core/evaluation.py`: Add `MulticlassEvaluationMetrics`, `MulticlassBenchmarkReport`, `ranked_probability_score` (**RPS** — ordinal multi-outcome error metric over $(H, D, A)$), 3-class **Log Loss**, multi-class **Brier Score**, multiclass **ECE**, accuracy, and baseline comparisons (uniform `1/3`, empirical EPL prior `~45% H / 24% D / 31% A`, and Elo-1X2 baseline).
+- [x] `src/sports_ml/core/temporal.py`: Document and verify `pregame_exposure_rate(..., scale_factor=90.0)` for per-90-minute soccer rate normalization.
+- [x] `src/sports_ml/sports/soccer/constants.py`: Historical & current EPL club registry (all current and recent promoted/relegated clubs with canonical 3-letter codes `ARS`, `AVL`, `BOU`, `BRE`, `BHA`, `CHE`, `CRY`, `EVE`, `FUL`, `IPS`, `LEI`, `LIV`, `MCI`, `MUN`, `NEW`, `NFO`, `SOU`, `TOT`, `WHU`, `WOL`, `LUT`, `BUR`, `SHU`, `LEE`, `SUN`, etc.), cross-source team name alias normalizer (FPL $\leftrightarrow$ Understat $\leftrightarrow$ Football-Data.co.uk), and UK stadium latitude/longitude/timezone (`Europe/London`) coordinates.
+- [x] `src/sports_ml/sports/soccer/adapter.py`: `SoccerAdapter` (`sport_slug = "soccer"`, `topology = "head_to_head"`) implementing `SportAdapter` protocol.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/core/test_multiclass_calibration_eval.py`: Verify 3-way `1X2` probabilities strictly sum to `1.0` in $(0, 1)$, verify Ranked Probability Score (RPS) penalizes distant outcome errors ($H$ vs. $A$) strictly more than adjacent errors ($H$ vs. $D$), and verify promoted teams receive `promoted_team_rating` upon season transition.
-- [ ] `tests/sports/soccer/test_adapter_constants.py`: Verify canonical club tricode normalization across FPL, Understat, and Football-Data naming variants, and verify `SoccerAdapter` event/participant schema validation.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `tests/core/test_multiclass_calibration_eval.py`: Verify 3-way `1X2` probabilities strictly sum to `1.0` in $(0, 1)$, verify Ranked Probability Score (RPS) penalizes distant outcome errors ($H$ vs. $A$) strictly more than adjacent errors ($H$ vs. $D$), and verify promoted teams receive `promoted_team_rating` upon season transition.
+- [x] `tests/sports/soccer/test_adapter_constants.py`: Verify canonical club tricode normalization across FPL, Understat, and Football-Data naming variants, and verify `SoccerAdapter` event/participant schema validation.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 
