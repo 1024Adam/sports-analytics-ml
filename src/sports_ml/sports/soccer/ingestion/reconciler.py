@@ -95,7 +95,7 @@ class SoccerSilverReconciler:
             schema=SILVER_MATCHES_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.matches_path)
+            merged.write_parquet(self.matches_path, compression="zstd")
         return merged
 
     def reconcile_team_match_logs(
@@ -307,7 +307,7 @@ class SoccerSilverReconciler:
             schema=SILVER_TEAM_MATCH_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.team_logs_path)
+            merged.write_parquet(self.team_logs_path, compression="zstd")
         return merged
 
     def reconcile_outfield_match_logs(
@@ -388,7 +388,7 @@ class SoccerSilverReconciler:
             schema=SILVER_OUTFIELD_MATCH_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.outfield_logs_path)
+            merged.write_parquet(self.outfield_logs_path, compression="zstd")
         return merged
 
     def reconcile_gk_match_logs(
@@ -443,5 +443,5 @@ class SoccerSilverReconciler:
             schema=SILVER_GK_MATCH_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.gk_logs_path)
+            merged.write_parquet(self.gk_logs_path, compression="zstd")
         return merged

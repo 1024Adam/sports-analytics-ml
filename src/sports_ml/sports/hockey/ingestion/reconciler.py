@@ -90,7 +90,7 @@ class HockeySilverReconciler:
             schema=SILVER_GAMES_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.games_path)
+            merged.write_parquet(self.games_path, compression="zstd")
         return merged
 
     def reconcile_team_game_logs(
@@ -278,7 +278,7 @@ class HockeySilverReconciler:
             schema=SILVER_TEAM_GAME_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.team_logs_path)
+            merged.write_parquet(self.team_logs_path, compression="zstd")
         return merged
 
     def reconcile_skater_game_logs(
@@ -356,7 +356,7 @@ class HockeySilverReconciler:
             schema=SILVER_SKATER_GAME_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.skater_logs_path)
+            merged.write_parquet(self.skater_logs_path, compression="zstd")
         return merged
 
     def reconcile_goalie_game_logs(
@@ -407,5 +407,5 @@ class HockeySilverReconciler:
             schema=SILVER_GOALIE_GAME_LOGS_SCHEMA,
         )
         if persist:
-            merged.write_parquet(self.goalie_logs_path)
+            merged.write_parquet(self.goalie_logs_path, compression="zstd")
         return merged

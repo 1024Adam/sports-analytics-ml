@@ -12,8 +12,6 @@ and Polars normalization for:
 
 from __future__ import annotations
 
-import json
-import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -23,6 +21,7 @@ import httpx
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sports_ml.core.cache import read_cached_json, write_cached_json
 from sports_ml.sports.soccer.constants import (
     SILVER_GK_MATCH_LOGS_SCHEMA,
     SILVER_MATCHES_SCHEMA,
@@ -392,32 +391,26 @@ class FPLAPIClient:
             return resp.json()
 
     def _read_cached_json(self, cache_path: Path, ttl_seconds: float | None) -> Any | None:
-        if not cache_path.exists():
-            return None
-        if ttl_seconds is not None:
-            age = time.time() - cache_path.stat().st_mtime
-            if age > ttl_seconds:
-                return None
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+        return read_cached_json(cache_path, ttl_seconds=ttl_seconds)
 
     def fetch_bootstrap_static(self, *, ttl_seconds: float | None = 3600.0) -> dict[str, Any]:
         """Fetch `/api/bootstrap-static/` with disk cache."""
-        cache_path = self.cache_dir / "bootstrap_static.json"
+        cache_path = self.cache_dir / "bootstrap_static.json.gz"
         cached = self._read_cached_json(cache_path, ttl_seconds)
         if isinstance(cached, dict):
             return cached
         payload = self._get_json("bootstrap-static/")
-        cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return dict(payload)
 
     def fetch_fixtures(self, *, ttl_seconds: float | None = 1800.0) -> list[dict[str, Any]]:
         """Fetch `/api/fixtures/` list with disk cache."""
-        cache_path = self.cache_dir / "fixtures.json"
+        cache_path = self.cache_dir / "fixtures.json.gz"
         cached = self._read_cached_json(cache_path, ttl_seconds)
         if isinstance(cached, list):
             return cached
         payload = self._get_json("fixtures/")
-        cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return list(payload)
 
     def fetch_element_summary(
@@ -429,10 +422,10 @@ class FPLAPIClient:
         """Fetch `/api/element-summary/{player_id}/` with disk cache."""
         summaries_dir = self.cache_dir / "element_summaries"
         summaries_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = summaries_dir / f"{player_id}.json"
+        cache_path = summaries_dir / f"{player_id}.json.gz"
         cached = self._read_cached_json(cache_path, ttl_seconds)
         if isinstance(cached, dict):
             return cached
         payload = self._get_json(f"element-summary/{player_id}/")
-        cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return dict(payload)

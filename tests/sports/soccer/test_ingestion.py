@@ -408,7 +408,12 @@ def test_cached_clients_and_health_checks_offline(tmp_path: Path) -> None:
     assert len(results) == 3
     assert all(r.healthy for r in results)
 
-    # Verify disk cache hits work offline without further network calls
+    # Verify disk cache hits work offline without further network calls and `.gz` files exist
+    assert (tmp_path / "raw" / "fpl_api" / "bootstrap_static.json.gz").exists()
+    assert (tmp_path / "raw" / "fpl_api" / "fixtures.json.gz").exists()
+    assert (tmp_path / "raw" / "understat" / "epl_teams_2024.json.gz").exists()
+    assert (tmp_path / "raw" / "football_data" / "E0_2425.csv.gz").exists()
+
     fpl_client = FPLAPIClient(cache_dir=tmp_path / "raw" / "fpl_api")
     assert "teams" in fpl_client.fetch_bootstrap_static(ttl_seconds=3600.0)
     assert len(fpl_client.fetch_fixtures(ttl_seconds=3600.0)) == 2

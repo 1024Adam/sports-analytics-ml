@@ -5,6 +5,17 @@ shrinkage, Elo/field rating engines, schedule/travel calculators, walk-forward
 splitters, probability calibration, evaluation metrics, and artifact registry.
 """
 
+from sports_ml.core.cache import (
+    CacheCompactionReport,
+    cache_stem,
+    compact_raw_cache_directory,
+    list_cached_files,
+    read_cached_bytes,
+    read_cached_json,
+    resolve_cache_read_path,
+    write_cached_json,
+    write_gzip_bytes,
+)
 from sports_ml.core.calibration import (
     CalibrationMethod,
     MulticlassProbabilityCalibrator,
@@ -81,6 +92,7 @@ __all__ = [
     "CANONICAL_EVENT_KEY_COLS",
     "CANONICAL_PARTICIPANT_KEY_COLS",
     "CANONICAL_TEMPORAL_SORT_COLS",
+    "CacheCompactionReport",
     "CalibrationMethod",
     "CompetitionTopology",
     "EloConfig",
@@ -103,8 +115,10 @@ __all__ = [
     "WalkForwardSplit",
     "WalkForwardValidator",
     "bayesian_shrinkage",
+    "cache_stem",
     "calibrate_multi_entrant_group",
     "clip_probabilities",
+    "compact_raw_cache_directory",
     "compare_against_baselines",
     "compare_multiclass_against_baselines",
     "compute_elo_1x2_probabilities",
@@ -118,6 +132,7 @@ __all__ = [
     "expected_calibration_error",
     "extract_schema_signature",
     "haversine_distance_km",
+    "list_cached_files",
     "multiclass_brier_score",
     "multiclass_expected_calibration_error",
     "normalize_multiclass_probabilities",
@@ -127,9 +142,14 @@ __all__ = [
     "pregame_rolling_sum",
     "pregame_sample_count",
     "ranked_probability_score",
+    "read_cached_bytes",
+    "read_cached_json",
+    "resolve_cache_read_path",
     "shrink_scalar",
     "sort_events_chronologically",
     "timezone_shift_hours",
     "validate_canonical_event_frame",
     "validate_canonical_participant_frame",
+    "write_cached_json",
+    "write_gzip_bytes",
 ]

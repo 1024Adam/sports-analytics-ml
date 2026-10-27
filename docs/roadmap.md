@@ -268,7 +268,7 @@ Implement the optional Stage 2 EPL outfield & goalkeeper stat projection models 
 # Phase 3: Platform Scalability & Storage Optimization
 
 ## Milestone 12: Transparent Raw-Cache Compression, Deduplication & Storage Compaction (`core/cache.py` & `ingestion/`)
-**Status**: `[ ] Planned`
+**Status**: `[x] Completed`
 
 ### Goal
 Shrink the local `data/raw/` footprint by **~93% (`6.2 GB` $\rightarrow$ `~415 MB`)** without losing a single historical season, game, or feature column by:
@@ -278,7 +278,7 @@ Shrink the local `data/raw/` footprint by **~93% (`6.2 GB` $\rightarrow$ `~415 M
 4. Providing a `sports-ml compact-cache` CLI command to migrate and compact existing local `data/raw/` directories in place with zero network calls.
 
 ### Deliverables
-- [ ] `src/sports_ml/core/cache.py`: Sport-agnostic raw-cache storage & compaction helpers using Python's standard-library `gzip`:
+- [x] `src/sports_ml/core/cache.py`: Sport-agnostic raw-cache storage & compaction helpers using Python's standard-library `gzip`:
   - `resolve_cache_read_path(preferred_gz_path: Path) -> Path | None`: Resolves `*.gz` first and falls back to the legacy uncompressed sibling path (`preferred_gz_path.with_suffix("")`) if present on disk.
   - `write_gzip_bytes(gz_path: Path, raw_bytes: bytes, *, compresslevel: int = 6) -> Path`: Atomically writes Gzip-compressed bytes (via a `.tmp` file rename) and removes any legacy uncompressed sibling file once written.
   - `read_cached_bytes(preferred_gz_path: Path) -> bytes`: Reads and decompresses `*.gz` or reads the legacy uncompressed file transparently.
@@ -287,26 +287,26 @@ Shrink the local `data/raw/` footprint by **~93% (`6.2 GB` $\rightarrow$ `~415 M
     - Consolidates legacy `moneypuck/teams_*.csv` files into `moneypuck/teams_all.csv.gz` (preserving the newest file's payload and `.meta.json` sidecar) and removes the redundant per-season `teams_YYYY.csv` / `teams_YYYY.meta.json` copies.
     - Compresses all remaining uncompressed `.csv` $\rightarrow$ `.csv.gz` and `.json` (excluding `*.meta.json` ETag sidecars) $\rightarrow$ `.json.gz`, verifying readability before removing the uncompressed original.
     - Returns structured `CacheCompactionReport` (`files_compacted`, `duplicates_removed`, `bytes_before`, `bytes_after`, `bytes_saved`).
-- [ ] `src/sports_ml/sports/hockey/ingestion/moneypuck.py`:
+- [x] `src/sports_ml/sports/hockey/ingestion/moneypuck.py`:
   - **Shared `teams_all.csv.gz` Cache Key**: When fetching `"teams"` from the default cumulative `all_teams.csv` endpoint (`self.base_url == MONEYPUCK_SEASON_URL.rstrip("/")`), use cache stem `teams_all` (`teams_all.csv.gz` + `teams_all.meta.json`) instead of `teams_{season_start_year}`. Refresh via TTL/ETag when `is_active_season=True` or when the requested `season_start_year` is not yet present in the cached file. (Preserve per-season `teams_{season_start_year}.csv.gz` when a custom per-season `base_url` is injected in tests).
   - **Compress-on-Ingest + Direct Polars Read**: Write extracted CSV bytes directly to `*.csv.gz` (`skaters_{YYYY}.csv.gz`, `goalies_{YYYY}.csv.gz`, `teams_all.csv.gz`) via `write_gzip_bytes`, and pass the resolved path (`*.csv.gz` or legacy `*.csv`) directly to `pl.read_csv(csv_path)`.
-- [ ] `src/sports_ml/sports/hockey/ingestion/nhl_api.py`:
+- [x] `src/sports_ml/sports/hockey/ingestion/nhl_api.py`:
   - Update schedule, boxscore, landing, and roster disk caches (`schedules/*.json.gz`, `boxscores/{game_id}.json.gz`, `landings/{game_id}.json.gz`, `rosters/{team}_current.json.gz`) to write `.json.gz` and read `.json.gz` with automatic fallback to existing `.json` files via `core/cache.py`.
-- [ ] `src/sports_ml/sports/soccer/ingestion/football_data.py`, `fpl_api.py`, and `understat.py`:
+- [x] `src/sports_ml/sports/soccer/ingestion/football_data.py`, `fpl_api.py`, and `understat.py`:
   - Update `FootballDataClient` (`E0_{code}.csv.gz`), `FPLAPIClient` (`bootstrap_static.json.gz`, `fixtures.json.gz`, `element_summaries/{id}.json.gz`), and `UnderstatClient` (`epl_teams_{yr}.json.gz`, `epl_players_{yr}.json.gz`) to compress on ingest and transparently read `.gz` or legacy uncompressed files.
-- [ ] `src/sports_ml/sports/hockey/ingestion/reconciler.py` & `src/sports_ml/sports/soccer/ingestion/reconciler.py`:
+- [x] `src/sports_ml/sports/hockey/ingestion/reconciler.py` & `src/sports_ml/sports/soccer/ingestion/reconciler.py`:
   - Explicitly pass `compression="zstd"` to all `write_parquet(...)` calls in Silver and Gold table persistence.
-- [ ] `src/sports_ml/cli.py`:
+- [x] `src/sports_ml/cli.py`:
   - Add `sports-ml compact-cache [--data-dir data] [--dry-run]` CLI command printing a Rich summary table of files compacted, duplicate `teams_YYYY.csv` files removed, and disk space reclaimed (`bytes_before` $\rightarrow$ `bytes_after`).
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/core/test_cache_compaction.py`:
+- [x] `tests/core/test_cache_compaction.py`:
   - Verify `write_gzip_bytes` / `write_cached_json` and `pl.read_csv(gz_path)` round-trip both `.csv.gz` and `.json.gz` losslessly.
   - Verify backward-compatible fallback: pre-existing uncompressed `.csv` and `.json` files in a cache directory are read without network calls and compacted cleanly by `compact_raw_cache_directory`.
   - Verify `compact_raw_cache_directory` deduplicates multiple `teams_2023.csv`, `teams_2024.csv`, `teams_2025.csv` files into a single `teams_all.csv.gz` and supports `--dry-run` without mutating files.
-- [ ] `tests/sports/hockey/test_ingestion.py` & `tests/sports/soccer/test_ingestion.py`:
+- [x] `tests/sports/hockey/test_ingestion.py` & `tests/sports/soccer/test_ingestion.py`:
   - Verify `MoneyPuckClient` downloads `all_teams.csv` once across multiple seasons into `teams_all.csv.gz`, stores `skaters_{YYYY}.csv.gz` and `goalies_{YYYY}.csv.gz`, and `pl.read_csv` parses identical Silver DataFrames.
   - Verify `NHLWebAPIClient`, `FootballDataClient`, `FPLAPIClient`, and `UnderstatClient` write `.gz` cache files on ingest and produce **bit-for-bit identical** Silver Parquet tables.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 

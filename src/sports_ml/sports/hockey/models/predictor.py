@@ -17,6 +17,7 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 from sports_ml.config import Settings, get_settings
+from sports_ml.core.cache import list_cached_files, read_cached_json
 from sports_ml.core.evaluation import BenchmarkComparisonReport, compare_against_baselines
 from sports_ml.core.registry import ModelMetadata, ModelRegistry
 from sports_ml.sports.hockey.constants import normalize_tricode
@@ -116,9 +117,9 @@ def build_and_persist_gold_features(
         else pl.DataFrame()
     )
 
-    stage1_df.write_parquet(gold_dir / "stage1_game_features.parquet")
+    stage1_df.write_parquet(gold_dir / "stage1_game_features.parquet", compression="zstd")
     if not stage2_df.is_empty():
-        stage2_df.write_parquet(gold_dir / "stage2_player_features.parquet")
+        stage2_df.write_parquet(gold_dir / "stage2_player_features.parquet", compression="zstd")
 
     return stage1_df, stage2_df, team_feat_df, goalie_feat_df
 
@@ -330,7 +331,7 @@ class HockeyMatchupPredictor:
         else:
             combined = new_row
 
-        combined.write_parquet(ledger_path)
+        combined.write_parquet(ledger_path, compression="zstd")
         return ledger_path
 
     def _resolve_matchup_goalie_statuses(
@@ -370,11 +371,11 @@ class HockeyMatchupPredictor:
 
         # Tier 1b: Check cached raw boxscore JSON if present on disk
         if game_id_val is not None:
-            box_path = self.settings.paths.raw_dir / "nhl_api" / "boxscores" / f"{game_id_val}.json"
-            if box_path.exists():
-                import json
-
-                box_payload = json.loads(box_path.read_text(encoding="utf-8"))
+            box_path = (
+                self.settings.paths.raw_dir / "nhl_api" / "boxscores" / f"{game_id_val}.json.gz"
+            )
+            box_payload = read_cached_json(box_path)
+            if isinstance(box_payload, dict):
                 pbg = box_payload.get("playerByGameStats") or {}
                 if (pbg.get("homeTeam") or {}).get("goalies") and not home_goalie_status_override:
                     h_status = "CONFIRMED_NHL_OFFICIAL"
@@ -431,19 +432,15 @@ class HockeyMatchupPredictor:
         # Filter to Official NHL active roster if available (online or cached)
         roster_ids: set[int] = set()
         raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
-        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
+        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json.gz"
         try:
+            roster_payload = None
             if not offline and target_season == derive_active_nhl_season():
                 nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
                 roster_payload = nhl_client.fetch_team_roster(team_code)
-                roster_df = parse_roster_payload(team_code, roster_payload)
-                roster_ids = set(
-                    roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
-                )
-            elif cached_roster_path.exists():
-                import json
-
-                roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
+            else:
+                roster_payload = read_cached_json(cached_roster_path)
+            if isinstance(roster_payload, dict):
                 roster_df = parse_roster_payload(team_code, roster_payload)
                 roster_ids = set(
                     roster_df.filter(pl.col("position_group") != "G")["player_id"].to_list()
@@ -504,17 +501,15 @@ class HockeyMatchupPredictor:
         roster_goalie_ids: set[int] = set()
         name_to_id: dict[str, int] = {}
         raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
-        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json"
+        cached_roster_path = raw_nhl_dir / "rosters" / f"{team_code}_current.json.gz"
         try:
             roster_payload = None
             if not offline and target_season == derive_active_nhl_season():
                 nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
                 roster_payload = nhl_client.fetch_team_roster(team_code)
-            elif cached_roster_path.exists():
-                import json
-
-                roster_payload = json.loads(cached_roster_path.read_text(encoding="utf-8"))
-            if roster_payload:
+            else:
+                roster_payload = read_cached_json(cached_roster_path)
+            if isinstance(roster_payload, dict):
                 roster_df = parse_roster_payload(team_code, roster_payload)
                 g_roster = roster_df.filter(pl.col("position_group") == "G")
                 roster_goalie_ids = {int(pid) for pid in g_roster["player_id"].to_list()}
@@ -569,8 +564,6 @@ class HockeyMatchupPredictor:
         if "player_name" in goalies_df.columns and not goalies_df["player_name"].is_null().any():
             return goalies_df
 
-        import json
-
         target_pids = {int(pid) for pid in goalies_df["player_id"].to_list()}
         name_map: dict[int, str] = {}
         raw_nhl_dir = self.settings.paths.raw_dir / "nhl_api"
@@ -578,16 +571,13 @@ class HockeyMatchupPredictor:
 
         # 1. Check cached or live team rosters
         for t_code in team_codes:
-            cached_roster = raw_nhl_dir / "rosters" / f"{t_code}_current.json"
+            cached_roster = raw_nhl_dir / "rosters" / f"{t_code}_current.json.gz"
             try:
-                if cached_roster.exists():
-                    r_payload = json.loads(cached_roster.read_text(encoding="utf-8"))
-                elif not offline:
+                r_payload = read_cached_json(cached_roster)
+                if r_payload is None and not offline:
                     nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
                     r_payload = nhl_client.fetch_team_roster(t_code)
-                else:
-                    r_payload = None
-                if r_payload:
+                if isinstance(r_payload, dict):
                     r_df = parse_roster_payload(t_code, r_payload)
                     for r_row in r_df.filter(pl.col("position_group") == "G").iter_rows(named=True):
                         name_map[int(r_row["player_id"])] = str(r_row["player_name"])
@@ -597,7 +587,7 @@ class HockeyMatchupPredictor:
         # 2. Check MoneyPuck goalie CSVs for full names if any target goalie is still unresolved
         missing_pids = target_pids - name_map.keys()
         if missing_pids and raw_mp_dir.exists():
-            for g_csv in sorted(raw_mp_dir.glob("goalies_*.csv"), reverse=True):
+            for g_csv in reversed(list_cached_files(raw_mp_dir, "goalies_*.csv")):
                 try:
                     mp_g = pl.read_csv(g_csv, columns=["playerId", "name"]).unique(
                         subset=["playerId"], keep="last"
@@ -617,9 +607,11 @@ class HockeyMatchupPredictor:
         missing_pids = target_pids - name_map.keys()
         box_dir = raw_nhl_dir / "boxscores"
         if missing_pids and box_dir.exists():
-            for box_file in sorted(box_dir.glob("*.json"), reverse=True):
+            for box_file in reversed(list_cached_files(box_dir, "*.json")):
                 try:
-                    payload = json.loads(box_file.read_text(encoding="utf-8"))
+                    payload = read_cached_json(box_file)
+                    if not isinstance(payload, dict):
+                        continue
                     pbg = payload.get("playerByGameStats") or {}
                     for side in ("homeTeam", "awayTeam"):
                         for g in (pbg.get(side) or {}).get("goalies", []):

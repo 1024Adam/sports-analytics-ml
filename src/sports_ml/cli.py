@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Annotated
 
 import polars as pl
@@ -13,6 +13,14 @@ from rich.console import Console
 from rich.table import Table
 
 from sports_ml.config import RANDOM_SEED, Settings, get_settings
+from sports_ml.core.cache import (
+    cache_stem,
+    compact_raw_cache_directory,
+    list_cached_files,
+    read_cached_bytes,
+    read_cached_json,
+    resolve_cache_read_path,
+)
 from sports_ml.core.evaluation import (
     evaluate_multiclass_probabilities,
     evaluate_probabilities,
@@ -242,22 +250,24 @@ def _run_hockey_ingestion(
     schedules_dir = raw_nhl_dir / "schedules"
     boxscores_dir = raw_nhl_dir / "boxscores"
     if schedules_dir.exists():
-        for sched_file in sorted(schedules_dir.glob("*.json")):
-            payload = json.loads(sched_file.read_text(encoding="utf-8"))
-            parsed = parse_schedule_payload(payload)
-            if not parsed.is_empty():
-                schedule_frames.append(parsed)
+        for sched_file in list_cached_files(schedules_dir, "*.json"):
+            payload = read_cached_json(sched_file)
+            if isinstance(payload, dict):
+                parsed = parse_schedule_payload(payload)
+                if not parsed.is_empty():
+                    schedule_frames.append(parsed)
 
     if boxscores_dir.exists():
-        for box_file in sorted(boxscores_dir.glob("*.json")):
-            payload = json.loads(box_file.read_text(encoding="utf-8"))
-            t_df, s_df, g_df = parse_boxscore_payload(payload)
-            seen_boxscore_ids.add(int(payload["id"]))
-            team_frames.append(t_df)
-            if not s_df.is_empty():
-                skater_frames.append(s_df)
-            if not g_df.is_empty():
-                goalie_frames.append(g_df)
+        for box_file in list_cached_files(boxscores_dir, "*.json"):
+            payload = read_cached_json(box_file)
+            if isinstance(payload, dict):
+                t_df, s_df, g_df = parse_boxscore_payload(payload)
+                seen_boxscore_ids.add(int(payload["id"]))
+                team_frames.append(t_df)
+                if not s_df.is_empty():
+                    skater_frames.append(s_df)
+                if not g_df.is_empty():
+                    goalie_frames.append(g_df)
 
     # 2. If online and date range, seasons/from_year, current_season, or team requested,
     # query live endpoints
@@ -396,25 +406,56 @@ def _run_hockey_ingestion(
                 loaded_goalies_yrs.add(yr)
 
     if raw_mp_dir.exists():
-        for t_csv in sorted(raw_mp_dir.glob("teams_*.csv")):
-            season_yr = int(t_csv.stem.split("_")[1])
+        teams_all_path = resolve_cache_read_path(raw_mp_dir / "teams_all.csv.gz")
+        if teams_all_path is not None:
+            raw_teams_all = pl.read_csv(teams_all_path)
+            if "season" in raw_teams_all.columns:
+                avail_yrs = [
+                    int(y)
+                    for y in raw_teams_all["season"].drop_nulls().cast(pl.Int32).unique().to_list()
+                ]
+                for season_yr in sorted(avail_yrs):
+                    if season_yr not in loaded_teams_yrs:
+                        mp_teams_list.append(
+                            mp_client.load_team_game_stats(season_yr, is_active_season=False)
+                        )
+                        loaded_teams_yrs.add(season_yr)
+            elif not loaded_teams_yrs:
+                from sports_ml.sports.hockey.ingestion.moneypuck import parse_moneypuck_teams_csv
+
+                mp_teams_list.append(parse_moneypuck_teams_csv(raw_teams_all))
+
+        for t_csv in list_cached_files(raw_mp_dir, "teams_*.csv"):
+            stem = cache_stem(t_csv)
+            if stem == "teams_all":
+                continue
+            token = stem.split("_", maxsplit=1)[1]
+            if not token.isdigit():
+                continue
+            season_yr = int(token)
             if season_yr not in loaded_teams_yrs:
                 mp_teams_list.append(
-                    mp_client.load_team_game_stats(season_yr, csv_bytes=t_csv.read_bytes())
+                    mp_client.load_team_game_stats(season_yr, csv_bytes=read_cached_bytes(t_csv))
                 )
                 loaded_teams_yrs.add(season_yr)
-        for s_csv in sorted(raw_mp_dir.glob("skaters_*.csv")):
-            season_yr = int(s_csv.stem.split("_")[1])
+        for s_csv in list_cached_files(raw_mp_dir, "skaters_*.csv"):
+            token = cache_stem(s_csv).split("_", maxsplit=1)[1]
+            if not token.isdigit():
+                continue
+            season_yr = int(token)
             if season_yr not in loaded_skaters_yrs:
                 mp_skaters_list.append(
-                    mp_client.load_skater_game_stats(season_yr, csv_bytes=s_csv.read_bytes())
+                    mp_client.load_skater_game_stats(season_yr, csv_bytes=read_cached_bytes(s_csv))
                 )
                 loaded_skaters_yrs.add(season_yr)
-        for g_csv in sorted(raw_mp_dir.glob("goalies_*.csv")):
-            season_yr = int(g_csv.stem.split("_")[1])
+        for g_csv in list_cached_files(raw_mp_dir, "goalies_*.csv"):
+            token = cache_stem(g_csv).split("_", maxsplit=1)[1]
+            if not token.isdigit():
+                continue
+            season_yr = int(token)
             if season_yr not in loaded_goalies_yrs:
                 mp_goalies_list.append(
-                    mp_client.load_goalie_game_stats(season_yr, csv_bytes=g_csv.read_bytes())
+                    mp_client.load_goalie_game_stats(season_yr, csv_bytes=read_cached_bytes(g_csv))
                 )
                 loaded_goalies_yrs.add(season_yr)
 
@@ -500,46 +541,49 @@ def _run_soccer_ingestion(
 
     # 1. Process pre-cached Football-Data CSVs and Understat JSONs
     if raw_fd_dir.exists():
-        for csv_path in sorted(raw_fd_dir.glob("E0_*.csv")):
-            code = csv_path.stem.split("_")[1]
+        for csv_path in list_cached_files(raw_fd_dir, "E0_*.csv"):
+            code = cache_stem(csv_path).split("_")[1]
             start_yr = 2000 + int(code[:2])
             s_int = int(f"{start_yr}{start_yr + 1}")
-            m_df, b_df = parse_football_data_csv(csv_path.read_text(encoding="utf-8"), season=s_int)
+            csv_text = read_cached_bytes(csv_path).decode("utf-8", errors="replace")
+            m_df, b_df = parse_football_data_csv(csv_text, season=s_int)
             if not m_df.is_empty():
                 match_frames.append(m_df)
             if not b_df.is_empty():
                 fd_box_frames.append(b_df)
 
     if raw_us_dir.exists():
-        for us_path in sorted(raw_us_dir.glob("epl_teams_*.json")):
-            start_yr = int(us_path.stem.split("_")[-1])
+        for us_path in list_cached_files(raw_us_dir, "epl_teams_*.json"):
+            start_yr = int(cache_stem(us_path).split("_")[-1])
             s_int = int(f"{start_yr}{start_yr + 1}")
-            payload = json.loads(us_path.read_text(encoding="utf-8"))
-            us_df = parse_understat_team_matches_payload(payload, season=s_int)
-            if not us_df.is_empty():
-                us_team_frames.append(us_df)
-        for usp_path in sorted(raw_us_dir.glob("epl_players_*.json")):
-            start_yr = int(usp_path.stem.split("_")[-1])
+            payload = read_cached_json(us_path)
+            if payload is not None:
+                us_df = parse_understat_team_matches_payload(payload, season=s_int)
+                if not us_df.is_empty():
+                    us_team_frames.append(us_df)
+        for usp_path in list_cached_files(raw_us_dir, "epl_players_*.json"):
+            start_yr = int(cache_stem(usp_path).split("_")[-1])
             s_int = int(f"{start_yr}{start_yr + 1}")
-            payload = json.loads(usp_path.read_text(encoding="utf-8"))
-            usp_df = parse_understat_player_matches_payload(payload, season=s_int)
-            if not usp_df.is_empty():
-                us_player_frames.append(usp_df)
+            payload = read_cached_json(usp_path)
+            if isinstance(payload, list):
+                usp_df = parse_understat_player_matches_payload(payload, season=s_int)
+                if not usp_df.is_empty():
+                    us_player_frames.append(usp_df)
 
     # 2. Process pre-cached FPL bootstrap, fixtures, and element summaries
-    bootstrap_path = raw_fpl_dir / "bootstrap_static.json"
-    fixtures_path = raw_fpl_dir / "fixtures.json"
+    bootstrap_path = raw_fpl_dir / "bootstrap_static.json.gz"
+    fixtures_path = raw_fpl_dir / "fixtures.json.gz"
     teams_map: dict[int, str] = {}
     squad_df = pl.DataFrame()
 
-    if bootstrap_path.exists():
-        bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
-        teams_map = parse_bootstrap_teams_map(bootstrap)
-        squad_df = parse_bootstrap_squad_df(bootstrap)
+    bootstrap_cached = read_cached_json(bootstrap_path)
+    if isinstance(bootstrap_cached, dict):
+        teams_map = parse_bootstrap_teams_map(bootstrap_cached)
+        squad_df = parse_bootstrap_squad_df(bootstrap_cached)
 
-    if fixtures_path.exists() and teams_map:
-        fixtures_raw = json.loads(fixtures_path.read_text(encoding="utf-8"))
-        fx_df = parse_fixtures_payload(fixtures_raw, teams_map, season=active_season)
+    fixtures_cached = read_cached_json(fixtures_path)
+    if isinstance(fixtures_cached, list) and teams_map:
+        fx_df = parse_fixtures_payload(fixtures_cached, teams_map, season=active_season)
         if not fx_df.is_empty():
             match_frames.append(fx_df)
 
@@ -586,12 +630,17 @@ def _run_soccer_ingestion(
             int(r["player_id"]): (str(r["player_name"]), str(r["team"]), str(r["position_group"]))
             for r in squad_df.iter_rows(named=True)
         }
-        for sum_file in sorted(summaries_dir.glob("*.json")):
-            pid = int(sum_file.stem)
+        for sum_file in list_cached_files(summaries_dir, "*.json"):
+            stem_str = cache_stem(sum_file)
+            if not stem_str.isdigit():
+                continue
+            pid = int(stem_str)
             if pid not in p_lookup:
                 continue
             p_name, t_code, pos_grp = p_lookup[pid]
-            sum_payload = json.loads(sum_file.read_text(encoding="utf-8"))
+            sum_payload = read_cached_json(sum_file)
+            if not isinstance(sum_payload, dict):
+                continue
             out_df, g_df = parse_element_summary_payload(
                 pid, p_name, t_code, pos_grp, sum_payload, teams_map, season=active_season
             )
@@ -1494,3 +1543,66 @@ def check_sources_command(
     console.print(table)
     if not all_healthy:
         raise typer.Exit(code=1)
+
+
+def _format_bytes(num_bytes: int) -> str:
+    """Format byte count as human-readable KB / MB / GB string."""
+    if num_bytes >= 1024 * 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024 * 1024):.2f} GB"
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.2f} MB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
+
+
+@app.command("compact-cache")
+def compact_cache_command(
+    data_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--data-dir",
+            help="Base data directory (defaults to configured data/ directory).",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Preview files to compact and space savings without modifying disk.",
+        ),
+    ] = False,
+) -> None:
+    """Compact uncompressed raw caches (.csv/.json -> .gz) and deduplicate MoneyPuck team CSVs."""
+    settings = get_settings()
+    if data_dir is not None:
+        raw_dir = (data_dir / "raw") if (data_dir / "raw").exists() else data_dir
+    else:
+        raw_dir = settings.paths.raw_dir
+
+    report = compact_raw_cache_directory(raw_dir, dry_run=dry_run)
+    pct_saved = (
+        (100.0 * report.bytes_saved / report.bytes_before) if report.bytes_before > 0 else 0.0
+    )
+
+    mode_label = "DRY RUN" if dry_run else "COMPLETED"
+    table = Table(title=f"Raw Cache Storage Compaction ({mode_label})")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right", style="bold green")
+
+    table.add_row("Target Directory", str(raw_dir))
+    table.add_row("Files Compacted (.gz)", str(report.files_compacted))
+    table.add_row("Duplicate Files Removed", str(report.duplicates_removed))
+    table.add_row(
+        "Size Before",
+        f"{_format_bytes(report.bytes_before)} ({report.bytes_before:,} B)",
+    )
+    table.add_row(
+        "Size After",
+        f"{_format_bytes(report.bytes_after)} ({report.bytes_after:,} B)",
+    )
+    table.add_row(
+        "Disk Space Reclaimed",
+        f"{_format_bytes(report.bytes_saved)} ({pct_saved:.1f}%)",
+    )
+    console.print(table)
