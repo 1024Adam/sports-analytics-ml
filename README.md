@@ -75,6 +75,9 @@ uv run sports-ml backtest --sport hockey --stage all
 
 # Score the append-only live prediction ledger (data/predictions/) against completed games
 uv run sports-ml score-predictions --sport hockey
+
+# Compact and deduplicate existing local raw caches in place (.csv.gz / .json.gz)
+uv run sports-ml compact-cache
 ```
 
 ### 4. Python Package API

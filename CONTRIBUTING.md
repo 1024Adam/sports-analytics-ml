@@ -19,8 +19,9 @@ Every feature, rating system, or model update **must** guarantee zero future dat
 4. **Realistic Pre-Game Information Boundary**
    - Never use post-game box-score actuals (e.g., actual Time on Ice, actual starting goalie after puck drop, or post-match injury status) as pre-game model inputs.
 5. **Core vs. Sport-Plugin Separation**
-   - Sport-agnostic engines (`contracts.py`, `temporal.py`, `ratings.py`, `schedule.py`, `validation.py`, `calibration.py`, `evaluation.py`) belong in [`src/sports_ml/core/`](./src/sports_ml/core/).
+   - Sport-agnostic engines (`contracts.py`, `temporal.py`, `ratings.py`, `schedule.py`, `validation.py`, `calibration.py`, `evaluation.py`, `cache.py`) belong in [`src/sports_ml/core/`](./src/sports_ml/core/).
    - Sport-specific ingestion, schemas, features, and two-stage predictors belong in [`src/sports_ml/sports/<sport>/`](./src/sports_ml/sports/).
+   - All raw disk caches (`data/raw/`) must use the shared Gzip helpers in [`src/sports_ml/core/cache.py`](./src/sports_ml/core/cache.py) (`*.csv.gz` / `*.json.gz` with legacy uncompressed fallback), and Silver/Gold Parquet writes must use `compression="zstd"`.
 
 ---
 

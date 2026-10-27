@@ -29,8 +29,8 @@ Contributors and users working with upstream sports feeds and model artifacts sh
 
 1. **No Secrets or API Keys in Source Control**
    - Never commit API keys, session cookies, proxy credentials, or `.env` files to the repository.
-2. **External Feed Deserialization & Parsing**
+2. **External Feed Deserialization, Archive Extraction & Compression**
    - Treat all responses from upstream endpoints (Official NHL Web API, MoneyPuck CSV/ZIP archives, Official FPL API, Understat, Football-Data.co.uk) as untrusted input. Validate payloads through typed `pydantic` contracts or explicit Polars schema enforcement before persisting to Silver Parquet tables.
-   - Archive extraction (such as MoneyPuck `.zip` bundles) must guard against path traversal (Zip Slip) and unexpected file types.
+   - Archive extraction and decompression (such as MoneyPuck `.zip` bundles and `.csv.gz` / `.json.gz` raw cache streams in `core/cache.py`) must guard against path traversal (Zip Slip), unexpected archive members, and decompression bombs. Raw cache compaction (`sports-ml compact-cache`) writes atomically via temporary files and verifies compressed payload readability before unlinking legacy files.
 3. **Model Artifacts & Local Caches**
    - Local data caches (`data/`) and trained model bundles (`artifacts/`) are git-ignored by default. Only load serialized model bundles (`joblib` / `pickle` / LightGBM models) that were generated from trusted local runs or verified SHA-256 schema fingerprints (`metadata.json`).
