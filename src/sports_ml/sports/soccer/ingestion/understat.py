@@ -7,8 +7,6 @@ Parses team match logs (`npxgf`, `npxga`, `xgf`, `xga`, `ppda`, `opp_ppda`,
 
 from __future__ import annotations
 
-import json
-import time
 from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
@@ -18,6 +16,7 @@ import httpx
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sports_ml.core.cache import read_cached_json, write_cached_json
 from sports_ml.sports.soccer.constants import normalize_soccer_club
 
 UNDERSTAT_BASE_URL: Final[str] = "https://understat.com"
@@ -306,14 +305,27 @@ class UnderstatClient:
     ) -> pl.DataFrame:
         """Fetch or load cached Understat team match logs for `season` (e.g. `20242025`)."""
         start_yr = int(str(season)[:4])
-        cache_path = self.cache_dir / f"epl_teams_{start_yr}.json"
-        payload: Any = None
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if ttl_seconds is None or age <= ttl_seconds:
-                payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        cache_path = self.cache_dir / f"epl_teams_{start_yr}.json.gz"
+        payload = read_cached_json(cache_path, ttl_seconds=ttl_seconds)
         if payload is None:
             raw = self._fetch_league_json(start_yr)
             payload = raw.get("teams", raw)
-            cache_path.write_text(json.dumps(payload), encoding="utf-8")
+            write_cached_json(cache_path, payload)
         return parse_understat_team_matches_payload(payload, season=season)
+
+    def fetch_season_player_matches(
+        self,
+        season: int,
+        *,
+        ttl_seconds: float | None = 21600.0,
+    ) -> pl.DataFrame:
+        """Fetch or load cached Understat player match logs (`epl_players_{yr}.json.gz`)."""
+        start_yr = int(str(season)[:4])
+        cache_path = self.cache_dir / f"epl_players_{start_yr}.json.gz"
+        payload = read_cached_json(cache_path, ttl_seconds=ttl_seconds)
+        if payload is None:
+            raw = self._fetch_league_json(start_yr)
+            payload = raw.get("players", raw if isinstance(raw, list) else [])
+            write_cached_json(cache_path, payload)
+        records = payload if isinstance(payload, list) else []
+        return parse_understat_player_matches_payload(records, season=season)

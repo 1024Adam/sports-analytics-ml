@@ -8,8 +8,6 @@ Supports permanent caching for `FINAL`/`OFF` games and incremental delta fetchin
 
 from __future__ import annotations
 
-import json
-import time
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -19,6 +17,7 @@ import httpx
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sports_ml.core.cache import read_cached_json, write_cached_json
 from sports_ml.sports.hockey.constants import (
     SILVER_GAMES_SCHEMA,
     SILVER_GOALIE_GAME_LOGS_SCHEMA,
@@ -536,15 +535,13 @@ class NHLWebAPIClient:
 
     def fetch_schedule_now(self, *, ttl_seconds: float = 900.0) -> dict[str, Any]:
         """Fetch `/v1/schedule/now` for active season detection and today's slate."""
-        cache_path = self.cache_dir / "schedules" / "schedule_now.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age <= ttl_seconds:
-                cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-                return cached
+        cache_path = self.cache_dir / "schedules" / "schedule_now.json.gz"
+        cached = read_cached_json(cache_path, ttl_seconds=ttl_seconds)
+        if isinstance(cached, dict):
+            return cached
 
         payload = self._get_json("/schedule/now")
-        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return payload
 
     def fetch_schedule_by_date(
@@ -557,15 +554,15 @@ class NHLWebAPIClient:
 
         Caches permanently only when all games in the week are `FINAL` or `OFF`.
         """
-        cache_path = self.cache_dir / "schedules" / f"schedule_{date_str}.json"
-        if cache_path.exists() and not force_refresh:
-            cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-            if self._is_schedule_week_all_final(cached):
+        cache_path = self.cache_dir / "schedules" / f"schedule_{date_str}.json.gz"
+        if not force_refresh:
+            cached = read_cached_json(cache_path)
+            if isinstance(cached, dict) and self._is_schedule_week_all_final(cached):
                 return cached
 
         payload = self._get_json(f"/schedule/{date_str}")
         if self._is_schedule_week_all_final(payload):
-            cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            write_cached_json(cache_path, payload)
         return payload
 
     def fetch_club_schedule_season(
@@ -578,18 +575,14 @@ class NHLWebAPIClient:
     ) -> dict[str, Any]:
         """Fetch `/v1/club-schedule-season/{TEAM}/{SEASON}`."""
         team_code = normalize_tricode(team_tricode)
-        cache_path = self.cache_dir / "schedules" / f"club_{team_code}_{season}.json"
-        if cache_path.exists():
-            if not is_active_season:
-                cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-                return cached
-            age = time.time() - cache_path.stat().st_mtime
-            if age <= ttl_seconds:
-                cached_active: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-                return cached_active
+        cache_path = self.cache_dir / "schedules" / f"club_{team_code}_{season}.json.gz"
+        effective_ttl = ttl_seconds if is_active_season else None
+        cached = read_cached_json(cache_path, ttl_seconds=effective_ttl)
+        if isinstance(cached, dict):
+            return cached
 
         payload = self._get_json(f"/club-schedule-season/{team_code}/{season}")
-        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return payload
 
     def fetch_game_boxscore(
@@ -603,15 +596,18 @@ class NHLWebAPIClient:
         Once a game reaches `FINAL` or `OFF`, its raw JSON is cached permanently on disk
         and never re-downloaded.
         """
-        cache_path = self.cache_dir / "boxscores" / f"{game_id}.json"
-        if cache_path.exists() and not force_refresh:
-            cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-            if str(cached.get("gameState", "")).upper() in FINAL_GAME_STATES:
+        cache_path = self.cache_dir / "boxscores" / f"{game_id}.json.gz"
+        if not force_refresh:
+            cached = read_cached_json(cache_path)
+            if (
+                isinstance(cached, dict)
+                and str(cached.get("gameState", "")).upper() in FINAL_GAME_STATES
+            ):
                 return cached
 
         payload = self._get_json(f"/gamecenter/{game_id}/boxscore")
         if str(payload.get("gameState", "")).upper() in FINAL_GAME_STATES:
-            cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            write_cached_json(cache_path, payload)
         return payload
 
     def fetch_game_landing(
@@ -621,15 +617,18 @@ class NHLWebAPIClient:
         force_refresh: bool = False,
     ) -> dict[str, Any]:
         """Fetch `/v1/gamecenter/{GAME_ID}/landing`."""
-        cache_path = self.cache_dir / "landings" / f"{game_id}.json"
-        if cache_path.exists() and not force_refresh:
-            cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-            if str(cached.get("gameState", "")).upper() in FINAL_GAME_STATES:
+        cache_path = self.cache_dir / "landings" / f"{game_id}.json.gz"
+        if not force_refresh:
+            cached = read_cached_json(cache_path)
+            if (
+                isinstance(cached, dict)
+                and str(cached.get("gameState", "")).upper() in FINAL_GAME_STATES
+            ):
                 return cached
 
         payload = self._get_json(f"/gamecenter/{game_id}/landing")
         if str(payload.get("gameState", "")).upper() in FINAL_GAME_STATES:
-            cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            write_cached_json(cache_path, payload)
         return payload
 
     def fetch_team_roster(
@@ -641,15 +640,14 @@ class NHLWebAPIClient:
     ) -> dict[str, Any]:
         """Fetch `/v1/roster/{TEAM}/current` with configurable TTL cache."""
         team_code = normalize_tricode(team_tricode)
-        cache_path = self.cache_dir / "rosters" / f"{team_code}_current.json"
-        if cache_path.exists() and not force_refresh:
-            age = time.time() - cache_path.stat().st_mtime
-            if age <= ttl_seconds:
-                cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
+        cache_path = self.cache_dir / "rosters" / f"{team_code}_current.json.gz"
+        if not force_refresh:
+            cached = read_cached_json(cache_path, ttl_seconds=ttl_seconds)
+            if isinstance(cached, dict):
                 return cached
 
         payload = self._get_json(f"/roster/{team_code}/current")
-        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_cached_json(cache_path, payload)
         return payload
 
     def fetch_date_range_games(

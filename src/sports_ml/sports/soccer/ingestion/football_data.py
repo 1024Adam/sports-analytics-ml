@@ -18,6 +18,7 @@ import httpx
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sports_ml.core.cache import read_cached_bytes, resolve_cache_read_path, write_gzip_bytes
 from sports_ml.sports.soccer.constants import SILVER_MATCHES_SCHEMA, normalize_soccer_club
 from sports_ml.sports.soccer.ingestion.fpl_api import make_canonical_match_id
 
@@ -269,16 +270,17 @@ class FootballDataClient:
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """Fetch or load cached Football-Data `E0.csv` for `season`."""
         code = season_to_football_data_code(season)
-        cache_path = self.cache_dir / f"E0_{code}.csv"
+        preferred_gz = self.cache_dir / f"E0_{code}.csv.gz"
+        existing = resolve_cache_read_path(preferred_gz)
         csv_text: str | None = None
-        if cache_path.exists():
+        if existing is not None:
             if not is_active_season:
-                csv_text = cache_path.read_text(encoding="utf-8")
+                csv_text = read_cached_bytes(preferred_gz).decode("utf-8", errors="replace")
             else:
-                age = time.time() - cache_path.stat().st_mtime
+                age = time.time() - existing.stat().st_mtime
                 if age <= ttl_seconds:
-                    csv_text = cache_path.read_text(encoding="utf-8")
+                    csv_text = read_cached_bytes(preferred_gz).decode("utf-8", errors="replace")
         if csv_text is None:
             csv_text = self._download_csv_text(code)
-            cache_path.write_text(csv_text, encoding="utf-8")
+            write_gzip_bytes(preferred_gz, csv_text.encode("utf-8"))
         return parse_football_data_csv(csv_text, season=season)
