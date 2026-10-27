@@ -32,8 +32,8 @@ uv tool install --editable .
 
 ### 2. Streamlined Daily & Setup CLI Workflow (`sports-ml`)
 ```bash
-# 1. Backfill historical seasons + current season to date
-uv run sports-ml ingest --sport hockey --seasons 20232024,20242025,20252026 --current-season
+# 1. Backfill all seasons from a starting year through the current season to date
+uv run sports-ml ingest --sport hockey --from-year 2023
 
 # 2. Auto-build Gold features & fit Stage 1 (Win Prob) + Stage 2 (Player Stats) models
 uv run sports-ml train --sport hockey --include-stage2
@@ -49,8 +49,8 @@ uv run sports-ml predict --sport hockey --team COL
 uv run sports-ml predict --sport hockey --team COL --games 5
 
 # --- EPL Soccer (--sport soccer) ---
-# 1. Backfill historical & active EPL seasons (FPL + Understat + Football-Data)
-uv run sports-ml ingest --sport soccer --seasons 20232024,20242025,20252026 --current-season
+# 1. Backfill all EPL seasons from a starting year through the active season (FPL + Understat + Football-Data)
+uv run sports-ml ingest --sport soccer --from-year 2023
 
 # 2. Train Stage 1 (3-Way 1X2 + Goals) and Stage 2 (Outfield & GK Projections)
 uv run sports-ml train --sport soccer --include-stage2
@@ -107,7 +107,7 @@ next_games = predictor.predict_team_next_games("COL", n_games=3, include_players
 
 ### Run-Action Skills
 - `/predict-matchup` ([SKILL.md](./.github/skills/predict-matchup/SKILL.md)): Run `sports-ml predict` for a slate date, a specific `AWAY@HOME` matchup, or a team's next $N$ games (`--team` / `--games`), optionally with `--include-players` (Stage 2) or `--offline`.
-- `/ingest-data` ([SKILL.md](./.github/skills/ingest-data/SKILL.md)): Run `sports-ml ingest` for `--current-season`, `--start-date`/`--end-date`, `--seasons`, or `--offline` Silver Parquet reconciliation.
+- `/ingest-data` ([SKILL.md](./.github/skills/ingest-data/SKILL.md)): Run `sports-ml ingest` for `--from-year` (all seasons from start year to current), `--current-season`, `--start-date`/`--end-date`, `--seasons`, or `--offline` Silver Parquet reconciliation.
 - `/train-models` ([SKILL.md](./.github/skills/train-models/SKILL.md)): Run `sports-ml features build` and `sports-ml train` (`--include-stage2`) and inspect `metadata.json` SHA-256 schema fingerprints.
 - `/evaluate-and-score` ([SKILL.md](./.github/skills/evaluate-and-score/SKILL.md)): Run walk-forward `sports-ml backtest` and score the live `data/predictions/` audit ledger (`sports-ml score-predictions`).
 

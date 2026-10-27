@@ -482,6 +482,77 @@ def test_two_tier_pregame_lineup_goalie_and_injury_resolver() -> None:
     assert json.loads(tier2_res.model_dump_json())["team"] == "BOS"
 
 
+def test_expand_target_seasons_and_cli_from_year(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify `--from-year` and season range syntax expand to all seasons through active."""
+    from typer.testing import CliRunner
+
+    from sports_ml.cli import app, expand_target_seasons
+
+    # 1. Direct helper unit tests
+    assert expand_target_seasons(active_season=20262027, from_year=2023) == [
+        20232024,
+        20242025,
+        20252026,
+        20262027,
+    ]
+    assert expand_target_seasons(active_season=20262027, from_year=20242025) == [
+        20242025,
+        20252026,
+        20262027,
+    ]
+    assert expand_target_seasons(active_season=20262027, seasons="2023-2025") == [
+        20232024,
+        20242025,
+        20252026,
+    ]
+    assert expand_target_seasons(active_season=20262027, seasons="2024+") == [
+        20242025,
+        20252026,
+        20262027,
+    ]
+    assert expand_target_seasons(active_season=20262027, seasons="20232024-20252026") == [
+        20232024,
+        20242025,
+        20252026,
+    ]
+
+    with pytest.raises(ValueError, match="cannot be after active season"):
+        expand_target_seasons(active_season=20252026, from_year=2028)
+    with pytest.raises(ValueError, match="expected consecutive years"):
+        expand_target_seasons(active_season=20252026, seasons="20232025")
+    with pytest.raises(ValueError, match="end year"):
+        expand_target_seasons(active_season=20252026, seasons="2025-2023")
+
+    # 2. CLI `--from-year` offline invocation for hockey and soccer
+    monkeypatch.setenv("SPORTS_ML_ROOT_DIR", str(tmp_path))
+    runner = CliRunner()
+
+    res_h = runner.invoke(
+        app,
+        ["ingest", "--sport", "hockey", "--from-year", "2023", "--offline"],
+    )
+    assert res_h.exit_code == 0, res_h.stdout
+    assert "Ingestion complete" in res_h.stdout
+    assert "seasons=20232024,20242025" in res_h.stdout
+
+    res_s = runner.invoke(
+        app,
+        ["ingest", "--sport", "soccer", "--from-year", "2023", "--offline"],
+    )
+    assert res_s.exit_code == 0, res_s.stdout
+    assert "Ingestion complete" in res_s.stdout
+    assert "seasons=20232024,20242025" in res_s.stdout
+
+    res_bad = runner.invoke(
+        app,
+        ["ingest", "--sport", "hockey", "--from-year", "2099", "--offline"],
+    )
+    assert res_bad.exit_code != 0
+
+
 def test_data_source_health_probes_success_and_failure(tmp_path: Path) -> None:
     """Verify upstream health probes validate NHL API, MoneyPuck, and DailyFaceoff contracts."""
     mp_teams_csv = (

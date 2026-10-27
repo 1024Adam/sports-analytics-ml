@@ -89,6 +89,84 @@ def _ensure_supported_sport(sport: str) -> str:
     return slug
 
 
+def _parse_start_year_token(token: str) -> int:
+    """Parse a 4-digit start year (`2022`) or 8-digit season ID (`20222023`) into start year."""
+    cleaned = token.strip()
+    if len(cleaned) == 4 and cleaned.isdigit():
+        return int(cleaned)
+    if len(cleaned) == 8 and cleaned.isdigit():
+        start_yr = int(cleaned[:4])
+        end_yr = int(cleaned[4:])
+        if end_yr != start_yr + 1:
+            raise ValueError(
+                f"Invalid 8-digit season '{token}': expected consecutive years "
+                f"{start_yr}{start_yr + 1}."
+            )
+        return start_yr
+    raise ValueError(
+        f"Invalid season or year '{token}'. Expected 4-digit start year (e.g., 2022) "
+        "or 8-digit season ID (e.g., 20222023)."
+    )
+
+
+def expand_target_seasons(
+    *,
+    active_season: int,
+    seasons: str | None = None,
+    from_year: int | str | None = None,
+) -> list[int]:
+    """Expand `--seasons` and/or `--from-year` into sorted 8-digit season IDs.
+
+    Supports:
+    - `from_year=2022` (or `20222023`): all seasons from `20222023` through `active_season`.
+    - `seasons="20232024,20242025"` or `"2023,2024"`: explicit list of seasons.
+    - Range syntax in `seasons` such as `"2022-2025"`, `"20222023-20252026"`, or `"2022+"`:
+      all seasons in the range (open-ended ranges expand through `active_season`).
+    """
+    active_start_yr = int(str(active_season)[:4])
+    expanded: set[int] = set()
+
+    if from_year is not None:
+        start_yr = _parse_start_year_token(str(from_year))
+        if start_yr > active_start_yr:
+            raise ValueError(
+                f"--from-year ({start_yr}) cannot be after active season start year "
+                f"({active_start_yr})."
+            )
+        for yr in range(start_yr, active_start_yr + 1):
+            expanded.add(int(f"{yr}{yr + 1}"))
+
+    if seasons:
+        for raw_token in seasons.split(","):
+            token = raw_token.strip()
+            if not token:
+                continue
+            if token.endswith("+"):
+                s_yr = _parse_start_year_token(token[:-1])
+                if s_yr > active_start_yr:
+                    raise ValueError(
+                        f"Season range '{token}' starts after active season ({active_start_yr})."
+                    )
+                for yr in range(s_yr, active_start_yr + 1):
+                    expanded.add(int(f"{yr}{yr + 1}"))
+            elif ".." in token or "-" in token:
+                sep = ".." if ".." in token else "-"
+                left_str, right_str = token.split(sep, maxsplit=1)
+                s_yr = _parse_start_year_token(left_str)
+                e_yr = _parse_start_year_token(right_str) if right_str.strip() else active_start_yr
+                if e_yr < s_yr:
+                    raise ValueError(
+                        f"Invalid season range '{token}': end year ({e_yr}) < start year ({s_yr})."
+                    )
+                for yr in range(s_yr, e_yr + 1):
+                    expanded.add(int(f"{yr}{yr + 1}"))
+            else:
+                yr = _parse_start_year_token(token)
+                expanded.add(int(f"{yr}{yr + 1}"))
+
+    return sorted(expanded)
+
+
 def _fetch_missing_boxscores(
     nhl_client: NHLWebAPIClient,
     games_df: pl.DataFrame,
@@ -126,6 +204,7 @@ def _run_hockey_ingestion(
     settings: Settings,
     *,
     seasons: str | None = None,
+    from_year: int | str | None = None,
     current_season: bool = False,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -142,6 +221,16 @@ def _run_hockey_ingestion(
     reconciler = HockeySilverReconciler(silver_dir=silver_dir)
     nhl_client = NHLWebAPIClient(cache_dir=raw_nhl_dir)
     mp_client = MoneyPuckClient(cache_dir=raw_mp_dir)
+
+    active_s = derive_active_nhl_season()
+    target_seasons = expand_target_seasons(
+        active_season=active_s,
+        seasons=seasons,
+        from_year=from_year,
+    )
+    effective_current_season = (
+        current_season or (from_year is not None) or (active_s in target_seasons)
+    )
 
     schedule_frames: list[pl.DataFrame] = []
     team_frames: list[pl.DataFrame] = []
@@ -170,9 +259,12 @@ def _run_hockey_ingestion(
             if not g_df.is_empty():
                 goalie_frames.append(g_df)
 
-    # 2. If online and date range, seasons, current_season, or team requested, query live endpoints
+    # 2. If online and date range, seasons/from_year, current_season, or team requested,
+    # query live endpoints
     season_start_years: set[int] = set()
-    if not offline and (start_date or end_date or current_season or seasons or team):
+    if not offline and (
+        start_date or end_date or effective_current_season or target_seasons or team
+    ):
         if start_date and end_date:
             s_dt = date.fromisoformat(start_date)
             e_dt = date.fromisoformat(end_date)
@@ -191,19 +283,10 @@ def _run_hockey_ingestion(
                 skater_frames.extend(s_f)
                 goalie_frames.extend(g_f)
 
-        if seasons:
+        if target_seasons:
             from sports_ml.sports.hockey.constants import NHL_TEAMS_32
 
-            active_s = derive_active_nhl_season()
-            for raw_s in seasons.split(","):
-                cleaned_s = raw_s.strip()
-                if not cleaned_s:
-                    continue
-                season_int = (
-                    int(cleaned_s)
-                    if len(cleaned_s) == 8
-                    else int(f"{cleaned_s}{int(cleaned_s) + 1}")
-                )
+            for season_int in target_seasons:
                 start_yr = int(str(season_int)[:4])
                 season_start_years.add(start_yr)
 
@@ -239,7 +322,7 @@ def _run_hockey_ingestion(
                     skater_frames.extend(s_f)
                     goalie_frames.extend(g_f)
 
-        if current_season:
+        if effective_current_season:
             now_payload = nhl_client.fetch_schedule_now()
             now_games = parse_schedule_payload(now_payload)
             today = datetime.now(tz=UTC).date()
@@ -378,6 +461,7 @@ def _run_soccer_ingestion(
     settings: Settings,
     *,
     seasons: str | None = None,
+    from_year: int | str | None = None,
     current_season: bool = False,
     offline: bool = False,
     max_player_summaries_per_team: int = 25,
@@ -397,17 +481,14 @@ def _run_soccer_ingestion(
     fd_client = FootballDataClient(cache_dir=raw_fd_dir)
 
     active_season = derive_active_epl_season()
-    target_seasons: set[int] = set()
-    if seasons:
-        for raw_s in seasons.split(","):
-            cleaned_s = raw_s.strip()
-            if not cleaned_s:
-                continue
-            s_int = (
-                int(cleaned_s) if len(cleaned_s) == 8 else int(f"{cleaned_s}{int(cleaned_s) + 1}")
-            )
-            target_seasons.add(s_int)
-    if current_season or not target_seasons:
+    target_seasons = set(
+        expand_target_seasons(
+            active_season=active_season,
+            seasons=seasons,
+            from_year=from_year,
+        )
+    )
+    if current_season or from_year is not None or not target_seasons:
         target_seasons.add(active_season)
 
     match_frames: list[pl.DataFrame] = []
@@ -561,7 +642,21 @@ def ingest_command(
     ] = "hockey",
     seasons: Annotated[
         str | None,
-        typer.Option("--seasons", help="Comma-separated season IDs (e.g., 20232024,20242025)."),
+        typer.Option(
+            "--seasons",
+            help="Comma-separated season IDs or ranges (e.g., 20232024,20242025 or 2023-2026).",
+        ),
+    ] = None,
+    from_year: Annotated[
+        int | None,
+        typer.Option(
+            "--from-year",
+            "--since",
+            help=(
+                "Ingest all seasons from this starting year (e.g., 2023 or 20232024) "
+                "through the active season."
+            ),
+        ),
     ] = None,
     current_season: Annotated[
         bool,
@@ -583,32 +678,57 @@ def ingest_command(
     """Download, cache, and reconcile raw sport feeds into Silver Parquet tables."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
-    if slug == "soccer":
-        active_season = derive_active_epl_season()
-        matches_df = _run_soccer_ingestion(
+    try:
+        if slug == "soccer":
+            active_season = derive_active_epl_season()
+            resolved_seasons = expand_target_seasons(
+                active_season=active_season,
+                seasons=seasons,
+                from_year=from_year,
+            )
+            matches_df = _run_soccer_ingestion(
+                settings,
+                seasons=seasons,
+                from_year=from_year,
+                current_season=current_season,
+                offline=offline,
+            )
+            seasons_note = (
+                f", seasons={','.join(str(s) for s in resolved_seasons)}"
+                if resolved_seasons
+                else ""
+            )
+            console.print(
+                f"[bold green]Ingestion complete[/bold green] for sport='{slug}' "
+                f"(active_season={active_season}{seasons_note}, "
+                f"silver_matches={matches_df.height})."
+            )
+            return
+
+        active_season = derive_active_nhl_season()
+        resolved_seasons = expand_target_seasons(
+            active_season=active_season,
+            seasons=seasons,
+            from_year=from_year,
+        )
+        games_df = _run_hockey_ingestion(
             settings,
             seasons=seasons,
+            from_year=from_year,
             current_season=current_season,
+            start_date=start_date,
+            end_date=end_date,
             offline=offline,
         )
-        console.print(
-            f"[bold green]Ingestion complete[/bold green] for sport='{slug}' "
-            f"(active_season={active_season}, silver_matches={matches_df.height})."
-        )
-        return
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
-    active_season = derive_active_nhl_season()
-    games_df = _run_hockey_ingestion(
-        settings,
-        seasons=seasons,
-        current_season=current_season,
-        start_date=start_date,
-        end_date=end_date,
-        offline=offline,
+    seasons_note = (
+        f", seasons={','.join(str(s) for s in resolved_seasons)}" if resolved_seasons else ""
     )
     console.print(
         f"[bold green]Ingestion complete[/bold green] for sport='{slug}' "
-        f"(active_season={active_season}, silver_games={games_df.height})."
+        f"(active_season={active_season}{seasons_note}, silver_games={games_df.height})."
     )
 
 
