@@ -1,7 +1,7 @@
 ---
 name: predict-matchup
-description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win (`hockey`) or 3-way 1X2 (`soccer`) probabilities, projecting Stage 2 player stats (`--include-players`), predicting tonight's NHL/EPL slate or a specific matchup (`--matchup AWAY@HOME`), or interpreting pre-prediction confidence warnings."
-argument-hint: "Optional --sport (hockey|soccer), date (YYYY-MM-DD), matchup (e.g., TOR@BOS or MCI@ARS), --include-players..."
+description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win (`hockey`) or 3-way 1X2 (`soccer`) probabilities, projecting Stage 2 player stats (`--include-players`), predicting tonight's NHL/EPL slate, a specific matchup (`--matchup AWAY@HOME`), or a team's next N games (`--team` / `--games`), or interpreting pre-prediction confidence warnings."
+argument-hint: "Optional --sport (hockey|soccer), --team (e.g., COL or ARS), --games N, --date (YYYY-MM-DD), --matchup (e.g., TOR@BOS), --include-players..."
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -9,22 +9,26 @@ disable-model-invocation: false
 # Predict Matchup Workflow (`/predict-matchup`)
 
 ## When to Use
-- When the user invokes `/predict-matchup` or asks to predict tonight's NHL slate or a specific head-to-head matchup.
+- When the user invokes `/predict-matchup` or asks to predict tonight's NHL/EPL slate, a specific head-to-head matchup, or a team's next $N$ scheduled games.
 - When running **Stage 1 only** (Mandatory Calibrated Game Win Probabilities & Expected Team Goals) or **Stage 1 + Stage 2** (`--include-players` for active roster skater & goalie stat projections).
 
 ---
 
 ## Step-by-Step Execution Procedure
 
-### Step 1: Parse Target Date, Matchup Filter & Stage Mode
+### Step 1: Parse Target Date, Matchup/Team Filter & Stage Mode
 Determine the user's desired prediction parameters:
 1. **Sport (`--sport`)**: Defaults to `hockey`.
-2. **Date (`--date YYYY-MM-DD`)**: Defaults to today's UTC/local slate date if omitted.
-3. **Matchup Filter (`--matchup AWAY@HOME`)**: Optional (e.g., `TOR@BOS` or `BOS vs TOR`). If omitted, predicts all scheduled games on the target date.
-4. **Stage 2 Player Projections (`--include-players` / `--no-include-players`)**:
+2. **Team Schedule Mode (`--team` / `-t`, `--games` / `-n`)**:
+   - Pass `--team <TEAM>` (e.g., `COL`, `BOS`, `ARS`, `MCI`) to predict that team's next scheduled game.
+   - Optionally pass `--games <N>` (or `-n <N>`) alongside `--team` to predict their next $N$ scheduled games in chronological order (defaults to `1`).
+   - If `--date YYYY-MM-DD` is also provided with `--team`, it acts as the starting reference date (`from_date`).
+3. **Date (`--date YYYY-MM-DD`)**: Defaults to today's UTC/local slate date if `--team` is omitted.
+4. **Matchup Filter (`--matchup AWAY@HOME`)**: Optional (e.g., `TOR@BOS` or `BOS vs TOR`) when not using `--team`. If omitted, predicts all scheduled games on the target date.
+5. **Stage 2 Player Projections (`--include-players` / `--no-include-players`)**:
    - Omit (or pass `--no-include-players`) when only Stage 1 game win probability is needed.
    - Pass `--include-players` when skater (`E[TOI]`, `E[G]`, `E[A]`, `E[PTS]`, `E[SOG]`, `P(1+ PT)`) and goalie (`E[SA]`, `E[SV]`, `E[GA]`, `E[SV%]`) projections are requested.
-5. **Network Mode (`--offline`)**:
+6. **Network Mode (`--offline`)**:
    - By default, `sports-ml predict` connects live to sync current-season completed games and schedules before predicting.
    - Pass `--offline` only if the user explicitly wants to predict strictly from already-cached local Silver Parquet tables.
 
@@ -39,6 +43,11 @@ Check that a trained model bundle exists at `artifacts/<sport>/latest/metadata.j
 Run the appropriate CLI command via bash:
 
 ```bash
+# Predict a team's next game or next N scheduled games
+uv run sports-ml predict --sport hockey --team COL
+uv run sports-ml predict --sport hockey --team COL --games 5
+uv run sports-ml predict --sport soccer --team ARS --games 3
+
 # Predict full slate for a date (Stage 1 Probabilities only)
 uv run sports-ml predict --sport hockey --date 2026-10-25
 uv run sports-ml predict --sport soccer --date 2026-10-25

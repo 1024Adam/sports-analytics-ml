@@ -384,6 +384,43 @@ def _populate_raw_fixture_lakehouse(root_dir: Path) -> None:
         json.dumps({"gameWeek": game_Week}), encoding="utf-8"
     )
 
+    # Also add upcoming FUT club schedule games for COL and BOS
+    club_col_games = [
+        {
+            "id": 2024020010,
+            "season": 20242025,
+            "gameType": 2,
+            "gameDate": "2024-10-22",
+            "startTimeUTC": "2024-10-22T23:00:00Z",
+            "gameState": "FUT",
+            "homeTeam": {"abbrev": "COL"},
+            "awayTeam": {"abbrev": "BOS"},
+        },
+        {
+            "id": 2024020011,
+            "season": 20242025,
+            "gameType": 2,
+            "gameDate": "2024-10-24",
+            "startTimeUTC": "2024-10-24T23:00:00Z",
+            "gameState": "FUT",
+            "homeTeam": {"abbrev": "TOR"},
+            "awayTeam": {"abbrev": "COL"},
+        },
+        {
+            "id": 2024020012,
+            "season": 20242025,
+            "gameType": 2,
+            "gameDate": "2024-10-26",
+            "startTimeUTC": "2024-10-26T23:00:00Z",
+            "gameState": "FUT",
+            "homeTeam": {"abbrev": "COL"},
+            "awayTeam": {"abbrev": "TOR"},
+        },
+    ]
+    (sched_dir / "club_COL_20242025.json").write_text(
+        json.dumps({"games": club_col_games}), encoding="utf-8"
+    )
+
 
 def test_end_to_end_cli_and_predictor_pipeline(
     tmp_path: Path,
@@ -468,3 +505,51 @@ def test_end_to_end_cli_and_predictor_pipeline(
     assert not full_pred.player_projections.home_skaters.is_empty()
     assert not full_pred.player_projections.away_skaters.is_empty()
     assert not full_pred.player_projections.goalies.is_empty()
+
+    # 8. Predict a team's next game (--team COL) and next N games (--team COL --games 3)
+    res_team_1 = runner.invoke(
+        app,
+        ["predict", "--sport", "hockey", "--team", "COL", "--offline"],
+    )
+    assert res_team_1.exit_code == 0, res_team_1.stdout
+    assert "2024-10-22" in res_team_1.stdout
+    assert "BOS @ COL" in res_team_1.stdout
+    assert "2024-10-24" not in res_team_1.stdout
+
+    res_team_3 = runner.invoke(
+        app,
+        ["predict", "--sport", "hockey", "--team", "COL", "--games", "3", "--offline"],
+    )
+    assert res_team_3.exit_code == 0, res_team_3.stdout
+    assert "2024-10-22" in res_team_3.stdout
+    assert "2024-10-24" in res_team_3.stdout
+    assert "2024-10-26" in res_team_3.stdout
+
+    # Programmatic API verification for predict_team_next_games
+    next_2_col = predictor.predict_team_next_games(
+        "COL",
+        n_games=2,
+        from_date=date(2024, 10, 23),
+        offline=True,
+        persist_ledger=False,
+    )
+    assert len(next_2_col) == 2
+    assert [p.game_date for p in next_2_col] == [date(2024, 10, 24), date(2024, 10, 26)]
+
+    # CLI & API validation error checks
+    res_bad_both = runner.invoke(
+        app,
+        ["predict", "--sport", "hockey", "--team", "COL", "--matchup", "BOS@COL", "--offline"],
+    )
+    assert res_bad_both.exit_code != 0
+
+    res_bad_games = runner.invoke(
+        app,
+        ["predict", "--sport", "hockey", "--games", "2", "--offline"],
+    )
+    assert res_bad_games.exit_code != 0
+
+    with pytest.raises(ValueError, match="n_games must be >= 1"):
+        predictor.predict_team_next_games("COL", n_games=0, offline=True)
+    with pytest.raises(ValueError, match="No scheduled games found"):
+        predictor.predict_team_next_games("SEA", n_games=1, offline=True)

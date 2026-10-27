@@ -574,17 +574,22 @@ class NHLWebAPIClient:
         season: int,
         *,
         is_active_season: bool = False,
+        ttl_seconds: float = 900.0,
     ) -> dict[str, Any]:
         """Fetch `/v1/club-schedule-season/{TEAM}/{SEASON}`."""
         team_code = normalize_tricode(team_tricode)
         cache_path = self.cache_dir / "schedules" / f"club_{team_code}_{season}.json"
-        if cache_path.exists() and not is_active_season:
-            cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
-            return cached
+        if cache_path.exists():
+            if not is_active_season:
+                cached: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
+                return cached
+            age = time.time() - cache_path.stat().st_mtime
+            if age <= ttl_seconds:
+                cached_active: dict[str, Any] = json.loads(cache_path.read_text(encoding="utf-8"))
+                return cached_active
 
         payload = self._get_json(f"/club-schedule-season/{team_code}/{season}")
-        if not is_active_season:
-            cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return payload
 
     def fetch_game_boxscore(

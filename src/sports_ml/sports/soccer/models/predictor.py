@@ -455,14 +455,17 @@ class SoccerMatchupPredictor:
         include_players: bool = False,
         offline: bool = False,
         persist_ledger: bool = True,
+        _gold_bundle: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame] | None = None,
     ) -> SoccerMatchupPrediction:
         """Predict calibrated Stage 1 `1X2` probabilities and optional Stage 2 projections."""
         _ = offline
         home_code = normalize_soccer_club(home_team)
         away_code = normalize_soccer_club(away_team)
 
-        stage1_df, stage2_df, team_feat_df, gk_feat_df = build_and_persist_soccer_gold_features(
-            self.settings
+        stage1_df, stage2_df, team_feat_df, gk_feat_df = (
+            _gold_bundle
+            if _gold_bundle is not None
+            else build_and_persist_soccer_gold_features(self.settings)
         )
         matchup_row = self._synthesize_matchup_row_if_missing(
             stage1_df, home_code, away_code, match_date
@@ -681,6 +684,7 @@ class SoccerMatchupPredictor:
         if slate_df.is_empty():
             slate_df = matches_df.tail(1)
 
+        gold_bundle = build_and_persist_soccer_gold_features(self.settings)
         results: list[SoccerMatchupPrediction] = []
         for row in slate_df.iter_rows(named=True):
             results.append(
@@ -691,6 +695,73 @@ class SoccerMatchupPredictor:
                     include_players=include_players,
                     offline=offline,
                     persist_ledger=persist_ledger,
+                    _gold_bundle=gold_bundle,
+                )
+            )
+        return results
+
+    def predict_team_next_games(
+        self,
+        team: str,
+        n_games: int = 1,
+        *,
+        from_date: date | None = None,
+        include_players: bool = False,
+        offline: bool = False,
+        persist_ledger: bool = True,
+    ) -> list[SoccerMatchupPrediction]:
+        """Predict the next `n_games` scheduled EPL matches for `team` in chronological order."""
+        if n_games < 1:
+            raise ValueError(f"n_games must be >= 1, got {n_games}.")
+
+        team_code = normalize_soccer_club(team)
+        matches_path = self.settings.paths.silver_dir / "soccer" / "matches.parquet"
+        if not matches_path.exists():
+            raise FileNotFoundError(
+                f"Silver matches table not found at '{matches_path}'. "
+                "Run 'sports-ml ingest --sport soccer' first."
+            )
+
+        matches_df = pl.read_parquet(matches_path).sort(
+            ["match_date", "start_time_utc", "match_id"]
+        )
+        team_matches_df = matches_df.filter(
+            (pl.col("home_team") == team_code) | (pl.col("away_team") == team_code)
+        )
+        if team_matches_df.is_empty():
+            raise ValueError(f"No scheduled matches found in Silver table for team '{team_code}'.")
+
+        if from_date is not None:
+            on_or_after = team_matches_df.filter(pl.col("match_date") >= from_date)
+            if on_or_after.is_empty():
+                raise ValueError(
+                    f"No scheduled matches found for team '{team_code}' on or after "
+                    f"{from_date.isoformat()}."
+                )
+            target_df = on_or_after.head(n_games)
+        else:
+            today_utc = datetime.now(tz=UTC).date()
+            fut_matches = team_matches_df.filter(pl.col("game_state") != "FINAL")
+            fut_upcoming = fut_matches.filter(pl.col("match_date") >= today_utc)
+            if not fut_upcoming.is_empty():
+                target_df = fut_upcoming.head(n_games)
+            elif not fut_matches.is_empty():
+                target_df = fut_matches.head(n_games)
+            else:
+                target_df = team_matches_df.tail(n_games)
+
+        gold_bundle = build_and_persist_soccer_gold_features(self.settings)
+        results: list[SoccerMatchupPrediction] = []
+        for row in target_df.iter_rows(named=True):
+            results.append(
+                self.predict_matchup(
+                    home_team=str(row["home_team"]),
+                    away_team=str(row["away_team"]),
+                    match_date=row["match_date"],
+                    include_players=include_players,
+                    offline=offline,
+                    persist_ledger=persist_ledger,
+                    _gold_bundle=gold_bundle,
                 )
             )
         return results

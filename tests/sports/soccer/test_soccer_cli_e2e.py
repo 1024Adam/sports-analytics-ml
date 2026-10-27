@@ -168,7 +168,7 @@ def _write_offline_soccer_fixtures(raw_dir: Path) -> None:
                 "finished": True,
             }
         )
-    # Add an upcoming fixture on 2024-10-05
+    # Add two upcoming fixtures on 2024-10-05 and 2024-10-19
     fixtures.append(
         {
             "id": 13,
@@ -176,6 +176,18 @@ def _write_offline_soccer_fixtures(raw_dir: Path) -> None:
             "kickoff_time": "2024-10-05T14:00:00Z",
             "team_h": 1,
             "team_a": 2,
+            "team_h_score": None,
+            "team_a_score": None,
+            "finished": False,
+        }
+    )
+    fixtures.append(
+        {
+            "id": 14,
+            "event": 14,
+            "kickoff_time": "2024-10-19T14:00:00Z",
+            "team_h": 3,
+            "team_a": 1,
             "team_h_score": None,
             "team_a_score": None,
             "finished": False,
@@ -295,7 +307,26 @@ def test_soccer_cli_end_to_end_pipeline(tmp_path: Path, monkeypatch: pytest.Monk
     assert "Stage 2 — EPL Player Projections" in r_pred_s2.output
     assert "Goalkeepers" in r_pred_s2.output
 
-    # 7. Score predictions ledger against completed Silver matches
+    # 7. Predict next game and next N games for a team (--team ARS, --games 2)
+    r_team_1 = runner.invoke(
+        app,
+        ["predict", "--sport", "soccer", "--team", "ARS", "--offline"],
+    )
+    assert r_team_1.exit_code == 0, r_team_1.output
+    assert "2024-10-05" in r_team_1.output
+    assert "MCI @ ARS" in r_team_1.output
+    assert "2024-10-19" not in r_team_1.output
+
+    r_team_2 = runner.invoke(
+        app,
+        ["predict", "--sport", "soccer", "--team", "ARS", "--games", "2", "--offline"],
+    )
+    assert r_team_2.exit_code == 0, r_team_2.output
+    assert "2024-10-05" in r_team_2.output
+    assert "2024-10-19" in r_team_2.output
+    assert "ARS @ LIV" in r_team_2.output
+
+    # 8. Score predictions ledger against completed Silver matches
     r_score = runner.invoke(app, ["score-predictions", "--sport", "soccer"])
     assert r_score.exit_code == 0, r_score.output
     assert "Live Prediction Ledger Accuracy (SOCCER 1X2)" in r_score.output

@@ -44,6 +44,10 @@ uv run sports-ml predict --sport hockey --date 2026-10-25
 # 4. Predict a specific matchup with Stage 2 Player Stat Projections (broken down by team & F/D/G)
 uv run sports-ml predict --sport hockey --date 2026-10-25 --matchup TOR@BOS --include-players
 
+# 5. Predict a team's next scheduled game, or their next N scheduled games
+uv run sports-ml predict --sport hockey --team COL
+uv run sports-ml predict --sport hockey --team COL --games 5
+
 # --- EPL Soccer (--sport soccer) ---
 # 1. Backfill historical & active EPL seasons (FPL + Understat + Football-Data)
 uv run sports-ml ingest --sport soccer --seasons 20232024,20242025,20252026 --current-season
@@ -92,6 +96,9 @@ full_pred = predictor.predict_matchup(
     game_date=date(2026, 10, 25),
     include_players=True,
 )
+
+# Predict a team's next N scheduled games in chronological order
+next_games = predictor.predict_team_next_games("COL", n_games=3, include_players=False)
 ```
 
 ---
@@ -99,7 +106,7 @@ full_pred = predictor.predict_matchup(
 ## Copilot Slash-Command Skills (`.github/skills/`)
 
 ### Run-Action Skills
-- `/predict-matchup` ([SKILL.md](./.github/skills/predict-matchup/SKILL.md)): Run `sports-ml predict` for a slate date or specific `AWAY@HOME` matchup, optionally with `--include-players` (Stage 2) or `--offline`.
+- `/predict-matchup` ([SKILL.md](./.github/skills/predict-matchup/SKILL.md)): Run `sports-ml predict` for a slate date, a specific `AWAY@HOME` matchup, or a team's next $N$ games (`--team` / `--games`), optionally with `--include-players` (Stage 2) or `--offline`.
 - `/ingest-data` ([SKILL.md](./.github/skills/ingest-data/SKILL.md)): Run `sports-ml ingest` for `--current-season`, `--start-date`/`--end-date`, `--seasons`, or `--offline` Silver Parquet reconciliation.
 - `/train-models` ([SKILL.md](./.github/skills/train-models/SKILL.md)): Run `sports-ml features build` and `sports-ml train` (`--include-stage2`) and inspect `metadata.json` SHA-256 schema fingerprints.
 - `/evaluate-and-score` ([SKILL.md](./.github/skills/evaluate-and-score/SKILL.md)): Run walk-forward `sports-ml backtest` and score the live `data/predictions/` audit ledger (`sports-ml score-predictions`).

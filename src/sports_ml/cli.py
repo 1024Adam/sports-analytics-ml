@@ -131,6 +131,7 @@ def _run_hockey_ingestion(
     end_date: str | None = None,
     offline: bool = False,
     max_boxscores: int | None = 120,
+    team: str | None = None,
 ) -> pl.DataFrame:
     """Execute hybrid NHL Web API + MoneyPuck ingestion and reconcile into Silver tables."""
     settings.paths.ensure_dirs(sport="hockey")
@@ -169,9 +170,9 @@ def _run_hockey_ingestion(
             if not g_df.is_empty():
                 goalie_frames.append(g_df)
 
-    # 2. If online and date range, seasons, or current_season requested, query live endpoints
+    # 2. If online and date range, seasons, current_season, or team requested, query live endpoints
     season_start_years: set[int] = set()
-    if not offline and (start_date or end_date or current_season or seasons):
+    if not offline and (start_date or end_date or current_season or seasons or team):
         if start_date and end_date:
             s_dt = date.fromisoformat(start_date)
             e_dt = date.fromisoformat(end_date)
@@ -262,6 +263,27 @@ def _run_hockey_ingestion(
                 team_frames.extend(t_f)
                 skater_frames.extend(s_f)
                 goalie_frames.extend(g_f)
+
+        if team:
+            active_s = derive_active_nhl_season()
+            with contextlib.suppress(Exception):
+                club_payload = nhl_client.fetch_club_schedule_season(
+                    team, active_s, is_active_season=True
+                )
+                club_games = parse_schedule_payload(club_payload)
+                if not club_games.is_empty():
+                    schedule_frames.append(club_games)
+                    for s_val in club_games["season"].unique().to_list():
+                        season_start_years.add(int(str(s_val)[:4]))
+                    t_f, s_f, g_f = _fetch_missing_boxscores(
+                        nhl_client,
+                        club_games,
+                        seen_boxscore_ids,
+                        max_games_per_run=max_boxscores,
+                    )
+                    team_frames.extend(t_f)
+                    skater_frames.extend(s_f)
+                    goalie_frames.extend(g_f)
 
     # 3. Load cached MoneyPuck CSVs (and download live if online and season_start_years known)
     mp_teams_list: list[pl.DataFrame] = []
@@ -913,8 +935,8 @@ def train_command(
 def _render_predictions(predictions: list[MatchupPrediction]) -> None:
     """Render Stage 1 and optional Stage 2 predictions as Rich terminal tables."""
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
-    game_table.add_column("Date", style="cyan")
-    game_table.add_column("Matchup", style="bold")
+    game_table.add_column("Date", style="cyan", no_wrap=True)
+    game_table.add_column("Matchup", style="bold", no_wrap=True)
     game_table.add_column("P(Away Win)", justify="right", style="yellow")
     game_table.add_column("P(Home Win)", justify="right", style="green")
     game_table.add_column("E[Away Goals]", justify="right")
@@ -1014,8 +1036,8 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
 def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> None:
     """Render EPL Stage 1 `1X2` and optional Stage 2 projections as Rich terminal tables."""
     match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
-    match_table.add_column("Date", style="cyan")
-    match_table.add_column("Matchup (Away @ Home)", style="bold")
+    match_table.add_column("Date", style="cyan", no_wrap=True)
+    match_table.add_column("Matchup (Away @ Home)", style="bold", no_wrap=True)
     match_table.add_column("P(Away Win)", justify="right", style="yellow")
     match_table.add_column("P(Draw)", justify="right", style="magenta")
     match_table.add_column("P(Home Win)", justify="right", style="green")
@@ -1135,6 +1157,23 @@ def predict_command(
         str | None,
         typer.Option("--matchup", help="Optional matchup filter (e.g., TOR@BOS or MCI@ARS)."),
     ] = None,
+    team: Annotated[
+        str | None,
+        typer.Option(
+            "--team",
+            "-t",
+            help="Predict the next scheduled game(s) for a specific team (e.g., COL, BOS, ARS).",
+        ),
+    ] = None,
+    n_games: Annotated[
+        int | None,
+        typer.Option(
+            "--games",
+            "-n",
+            min=1,
+            help="Number of upcoming games to predict for --team (defaults to 1).",
+        ),
+    ] = None,
     include_players: Annotated[
         bool,
         typer.Option(
@@ -1149,38 +1188,61 @@ def predict_command(
 ) -> None:
     """Generate Stage 1 game win probabilities and optional Stage 2 player projections."""
     slug = _ensure_supported_sport(sport)
-    settings = get_settings()
+    if team and matchup:
+        raise typer.BadParameter("Specify either --team or --matchup, not both.")
+    if n_games is not None and not team:
+        raise typer.BadParameter("--games requires --team to be specified.")
 
-    target_date = (
-        date.fromisoformat(game_date) if game_date is not None else datetime.now(tz=UTC).date()
-    )
+    settings = get_settings()
+    parsed_date = date.fromisoformat(game_date) if game_date is not None else None
+    target_date = parsed_date if parsed_date is not None else datetime.now(tz=UTC).date()
     artifact_dir = settings.paths.artifacts_dir / slug / "latest"
 
     if slug == "soccer":
         if not offline:
             _run_soccer_ingestion(settings, current_season=True, offline=False)
         s_predictor = SoccerMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
-        s_predictions = s_predictor.predict_date(
+        if team:
+            s_predictions = s_predictor.predict_team_next_games(
+                team,
+                n_games=n_games if n_games is not None else 1,
+                from_date=parsed_date,
+                include_players=include_players,
+                offline=offline,
+                persist_ledger=True,
+            )
+        else:
+            s_predictions = s_predictor.predict_date(
+                target_date,
+                include_players=include_players,
+                matchup_filter=matchup,
+                offline=offline,
+                persist_ledger=True,
+            )
+        _render_soccer_predictions(s_predictions)
+        return
+
+    if not offline:
+        _run_hockey_ingestion(settings, current_season=True, offline=False, team=team)
+
+    predictor = HockeyMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
+    if team:
+        predictions = predictor.predict_team_next_games(
+            team,
+            n_games=n_games if n_games is not None else 1,
+            from_date=parsed_date,
+            include_players=include_players,
+            offline=offline,
+            persist_ledger=True,
+        )
+    else:
+        predictions = predictor.predict_date(
             target_date,
             include_players=include_players,
             matchup_filter=matchup,
             offline=offline,
             persist_ledger=True,
         )
-        _render_soccer_predictions(s_predictions)
-        return
-
-    if not offline:
-        _run_hockey_ingestion(settings, current_season=True, offline=False)
-
-    predictor = HockeyMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
-    predictions = predictor.predict_date(
-        target_date,
-        include_players=include_players,
-        matchup_filter=matchup,
-        offline=offline,
-        persist_ledger=True,
-    )
     _render_predictions(predictions)
 
 

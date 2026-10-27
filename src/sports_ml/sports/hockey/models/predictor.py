@@ -658,13 +658,16 @@ class HockeyMatchupPredictor:
         away_goalie_status: str | None = None,
         offline: bool = False,
         persist_ledger: bool = True,
+        _gold_bundle: tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame] | None = None,
     ) -> MatchupPrediction:
         """Predict Stage 1 calibrated win probability and optional Stage 2 player projections."""
         home_code = normalize_tricode(home_team)
         away_code = normalize_tricode(away_team)
 
-        stage1_df, stage2_df, team_feat_df, goalie_feat_df = build_and_persist_gold_features(
-            self.settings
+        stage1_df, stage2_df, team_feat_df, goalie_feat_df = (
+            _gold_bundle
+            if _gold_bundle is not None
+            else build_and_persist_gold_features(self.settings)
         )
 
         matchup_row_df = self._synthesize_matchup_row_if_missing(
@@ -877,6 +880,7 @@ class HockeyMatchupPredictor:
         if slate_df.is_empty():
             slate_df = games_df.tail(1)
 
+        gold_bundle = build_and_persist_gold_features(self.settings)
         results: list[MatchupPrediction] = []
         for row in slate_df.iter_rows(named=True):
             results.append(
@@ -887,6 +891,70 @@ class HockeyMatchupPredictor:
                     include_players=include_players,
                     offline=offline,
                     persist_ledger=persist_ledger,
+                    _gold_bundle=gold_bundle,
+                )
+            )
+        return results
+
+    def predict_team_next_games(
+        self,
+        team: str,
+        n_games: int = 1,
+        *,
+        from_date: date | None = None,
+        include_players: bool = False,
+        offline: bool = False,
+        persist_ledger: bool = True,
+    ) -> list[MatchupPrediction]:
+        """Predict the next `n_games` scheduled matchups for `team` in chronological order."""
+        if n_games < 1:
+            raise ValueError(f"n_games must be >= 1, got {n_games}.")
+
+        team_code = normalize_tricode(team)
+        games_path = self.settings.paths.silver_dir / "hockey" / "games.parquet"
+        if not games_path.exists():
+            raise FileNotFoundError(
+                f"Silver games table not found at '{games_path}'. Run 'sports-ml ingest' first."
+            )
+
+        games_df = pl.read_parquet(games_path).sort(["game_date", "start_time_utc", "game_id"])
+        team_games_df = games_df.filter(
+            (pl.col("home_team") == team_code) | (pl.col("away_team") == team_code)
+        )
+        if team_games_df.is_empty():
+            raise ValueError(f"No scheduled games found in Silver table for team '{team_code}'.")
+
+        if from_date is not None:
+            on_or_after = team_games_df.filter(pl.col("game_date") >= from_date)
+            if on_or_after.is_empty():
+                raise ValueError(
+                    f"No scheduled games found for team '{team_code}' on or after "
+                    f"{from_date.isoformat()}."
+                )
+            target_df = on_or_after.head(n_games)
+        else:
+            today_utc = datetime.now(tz=UTC).date()
+            fut_games = team_games_df.filter(pl.col("game_state") != "FINAL")
+            fut_upcoming = fut_games.filter(pl.col("game_date") >= today_utc)
+            if not fut_upcoming.is_empty():
+                target_df = fut_upcoming.head(n_games)
+            elif not fut_games.is_empty():
+                target_df = fut_games.head(n_games)
+            else:
+                target_df = team_games_df.tail(n_games)
+
+        gold_bundle = build_and_persist_gold_features(self.settings)
+        results: list[MatchupPrediction] = []
+        for row in target_df.iter_rows(named=True):
+            results.append(
+                self.predict_matchup(
+                    home_team=str(row["home_team"]),
+                    away_team=str(row["away_team"]),
+                    game_date=row["game_date"],
+                    include_players=include_players,
+                    offline=offline,
+                    persist_ledger=persist_ledger,
+                    _gold_bundle=gold_bundle,
                 )
             )
         return results

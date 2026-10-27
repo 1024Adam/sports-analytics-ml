@@ -482,9 +482,52 @@ def build_stage1_game_features(
                 asof_s = f"_asof_{c}_{side}"
                 if col_s in matchup.columns and asof_s in matchup.columns:
                     fill_exprs.append(pl.col(col_s).fill_null(pl.col(asof_s)).alias(col_s))
+        matchup = matchup.with_columns(fill_exprs).drop(
+            [f"_asof_{c}_{side}" for c in asof_cols for side in ("home", "away")]
+        )
+
+        # Backfill schedule context (rest_days, B2B, density) for upcoming FUT games from games_df
+        sched_home_in = games_df.select(
+            pl.col(event_col),
+            pl.col("game_date"),
+            pl.col("start_time_utc"),
+            pl.col("season"),
+            pl.col("home_team").alias("team"),
+        )
+        sched_away_in = games_df.select(
+            pl.col(event_col),
+            pl.col("game_date"),
+            pl.col("start_time_utc"),
+            pl.col("season"),
+            pl.col("away_team").alias("team"),
+        )
+        sched_all = compute_schedule_features(
+            pl.concat([sched_home_in, sched_away_in], how="vertical").unique(
+                subset=[event_col, "team"], keep="last"
+            )
+        )
+        sched_cols = ["rest_days", "is_b2b", "games_last_4d", "games_last_6d"]
+        sched_h_lookup = sched_all.select(
+            pl.col(event_col),
+            pl.col("team").alias("home_team"),
+            *[pl.col(c).alias(f"_sched_{c}_home") for c in sched_cols],
+        )
+        sched_a_lookup = sched_all.select(
+            pl.col(event_col),
+            pl.col("team").alias("away_team"),
+            *[pl.col(c).alias(f"_sched_{c}_away") for c in sched_cols],
+        )
         matchup = (
-            matchup.with_columns(fill_exprs)
-            .drop([f"_asof_{c}_{side}" for c in asof_cols for side in ("home", "away")])
+            matchup.join(sched_h_lookup, on=[event_col, "home_team"], how="left")
+            .join(sched_a_lookup, on=[event_col, "away_team"], how="left")
+            .with_columns(
+                [
+                    pl.col(f"{c}_{s}").fill_null(pl.col(f"_sched_{c}_{s}")).alias(f"{c}_{s}")
+                    for c in sched_cols
+                    for s in ("home", "away")
+                ]
+            )
+            .drop([f"_sched_{c}_{s}" for c in sched_cols for s in ("home", "away")])
             .with_columns(
                 pl.col("rest_days_home").fill_null(2),
                 pl.col("rest_days_away").fill_null(2),
