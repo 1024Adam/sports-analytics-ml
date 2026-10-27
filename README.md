@@ -105,6 +105,7 @@ full_pred = predictor.predict_matchup(
 - `/evaluate-and-score` ([SKILL.md](./.github/skills/evaluate-and-score/SKILL.md)): Run walk-forward `sports-ml backtest` and score the live `data/predictions/` audit ledger (`sports-ml score-predictions`).
 
 ### Engineering & Architecture Skills
+- `/implement-feature` ([SKILL.md](./.github/skills/implement-feature/SKILL.md)): Implement and verify a standalone feature or enhancement directly from a prompt description.
 - `/implement-milestone` ([SKILL.md](./.github/skills/implement-milestone/SKILL.md)): Execute and verify roadmap milestones.
 - `/leak-free-feature-audit` ([SKILL.md](./.github/skills/leak-free-feature-audit/SKILL.md)): Audit temporal window functions and run future-mutation invariance tests.
 - `/nhl-data-integration` ([SKILL.md](./.github/skills/nhl-data-integration/SKILL.md)): Reference for Official NHL Web API v1, MoneyPuck CSV/ZIPs, and 2-Tier pre-game lineups.

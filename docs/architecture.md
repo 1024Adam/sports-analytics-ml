@@ -150,6 +150,8 @@ sports-analytics-ml/
 │   ├── skills/
 │   │   ├── evaluate-and-score/
 │   │   │   └── SKILL.md             # /evaluate-and-score backtest & live ledger scoring
+│   │   ├── implement-feature/
+│   │   │   └── SKILL.md             # /implement-feature prompt-driven feature workflow & quality gate
 │   │   ├── implement-milestone/
 │   │   │   └── SKILL.md             # /implement-milestone workflow & quality gate
 │   │   ├── ingest-data/
