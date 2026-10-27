@@ -18,6 +18,7 @@ import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
 from sports_ml.config import Settings, get_settings
+from sports_ml.core.cache import resolve_cache_read_path
 from sports_ml.core.evaluation import (
     MulticlassBenchmarkReport,
     compare_multiclass_against_baselines,
@@ -103,8 +104,10 @@ def build_and_persist_soccer_gold_features(
 
     # Load cached FPL bootstrap squad metadata if available
     squad_meta_df: pl.DataFrame | None = None
-    bootstrap_cache = settings.paths.raw_dir / "fpl_api" / "bootstrap_static.json"
-    if bootstrap_cache.exists():
+    bootstrap_cache = resolve_cache_read_path(
+        settings.paths.raw_dir / "fpl_api" / "bootstrap_static.json.gz"
+    )
+    if bootstrap_cache is not None:
         try:
             fpl_client = FPLAPIClient(cache_dir=settings.paths.raw_dir / "fpl_api")
             bootstrap = fpl_client.fetch_bootstrap_static(ttl_seconds=None)
@@ -135,9 +138,9 @@ def build_and_persist_soccer_gold_features(
         else pl.DataFrame()
     )
 
-    stage1_df.write_parquet(gold_dir / "stage1_match_features.parquet")
+    stage1_df.write_parquet(gold_dir / "stage1_match_features.parquet", compression="zstd")
     if not stage2_df.is_empty():
-        stage2_df.write_parquet(gold_dir / "stage2_player_features.parquet")
+        stage2_df.write_parquet(gold_dir / "stage2_player_features.parquet", compression="zstd")
 
     return stage1_df, stage2_df, team_feat_df, gk_feat_df
 
@@ -176,8 +179,10 @@ class SoccerMatchupPredictor:
         )
 
     def _load_cached_squad_df(self) -> pl.DataFrame | None:
-        bootstrap_cache = self.settings.paths.raw_dir / "fpl_api" / "bootstrap_static.json"
-        if not bootstrap_cache.exists():
+        bootstrap_cache = resolve_cache_read_path(
+            self.settings.paths.raw_dir / "fpl_api" / "bootstrap_static.json.gz"
+        )
+        if bootstrap_cache is None:
             return None
         try:
             fpl_client = FPLAPIClient(cache_dir=self.settings.paths.raw_dir / "fpl_api")
@@ -443,7 +448,7 @@ class SoccerMatchupPredictor:
             )
         else:
             combined = new_row
-        combined.write_parquet(ledger_path)
+        combined.write_parquet(ledger_path, compression="zstd")
         return ledger_path
 
     def predict_matchup(

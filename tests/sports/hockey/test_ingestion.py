@@ -608,3 +608,94 @@ def test_data_source_health_probes_success_and_failure(tmp_path: Path) -> None:
     )
     assert broken_results[3].healthy is False
     assert "__NEXT_DATA__" in broken_results[3].details
+
+
+def test_moneypuck_shared_teams_all_cache_and_gzip_storage(tmp_path: Path) -> None:
+    """Verify `MoneyPuckClient` downloads `all_teams.csv` once into `teams_all.csv.gz`."""
+    cumulative_teams_csv = (
+        b"gameId,season,team,situation,xGoalsFor,xGoalsAgainst,shotAttemptsFor,shotAttemptsAgainst,"
+        b"unblockedShotAttemptsFor,unblockedShotAttemptsAgainst,highDangerxGoalsFor,"
+        b"highDangerxGoalsAgainst,iceTime,goalsFor,goalsAgainst\n"
+        b"2023020001,2023,BOS,5on5,2.50,1.90,50,45,38,33,1.10,0.80,2940,3,2\n"
+        b"2023020001,2023,BOS,5on4,0.60,0.05,10,1,8,1,0.30,0.0,300,1,0\n"
+        b"2023020001,2023,BOS,4on5,0.05,0.50,1,9,1,7,0.0,0.25,240,0,0\n"
+        b"2024020001,2024,BOS,5on5,2.75,1.85,55,44,41,32,1.20,0.75,2940,3,1\n"
+        b"2024020001,2024,BOS,5on4,0.85,0.05,12,1,9,1,0.45,0.0,360,1,0\n"
+        b"2024020001,2024,BOS,4on5,0.05,0.60,2,10,1,8,0.0,0.30,240,0,1\n"
+    )
+    skaters_2024_csv = (
+        b"gameId,season,playerId,playerTeam,situation,I_F_xGoals,I_F_shotAttempts,"
+        b"OnIce_F_xGoals,OnIce_A_xGoals,gameScore\n"
+        b"2024020001,2024,8477956,BOS,all,0.92,9,1.80,0.50,2.85\n"
+        b"2024020001,2024,8477956,BOS,5on5,0.65,6,1.25,0.45,2.85\n"
+    )
+    goalies_2024_csv = (
+        b"gameId,season,playerId,playerTeam,situation,xGoals,goals\n"
+        b"2024020001,2024,8480280,BOS,all,2.65,2\n"
+    )
+
+    counts = {"teams": 0, "skaters": 0, "goalies": 0}
+
+    def _mp_handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        if "all_teams.csv" in url:
+            counts["teams"] += 1
+            return httpx.Response(
+                200,
+                content=cumulative_teams_csv,
+                headers={"ETag": '"mp-teams-v1"'},
+            )
+        if "skaters" in url:
+            counts["skaters"] += 1
+            return httpx.Response(200, content=skaters_2024_csv)
+        if "goalies" in url:
+            counts["goalies"] += 1
+            return httpx.Response(200, content=goalies_2024_csv)
+        return httpx.Response(404)
+
+    mp_dir = tmp_path / "raw" / "moneypuck"
+    mp_client = MoneyPuckClient(
+        cache_dir=mp_dir,
+        transport=httpx.MockTransport(_mp_handler),
+    )
+
+    # Loading 2023 and 2024 teams downloads `all_teams.csv` ONLY ONCE into `teams_all.csv.gz`
+    t_2023 = mp_client.load_team_game_stats(2023, is_active_season=False)
+    t_2024 = mp_client.load_team_game_stats(2024, is_active_season=False)
+    s_2024 = mp_client.load_skater_game_stats(2024, is_active_season=False)
+    g_2024 = mp_client.load_goalie_game_stats(2024, is_active_season=False)
+
+    assert counts["teams"] == 1
+    assert counts["skaters"] == 1
+    assert counts["goalies"] == 1
+    assert (mp_dir / "teams_all.csv.gz").exists()
+    assert (mp_dir / "teams_all.meta.json").exists()
+    assert (mp_dir / "skaters_2024.csv.gz").exists()
+    assert (mp_dir / "goalies_2024.csv.gz").exists()
+    assert not (mp_dir / "teams_2023.csv").exists()
+    assert not (mp_dir / "teams_2024.csv").exists()
+
+    assert t_2023.height == 1
+    assert t_2023["game_id"][0] == 2023020001
+    assert t_2024.height == 1
+    assert t_2024["game_id"][0] == 2024020001
+    assert s_2024.height == 1
+    assert g_2024.height == 1
+
+    # Verify NHLWebAPIClient writes `.json.gz` files on ingest
+    nhl_dir = tmp_path / "raw" / "nhl_api"
+    nhl_client = NHLWebAPIClient(
+        cache_dir=nhl_dir,
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200,
+                json=_sample_boxscore_payload(2024020001)
+                if "boxscore" in req.url.path
+                else _sample_schedule_payload(game2_state="FINAL"),
+            )
+        ),
+    )
+    _ = nhl_client.fetch_schedule_by_date("2024-10-10")
+    _ = nhl_client.fetch_game_boxscore(2024020001)
+    assert (nhl_dir / "schedules" / "schedule_2024-10-10.json.gz").exists()
+    assert (nhl_dir / "boxscores" / "2024020001.json.gz").exists()

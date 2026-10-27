@@ -17,6 +17,7 @@ import httpx
 import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from sports_ml.core.cache import resolve_cache_read_path, write_gzip_bytes
 from sports_ml.sports.hockey.constants import normalize_tricode
 
 MONEYPUCK_BASE_URL: Final[str] = "https://moneypuck.com/moneypuck/playerData/careers/gameByGame"
@@ -274,6 +275,54 @@ class MoneyPuckClient:
                 return zf.read(target_name)
         return raw_bytes
 
+    def _is_shared_all_teams_endpoint(self, entity_kind: str) -> bool:
+        """Return True when fetching cumulative `all_teams.csv` from the default endpoint."""
+        return entity_kind == "teams" and self.base_url == MONEYPUCK_SEASON_URL.rstrip("/")
+
+    def _cache_stem_for_entity(self, entity_kind: str, season_start_year: int) -> str:
+        """Resolve cache file stem (`teams_all` for default cumulative teams, else per-season)."""
+        if self._is_shared_all_teams_endpoint(entity_kind):
+            return "teams_all"
+        return f"{entity_kind}_{season_start_year}"
+
+    def _resolve_existing_teams_cache_path(
+        self,
+        season_start_year: int,
+    ) -> tuple[Path | None, Path]:
+        """Resolve `teams_all.csv.gz` (or legacy `teams_{YYYY}.csv[.gz]`) and meta path."""
+        stem = self._cache_stem_for_entity("teams", season_start_year)
+        preferred_gz = self.cache_dir / f"{stem}.csv.gz"
+        meta_path = self.cache_dir / f"{stem}.meta.json"
+        resolved = resolve_cache_read_path(preferred_gz)
+        if resolved is not None:
+            return resolved, meta_path
+
+        if self._is_shared_all_teams_endpoint("teams"):
+            legacy_season = resolve_cache_read_path(
+                self.cache_dir / f"teams_{season_start_year}.csv.gz"
+            )
+            if legacy_season is not None:
+                legacy_meta = self.cache_dir / f"teams_{season_start_year}.meta.json"
+                return legacy_season, (legacy_meta if legacy_meta.exists() else meta_path)
+        return None, meta_path
+
+    @staticmethod
+    def _cached_csv_contains_season(csv_path: Path, season_start_year: int) -> bool:
+        """Check whether a cached cumulative CSV contains rows for `season_start_year`."""
+        try:
+            schema = pl.read_csv(csv_path, n_rows=1).schema
+            if "season" not in schema:
+                return True
+            matched = (
+                pl.scan_csv(csv_path)
+                .filter(pl.col("season").cast(pl.Int32) == season_start_year)
+                .limit(1)
+                .collect()
+            )
+            return not matched.is_empty()
+        except Exception:
+            return False
+
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=8.0),
@@ -288,19 +337,34 @@ class MoneyPuckClient:
         is_active_season: bool = False,
     ) -> Path:
         """Download or refresh a MoneyPuck CSV/ZIP using ETag / Last-Modified and TTL rules."""
-        csv_path = self.cache_dir / f"{entity_kind}_{season_start_year}.csv"
-        meta_path = self.cache_dir / f"{entity_kind}_{season_start_year}.meta.json"
+        stem = self._cache_stem_for_entity(entity_kind, season_start_year)
+        preferred_gz = self.cache_dir / f"{stem}.csv.gz"
+        meta_path = self.cache_dir / f"{stem}.meta.json"
 
-        if csv_path.exists():
-            if not is_active_season:
-                return csv_path
-            age = time.time() - csv_path.stat().st_mtime
-            if age <= self.ttl_seconds:
-                return csv_path
+        if entity_kind == "teams":
+            existing_path, existing_meta_path = self._resolve_existing_teams_cache_path(
+                season_start_year
+            )
+        else:
+            existing_path = resolve_cache_read_path(preferred_gz)
+            existing_meta_path = meta_path
+
+        if existing_path is not None:
+            has_requested_season = (
+                self._cached_csv_contains_season(existing_path, season_start_year)
+                if self._is_shared_all_teams_endpoint(entity_kind)
+                else True
+            )
+            if has_requested_season:
+                if not is_active_season:
+                    return existing_path
+                age = time.time() - existing_path.stat().st_mtime
+                if age <= self.ttl_seconds:
+                    return existing_path
 
         headers: dict[str, str] = {"User-Agent": DEFAULT_USER_AGENT}
-        if csv_path.exists() and meta_path.exists():
-            meta: dict[str, Any] = json.loads(meta_path.read_text(encoding="utf-8"))
+        if existing_path is not None and existing_meta_path.exists():
+            meta: dict[str, Any] = json.loads(existing_meta_path.read_text(encoding="utf-8"))
             if "etag" in meta and meta["etag"]:
                 headers["If-None-Match"] = str(meta["etag"])
             if "last_modified" in meta and meta["last_modified"]:
@@ -313,12 +377,12 @@ class MoneyPuckClient:
             transport=self.transport,
         ) as client:
             response = client.get(url, headers=headers)
-            if response.status_code == 304 and csv_path.exists():
-                csv_path.touch()
-                return csv_path
+            if response.status_code == 304 and existing_path is not None:
+                existing_path.touch()
+                return existing_path
             response.raise_for_status()
             csv_bytes = self._extract_csv_bytes(response.content)
-            csv_path.write_bytes(csv_bytes)
+            written_gz = write_gzip_bytes(preferred_gz, csv_bytes)
             meta_out = {
                 "etag": response.headers.get("ETag"),
                 "last_modified": response.headers.get("Last-Modified"),
@@ -326,7 +390,7 @@ class MoneyPuckClient:
             }
             meta_path.write_text(json.dumps(meta_out), encoding="utf-8")
 
-        return csv_path
+        return written_gz
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),

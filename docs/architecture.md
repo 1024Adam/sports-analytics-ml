@@ -30,7 +30,7 @@
                                       ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │ 1. INGESTION & STORAGE LAYER (Parquet Medallion Architecture)              │
-│  • data/raw/     -> Immutable HTTP JSON / CSV caches (hash & date keyed)   │
+│  • data/raw/     -> Gzip-compressed HTTP caches (.csv.gz / .json.gz)       │
 │  • data/bronze/  -> Normalized Polars schemas (games, team_games, players) │
 │  • data/silver/  -> Joined canonical pre-game & post-game entity logs      │
 │  • data/gold/    -> Leak-free feature matrices (game_features, player_feat)│
@@ -173,8 +173,8 @@ sports-analytics-ml/
 │   ├── architecture.md              # This system architecture blueprint
 │   ├── data-and-features.md         # Schemas, data sources & mathematical feature specs
 │   └── roadmap.md                   # Phased implementation milestones & test gates
-├── data/                            # Git-ignored local data lakehouse (Parquet + JSON cache)
-│   ├── raw/                         # Cached NHL API JSON responses & MoneyPuck CSVs
+├── data/                            # Git-ignored local data lakehouse (Parquet + Gzip raw cache)
+│   ├── raw/                         # Gzip-compressed (.csv.gz, .json.gz) HTTP caches + .meta.json sidecars
 │   ├── bronze/                      # Normalized typed Parquet tables
 │   ├── silver/                      # Entity-aligned game, team_game, skater_game, goalie_game
 │   ├── gold/                        # Pre-game feature matrices for Stage 1 & Stage 2
@@ -188,10 +188,11 @@ sports-analytics-ml/
 ├── src/
 │   └── sports_ml/
 │       ├── __init__.py
-│       ├── cli.py                   # Typer/Click CLI (`sports-ml ingest|features|train|backtest|predict|score-predictions|check-sources`)
+│       ├── cli.py                   # Typer/Click CLI (`sports-ml ingest|features|train|backtest|predict|score-predictions|check-sources|compact-cache`)
 │       ├── config.py                # Pydantic settings (paths, seasons, hyperparameters)
 │       ├── core/                    # SPORT-AGNOSTIC ML ENGINE
 │       │   ├── __init__.py
+│       │   ├── cache.py             # Transparent .csv.gz / .json.gz cache I/O, legacy fallback & in-place compaction
 │       │   ├── contracts.py         # SportAdapter protocol & Pydantic/Polars schema contracts
 │       │   ├── temporal.py          # Anti-leakage guards, shift(1) rolling & EWMA Polars expressions
 │       │   ├── ratings.py           # Dynamic Elo / Glicko rating engine
@@ -276,6 +277,7 @@ Used when experimenting with new features, auditing data, or measuring out-of-sa
 | `sports-ml train` | Fits the production LightGBM + Calibrator bundle on all completed games and saves to `artifacts/` with a `metadata.json` schema fingerprint. | Run once initially, then periodically (e.g., weekly/monthly) |
 | `sports-ml score-predictions` | Joins the append-only live prediction ledger (`data/predictions/`) against completed game/player boxscores to score real-world pre-game predictions. | **No** (Live season audit only) |
 | `sports-ml check-sources` | Verifies live HTTP reachability and Polars/JSON schema contracts across Official NHL Web API, MoneyPuck CSVs, and DailyFaceoff `__NEXT_DATA__`. | **No** (Daily scheduled canary / diagnostics) |
+| `sports-ml compact-cache` | Compacts existing uncompressed `data/raw/` `.csv` / `.json` caches into `.csv.gz` / `.json.gz` and deduplicates cumulative `teams_YYYY.csv` files in place without network calls. | **No** (One-time migration / storage maintenance) |
 
 ```bash
 # Verify live connectivity and schema contracts across all external feeds
