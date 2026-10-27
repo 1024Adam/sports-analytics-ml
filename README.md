@@ -18,6 +18,9 @@ Supports **NHL Hockey (`--sport hockey`)** and **English Premier League (EPL) So
 - [NHL Data Contracts & Feature Specification](./docs/data-and-features.md)
 - [EPL Soccer Data Contracts & Feature Specification](./docs/soccer-data-and-features.md)
 - [Phased Implementation Roadmap](./docs/roadmap.md)
+- [Contributing & Anti-Leakage Guidelines](./CONTRIBUTING.md)
+- [Security Policy](./SECURITY.md)
+- [MIT License](./LICENSE)
 
 ---
 
