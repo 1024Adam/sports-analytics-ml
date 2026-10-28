@@ -168,6 +168,11 @@ def parse_schedule_payload(
                 "home_reg_goals": home_reg_goals,
                 "away_reg_goals": away_reg_goals,
                 "home_win": home_win,
+                "market_home_decimal_odds": None,
+                "market_away_decimal_odds": None,
+                "market_prob_home": None,
+                "market_prob_away": None,
+                "market_overround": None,
             }
         )
 

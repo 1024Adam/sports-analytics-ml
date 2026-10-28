@@ -967,11 +967,14 @@ def score_prediction_ledger(settings: Settings) -> BenchmarkComparisonReport:
     ledger_df = pl.read_parquet(ledger_path).unique(
         subset=["game_date", "home_team", "away_team"], keep="last"
     )
-    completed_games = (
-        pl.read_parquet(games_path)
-        .filter((pl.col("game_state") == "FINAL") & pl.col("home_win").is_not_null())
-        .select(["game_date", "home_team", "away_team", "home_win"])
+    raw_games = pl.read_parquet(games_path).filter(
+        (pl.col("game_state") == "FINAL") & pl.col("home_win").is_not_null()
     )
+    sel_cols = ["game_date", "home_team", "away_team", "home_win"]
+    for m_col in ("market_prob_home", "market_home_decimal_odds", "market_away_decimal_odds"):
+        if m_col in raw_games.columns:
+            sel_cols.append(m_col)
+    completed_games = raw_games.select(sel_cols)
 
     joined = ledger_df.join(
         completed_games, on=["game_date", "home_team", "away_team"], how="inner"
@@ -981,4 +984,25 @@ def score_prediction_ledger(settings: Settings) -> BenchmarkComparisonReport:
 
     probs = np.asarray(joined["home_win_prob"].to_numpy(), dtype=np.float64)
     y_true = np.asarray(joined["home_win"].cast(pl.Int64).to_numpy(), dtype=np.int64)
-    return compare_against_baselines(probs, y_true)
+
+    market_probs = (
+        np.asarray(joined["market_prob_home"].cast(pl.Float64).to_numpy(), dtype=np.float64)
+        if "market_prob_home" in joined.columns
+        else None
+    )
+    market_odds = (
+        np.column_stack(
+            [
+                joined["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {"market_home_decimal_odds", "market_away_decimal_odds"}.issubset(joined.columns)
+        else None
+    )
+    return compare_against_baselines(
+        probs,
+        y_true,
+        market_probs=market_probs,
+        market_decimal_odds=market_odds,
+    )

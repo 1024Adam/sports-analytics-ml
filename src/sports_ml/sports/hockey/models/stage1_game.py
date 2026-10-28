@@ -18,6 +18,7 @@ from numpy.typing import NDArray
 from sports_ml.config import RANDOM_SEED
 from sports_ml.core.calibration import CalibrationMethod, ProbabilityCalibrator, clip_probabilities
 from sports_ml.core.evaluation import BenchmarkComparisonReport, compare_against_baselines
+from sports_ml.core.market import is_forbidden_market_column
 from sports_ml.core.temporal import sort_events_chronologically
 from sports_ml.core.validation import WalkForwardValidator
 
@@ -183,9 +184,11 @@ class Stage1GameOutcomeModel:
 
     @staticmethod
     def resolve_feature_columns(df: pl.DataFrame) -> list[str]:
-        """Select ordered numerical pre-game feature columns present in `df`."""
+        """Select ordered numerical pre-game feature columns (excluding `market_*` / `*odds*`)."""
         candidate_set = set(STAGE1_CANDIDATE_FEATURE_COLS)
-        preferred = [c for c in df.columns if c in candidate_set]
+        preferred = [
+            c for c in df.columns if c in candidate_set and not is_forbidden_market_column(c)
+        ]
         if preferred:
             return preferred
 
@@ -214,7 +217,9 @@ class Stage1GameOutcomeModel:
         fallback = [
             col
             for col, dtype in df.schema.items()
-            if col not in excluded and (dtype.is_numeric() or dtype == pl.Boolean)
+            if col not in excluded
+            and not is_forbidden_market_column(col)
+            and (dtype.is_numeric() or dtype == pl.Boolean)
         ]
         if not fallback:
             raise ValueError("No valid numeric pre-game feature columns found in DataFrame.")
@@ -525,6 +530,35 @@ def run_stage1_walk_forward_backtest(
         else None
     )
 
+    market_probs: NDArray[np.float64] | None = None
+    market_decimal_odds: NDArray[np.float64] | None = None
+    if "market_prob_home" in oof_df.columns:
+        market_probs = np.asarray(
+            oof_df["market_prob_home"].cast(pl.Float64).to_numpy(), dtype=np.float64
+        )
+        if {"market_home_decimal_odds", "market_away_decimal_odds"}.issubset(oof_df.columns):
+            market_decimal_odds = np.column_stack(
+                [
+                    oof_df["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                    oof_df["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+                ]
+            )
+    elif {"market_home_decimal_odds", "market_away_decimal_odds"}.issubset(oof_df.columns):
+        from sports_ml.core.market import devig_probabilities
+
+        raw_odds = np.column_stack(
+            [
+                oof_df["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                oof_df["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        valid_rows = np.all(np.isfinite(raw_odds) & (raw_odds > 1.0), axis=1)
+        if int(np.sum(valid_rows)) > 0:
+            mkt_p = np.full(oof_df.height, np.nan, dtype=np.float64)
+            mkt_p[valid_rows] = devig_probabilities(raw_odds[valid_rows], method="power")[:, 0]
+            market_probs = mkt_p
+            market_decimal_odds = raw_odds
+
     first_train_arr = np.asarray(
         splits[0].train_df["home_win"].cast(pl.Float64).to_numpy(), dtype=np.float64
     )
@@ -534,6 +568,8 @@ def run_stage1_walk_forward_backtest(
         y_true,
         train_home_win_rate=first_train_home_rate,
         elo_probs=elo_probs,
+        market_probs=market_probs,
+        market_decimal_odds=market_decimal_odds,
     )
     return Stage1BacktestResult(
         oof_predictions=oof_df,

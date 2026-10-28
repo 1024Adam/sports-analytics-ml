@@ -29,6 +29,12 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
     parse_schedule_payload,
     parse_toi_minutes,
 )
+from sports_ml.sports.hockey.ingestion.odds import (
+    NHL_ODDS_SCHEMA,
+    NHLOddsIngestor,
+    parse_nhl_historical_odds_csv,
+    parse_the_odds_api_payload,
+)
 from sports_ml.sports.hockey.ingestion.reconciler import HockeySilverReconciler
 
 __all__ = [
@@ -36,7 +42,9 @@ __all__ = [
     "GoalieConfirmationStatus",
     "HockeySilverReconciler",
     "MoneyPuckClient",
+    "NHLOddsIngestor",
     "NHLWebAPIClient",
+    "NHL_ODDS_SCHEMA",
     "NHL_WEB_API_BASE_URL",
     "PreGameLineupResolver",
     "ResolvedTeamLineup",
@@ -51,7 +59,9 @@ __all__ = [
     "parse_moneypuck_goalies_csv",
     "parse_moneypuck_skaters_csv",
     "parse_moneypuck_teams_csv",
+    "parse_nhl_historical_odds_csv",
     "parse_roster_payload",
     "parse_schedule_payload",
+    "parse_the_odds_api_payload",
     "parse_toi_minutes",
 ]

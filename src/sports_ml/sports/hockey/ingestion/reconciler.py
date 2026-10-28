@@ -22,7 +22,10 @@ from sports_ml.sports.hockey.constants import (
 def _cast_to_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
     if df.is_empty():
         return pl.DataFrame(schema=schema)
-    exprs = [pl.col(col).cast(dtype) for col, dtype in schema.items()]
+    exprs = [
+        pl.col(col).cast(dtype) if col in df.columns else pl.lit(None, dtype=dtype).alias(col)
+        for col, dtype in schema.items()
+    ]
     return df.select(exprs)
 
 
@@ -74,14 +77,36 @@ class HockeySilverReconciler:
         self,
         nhl_games_df: pl.DataFrame,
         *,
+        odds_df: pl.DataFrame | None = None,
         persist: bool = True,
     ) -> pl.DataFrame:
-        """Normalize and upsert `games.parquet` on `(game_id)`."""
-        normalized = nhl_games_df.with_columns(
-            pl.col("home_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
-            pl.col("away_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+        """Normalize tricodes, join evaluation-only `market_*` odds, and upsert `games.parquet`."""
+        market_cols = [
+            "market_home_decimal_odds",
+            "market_away_decimal_odds",
+            "market_prob_home",
+            "market_prob_away",
+            "market_overround",
+        ]
+        if nhl_games_df.is_empty():
+            normalized = pl.DataFrame(schema=SILVER_GAMES_SCHEMA)
+        else:
+            normalized = _cast_to_schema(nhl_games_df, SILVER_GAMES_SCHEMA).with_columns(
+                pl.col("home_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+                pl.col("away_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+            )
+        existing = (
+            _cast_to_schema(pl.read_parquet(self.games_path), SILVER_GAMES_SCHEMA)
+            if self.games_path.exists()
+            else None
         )
-        existing = pl.read_parquet(self.games_path) if self.games_path.exists() else None
+        all_games = (
+            pl.concat([existing, normalized], how="vertical")
+            if existing is not None and not existing.is_empty()
+            else normalized
+        )
+        existing_odds = all_games.filter(pl.col("market_prob_home").is_not_null())
+
         merged = self._upsert_frame(
             existing,
             normalized,
@@ -89,6 +114,75 @@ class HockeySilverReconciler:
             sort_keys=["game_date", "start_time_utc", "game_id"],
             schema=SILVER_GAMES_SCHEMA,
         )
+
+        # Preserve any pre-existing non-null market_* columns when schedules are re-upserted
+        if not existing_odds.is_empty() and not merged.is_empty():
+            prev_lookup = existing_odds.select(
+                ["game_id", *[pl.col(c).alias(f"_prev_{c}") for c in market_cols]]
+            ).unique(subset=["game_id"], keep="last")
+            merged = (
+                merged.join(prev_lookup, on=["game_id"], how="left")
+                .with_columns(
+                    [pl.col(c).fill_null(pl.col(f"_prev_{c}")).alias(c) for c in market_cols]
+                )
+                .drop([f"_prev_{c}" for c in market_cols])
+            )
+
+        # Join external odds_df (by game_id first, then by (game_date, home_team, away_team))
+        if odds_df is not None and not odds_df.is_empty() and not merged.is_empty():
+            by_gid = odds_df.filter(pl.col("game_id").is_not_null())
+            if not by_gid.is_empty():
+                gid_lookup = by_gid.select(
+                    [
+                        pl.col("game_id").cast(pl.Int64),
+                        *[pl.col(c).cast(pl.Float64).alias(f"_gid_{c}") for c in market_cols],
+                    ]
+                ).unique(subset=["game_id"], keep="last")
+                merged = (
+                    merged.join(gid_lookup, on=["game_id"], how="left")
+                    .with_columns(
+                        [
+                            pl.coalesce([pl.col(f"_gid_{c}"), pl.col(c)]).alias(c)
+                            for c in market_cols
+                        ]
+                    )
+                    .drop([f"_gid_{c}" for c in market_cols])
+                )
+
+            by_matchup = odds_df.filter(
+                pl.col("game_date").is_not_null()
+                & pl.col("home_team").is_not_null()
+                & pl.col("away_team").is_not_null()
+            )
+            if not by_matchup.is_empty():
+                m_lookup = (
+                    by_matchup.with_columns(
+                        pl.col("game_date").cast(pl.Date),
+                        pl.col("home_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+                        pl.col("away_team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+                    )
+                    .select(
+                        [
+                            "game_date",
+                            "home_team",
+                            "away_team",
+                            *[pl.col(c).cast(pl.Float64).alias(f"_m_{c}") for c in market_cols],
+                        ]
+                    )
+                    .unique(subset=["game_date", "home_team", "away_team"], keep="last")
+                )
+                merged = (
+                    merged.join(m_lookup, on=["game_date", "home_team", "away_team"], how="left")
+                    .with_columns(
+                        [pl.coalesce([pl.col(c), pl.col(f"_m_{c}")]).alias(c) for c in market_cols]
+                    )
+                    .drop([f"_m_{c}" for c in market_cols])
+                )
+
+            merged = _cast_to_schema(merged, SILVER_GAMES_SCHEMA).sort(
+                ["game_date", "start_time_utc", "game_id"]
+            )
+
         if persist:
             merged.write_parquet(self.games_path, compression="zstd")
         return merged

@@ -314,7 +314,7 @@ Shrink the local `data/raw/` footprint by **~93% (`6.2 GB` $\rightarrow$ `~415 M
 # Phase 4: Market Benchmarking, Cross-Competition Fatigue & Micro-Event Play-by-Play
 
 ## Milestone 13: Evaluation-Only Historical Closing Odds, De-Vigging & CLV Backtest Benchmarking
-**Status**: `[ ] Planned`
+**Status**: `[x] Completed`
 
 ### Goal
 Benchmark fundamental Stage 1 predictions against sharp sportsbook closing lines (Pinnacle / Bet365 / Market Consensus) in `sports-ml backtest` and `sports-ml score-predictions` while enforcing a **strict anti-contamination firewall** that forbids betting odds from ever entering `FEATURE_COLUMNS` (`X`).
@@ -324,7 +324,7 @@ Benchmark fundamental Stage 1 predictions against sharp sportsbook closing lines
 2. **Hard Feature Firewall**: Both `sports/hockey/features/pipeline.py` and `sports/soccer/features/pipeline.py` (plus a dedicated anti-contamination test) explicitly strip/ban any `market_*` or `*odds*` columns from `STAGE1_FEATURE_COLUMNS` and `STAGE2_FEATURE_COLUMNS` so the ML models remain **100% first-principles fundamental models**.
 
 ### Deliverables
-- [ ] `src/sports_ml/core/market.py`: Sport-agnostic market odds math, de-vigging, and edge/ROI evaluation:
+- [x] `src/sports_ml/core/market.py`: Sport-agnostic market odds math, de-vigging, and edge/ROI evaluation:
   - `american_to_decimal(odds: float | NDArray) -> float | NDArray` and `decimal_to_raw_prob(decimal_odds: float | NDArray) -> float | NDArray`.
   - `devig_probabilities(decimal_odds: NDArray[np.float64], method: Literal["power", "multiplicative", "shin"] = "power") -> NDArray[np.float64]`:
     - **Multiplicative (Proportional)**: $P_i = \frac{1/d_i}{\sum_j 1/d_j}$.
@@ -332,23 +332,23 @@ Benchmark fundamental Stage 1 predictions against sharp sportsbook closing lines
   - `evaluate_market_edge(...) -> MarketEdgeReport`: Computes head-to-head metrics on the subset of backtest games with closing odds:
     - Model vs. Market **Log Loss**, **Brier Score**, **RPS** (soccer), and **ECE**.
     - **Disagreement / Residual Slices**: Model accuracy, Brier score, and simulated flat-stake & fractional-Kelly ROI when $|P_{\text{model}} - P_{\text{market}}| \ge \tau$ (for $\tau \in \{0.03, 0.05, 0.08\}$), isolating situational pockets where the fundamental model beats the closing line.
-- [ ] `src/sports_ml/sports/soccer/ingestion/football_data.py` & `reconciler.py`:
+- [x] `src/sports_ml/sports/soccer/ingestion/football_data.py` & `reconciler.py`:
   - Extract historical closing & opening `1X2` and Over/Under `2.5` odds already embedded in the cached `Football-Data.co.uk` `E0_{code}.csv.gz` files (`PSCH`/`PSCD`/`PSCA` Pinnacle closing, falling back to `B365CH`/`B365CD`/`B365CA` or opening `PSH`/`PSD`/`PSA` / `B365H`/`B365D`/`B365A` for earlier seasons) with zero extra network calls.
   - Persist `market_home_decimal_odds`, `market_draw_decimal_odds`, `market_away_decimal_odds`, and power-de-vigged `market_prob_home`, `market_prob_draw`, `market_prob_away` as nullable evaluation columns in `data/silver/soccer/matches.parquet`.
-- [ ] `src/sports_ml/sports/hockey/ingestion/odds.py` & `reconciler.py`:
+- [x] `src/sports_ml/sports/hockey/ingestion/odds.py` & `reconciler.py`:
   - `NHLOddsIngestor`: Supports importing local/public historical NHL closing moneyline & total CSV archives (`data/raw/odds/nhl_historical_odds.csv.gz`, converting American moneylines like `-145` / `+125` to decimal and power-de-vigged probabilities) plus an optional pre-game odds snapshot hook (`THE_ODDS_API_KEY` env var if provided, gracefully skipped when absent).
   - Persist nullable `market_home_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_away` on `data/silver/hockey/games.parquet`.
-- [ ] `src/sports_ml/core/evaluation.py` & `src/sports_ml/cli.py`:
+- [x] `src/sports_ml/core/evaluation.py` & `src/sports_ml/cli.py`:
   - Extend `BenchmarkComparisonReport` and `MulticlassBenchmarkReport` with optional `market_closing_baseline` and `MarketEdgeReport`.
   - Update `sports-ml backtest` and `sports-ml score-predictions` Rich CLI tables to display the **De-Vigged Market Closing Line** benchmark alongside Elo/prior baselines and print the **Fundamental vs. Market Disagreement (`>5% Edge`)** performance breakdown when odds are present.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/core/test_market.py`:
+- [x] `tests/core/test_market.py`:
   - Verify `devig_probabilities` (`"multiplicative"` and `"power"`) produces probabilities strictly in $(0, 1)$ that sum to `1.0` (within `1e-9`) for both 2-way NHL moneylines and 3-way EPL `1X2` odds, and that the `"power"` method shrinks longshot probabilities more than heavy favorites.
   - Verify `evaluate_market_edge` accurately computes flat-stake ROI, Kelly edge, and disagreement-bucket accuracy.
-- [ ] `tests/sports/hockey/test_odds_firewall.py` & `tests/sports/soccer/test_odds_firewall.py`:
+- [x] `tests/sports/hockey/test_odds_firewall.py` & `tests/sports/soccer/test_odds_firewall.py`:
   - **Strict Anti-Contamination Test**: Verify that no column starting with `market_` or containing `odds` is ever present in `STAGE1_FEATURE_COLUMNS` or `STAGE2_FEATURE_COLUMNS`, and that mutating `market_*` columns in Silver tables changes `0.0` of the model's predicted probabilities while updating the backtest market benchmark report.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

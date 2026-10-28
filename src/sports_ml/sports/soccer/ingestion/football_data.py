@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import time
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from pathlib import Path
@@ -19,6 +20,7 @@ import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from sports_ml.core.cache import read_cached_bytes, resolve_cache_read_path, write_gzip_bytes
+from sports_ml.core.market import devig_probabilities
 from sports_ml.sports.soccer.constants import SILVER_MATCHES_SCHEMA, normalize_soccer_club
 from sports_ml.sports.soccer.ingestion.fpl_api import make_canonical_match_id
 
@@ -61,6 +63,67 @@ def _parse_uk_time(raw_time: str | None) -> dt_time:
         except ValueError:
             continue
     return dt_time(15, 0)
+
+
+def _parse_positive_odd(raw_val: Any) -> float | None:
+    if raw_val is None:
+        return None
+    cleaned = str(raw_val).strip()
+    if not cleaned:
+        return None
+    try:
+        val = float(cleaned)
+        return val if val > 1.0 else None
+    except ValueError:
+        return None
+
+
+def _extract_1x2_odds_from_row(
+    row: Mapping[str, Any],
+) -> tuple[
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
+    """Extract 1X2 decimal odds and power-de-vigged probabilities from a Football-Data CSV row.
+
+    Waterfall priority:
+    1. Pinnacle closing (`PSCH`, `PSCD`, `PSCA`)
+    2. Bet365 closing (`B365CH`, `B365CD`, `B365CA`)
+    3. Market average closing (`AvgCH`, `AvgCD`, `AvgCA`)
+    4. Pinnacle opening (`PSH`, `PSD`, `PSA`)
+    5. Bet365 opening (`B365H`, `B365D`, `B365A`)
+    6. Market average opening (`AvgH`, `AvgD`, `AvgA`)
+    """
+    triplets = (
+        ("PSCH", "PSCD", "PSCA"),
+        ("B365CH", "B365CD", "B365CA"),
+        ("AvgCH", "AvgCD", "AvgCA"),
+        ("PSH", "PSD", "PSA"),
+        ("B365H", "B365D", "B365A"),
+        ("AvgH", "AvgD", "AvgA"),
+    )
+    for h_col, d_col, a_col in triplets:
+        dh = _parse_positive_odd(row.get(h_col))
+        dd = _parse_positive_odd(row.get(d_col))
+        da = _parse_positive_odd(row.get(a_col))
+        if dh is not None and dd is not None and da is not None:
+            devigged = devig_probabilities([dh, dd, da], method="power")
+            overround = (1.0 / dh) + (1.0 / dd) + (1.0 / da) - 1.0
+            return (
+                float(dh),
+                float(dd),
+                float(da),
+                float(devigged[0]),
+                float(devigged[1]),
+                float(devigged[2]),
+                float(overround),
+            )
+    return (None, None, None, None, None, None, None)
 
 
 def parse_football_data_csv(
@@ -111,6 +174,16 @@ def parse_football_data_csv(
             is_draw = None
             away_win = None
 
+        (
+            mkt_h_odds,
+            mkt_d_odds,
+            mkt_a_odds,
+            mkt_p_home,
+            mkt_p_draw,
+            mkt_p_away,
+            mkt_overround,
+        ) = _extract_1x2_odds_from_row(row)
+
         match_rows.append(
             {
                 "sport": "soccer",
@@ -130,6 +203,13 @@ def parse_football_data_csv(
                 "home_win": home_win,
                 "is_draw": is_draw,
                 "away_win": away_win,
+                "market_home_decimal_odds": mkt_h_odds,
+                "market_draw_decimal_odds": mkt_d_odds,
+                "market_away_decimal_odds": mkt_a_odds,
+                "market_prob_home": mkt_p_home,
+                "market_prob_draw": mkt_p_draw,
+                "market_prob_away": mkt_p_away,
+                "market_overround": mkt_overround,
             }
         )
 

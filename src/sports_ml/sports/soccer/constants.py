@@ -329,6 +329,13 @@ SILVER_MATCHES_SCHEMA: Final[dict[str, pl.DataType]] = {
     "home_win": pl.Int8(),
     "is_draw": pl.Int8(),
     "away_win": pl.Int8(),
+    "market_home_decimal_odds": pl.Float64(),
+    "market_draw_decimal_odds": pl.Float64(),
+    "market_away_decimal_odds": pl.Float64(),
+    "market_prob_home": pl.Float64(),
+    "market_prob_draw": pl.Float64(),
+    "market_prob_away": pl.Float64(),
+    "market_overround": pl.Float64(),
 }
 
 SILVER_TEAM_MATCH_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {

@@ -786,9 +786,20 @@ def score_soccer_prediction_ledger(settings: Settings) -> MulticlassBenchmarkRep
     matches_df = pl.read_parquet(matches_path).filter(
         (pl.col("game_state") == "FINAL") & pl.col("outcome_1x2").is_not_null()
     )
+    sel_cols = ["match_date", "home_team", "away_team", "outcome_1x2"]
+    for m_col in (
+        "market_prob_home",
+        "market_prob_draw",
+        "market_prob_away",
+        "market_home_decimal_odds",
+        "market_draw_decimal_odds",
+        "market_away_decimal_odds",
+    ):
+        if m_col in matches_df.columns:
+            sel_cols.append(m_col)
 
     joined = ledger_df.join(
-        matches_df.select(["match_date", "home_team", "away_team", "outcome_1x2"]),
+        matches_df.select(sel_cols),
         on=["match_date", "home_team", "away_team"],
         how="inner",
     )
@@ -803,4 +814,36 @@ def score_soccer_prediction_ledger(settings: Settings) -> MulticlassBenchmarkRep
         ]
     )
     y_true = np.asarray(joined["outcome_1x2"].cast(pl.Int64).to_numpy(), dtype=np.int64)
-    return compare_multiclass_against_baselines(model_probs, y_true)
+
+    market_probs = (
+        np.column_stack(
+            [
+                joined["market_prob_home"].cast(pl.Float64).to_numpy(),
+                joined["market_prob_draw"].cast(pl.Float64).to_numpy(),
+                joined["market_prob_away"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {"market_prob_home", "market_prob_draw", "market_prob_away"}.issubset(joined.columns)
+        else None
+    )
+    market_odds = (
+        np.column_stack(
+            [
+                joined["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_draw_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {
+            "market_home_decimal_odds",
+            "market_draw_decimal_odds",
+            "market_away_decimal_odds",
+        }.issubset(joined.columns)
+        else None
+    )
+    return compare_multiclass_against_baselines(
+        model_probs,
+        y_true,
+        market_probs=market_probs,
+        market_decimal_odds=market_odds,
+    )

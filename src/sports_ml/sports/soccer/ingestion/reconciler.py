@@ -24,7 +24,10 @@ from sports_ml.sports.soccer.ingestion.lineups import normalize_soccer_player_na
 def _cast_to_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
     if df.is_empty():
         return pl.DataFrame(schema=schema)
-    exprs = [pl.col(col).cast(dtype) for col, dtype in schema.items()]
+    exprs = [
+        pl.col(col).cast(dtype) if col in df.columns else pl.lit(None, dtype=dtype).alias(col)
+        for col, dtype in schema.items()
+    ]
     return df.select(exprs)
 
 
@@ -78,15 +81,38 @@ class SoccerSilverReconciler:
         *,
         persist: bool = True,
     ) -> pl.DataFrame:
-        """Normalize club tricodes and upsert `matches.parquet` on `(match_id)`."""
+        """Normalize club tricodes, coalesce market odds, and upsert `matches.parquet`."""
+        market_cols = [
+            "market_home_decimal_odds",
+            "market_draw_decimal_odds",
+            "market_away_decimal_odds",
+            "market_prob_home",
+            "market_prob_draw",
+            "market_prob_away",
+            "market_overround",
+        ]
         if matches_df.is_empty():
             normalized = pl.DataFrame(schema=SILVER_MATCHES_SCHEMA)
         else:
-            normalized = matches_df.with_columns(
+            normalized = _cast_to_schema(matches_df, SILVER_MATCHES_SCHEMA).with_columns(
                 pl.col("home_team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
                 pl.col("away_team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
             )
-        existing = pl.read_parquet(self.matches_path) if self.matches_path.exists() else None
+
+        existing = (
+            _cast_to_schema(pl.read_parquet(self.matches_path), SILVER_MATCHES_SCHEMA)
+            if self.matches_path.exists()
+            else None
+        )
+        all_rows = (
+            pl.concat([existing, normalized], how="vertical")
+            if existing is not None and not existing.is_empty()
+            else normalized
+        )
+
+        # Build a lookup of non-null market_* values by (season, match_date, home_team, away_team)
+        # so FPL fixture upserts preserve Football-Data closing/opening market lines
+        odds_source = all_rows.filter(pl.col("market_prob_home").is_not_null())
         merged = self._upsert_frame(
             existing,
             normalized,
@@ -94,6 +120,31 @@ class SoccerSilverReconciler:
             sort_keys=["match_date", "start_time_utc", "event_seq", "match_id"],
             schema=SILVER_MATCHES_SCHEMA,
         )
+        if not odds_source.is_empty() and not merged.is_empty():
+            odds_lookup = odds_source.select(
+                [
+                    "season",
+                    "match_date",
+                    "home_team",
+                    "away_team",
+                    *[pl.col(c).alias(f"_mkt_{c}") for c in market_cols],
+                ]
+            ).unique(subset=["season", "match_date", "home_team", "away_team"], keep="last")
+            merged = (
+                merged.join(
+                    odds_lookup,
+                    on=["season", "match_date", "home_team", "away_team"],
+                    how="left",
+                )
+                .with_columns(
+                    [pl.col(c).fill_null(pl.col(f"_mkt_{c}")).alias(c) for c in market_cols]
+                )
+                .drop([f"_mkt_{c}" for c in market_cols])
+            )
+            merged = _cast_to_schema(merged, SILVER_MATCHES_SCHEMA).sort(
+                ["match_date", "start_time_utc", "event_seq", "match_id"]
+            )
+
         if persist:
             merged.write_parquet(self.matches_path, compression="zstd")
         return merged
