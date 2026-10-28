@@ -1,11 +1,13 @@
 """Probability and count-regression evaluation metrics (`core/evaluation.py`).
 
 Computes Log Loss, Brier Score, Expected Calibration Error (ECE), accuracy, and
-benchmark comparisons against coin-flip (`0.50`), home-team baseline, and
-Elo-only baseline.
+benchmark comparisons against coin-flip (`0.50`), home-team baseline, Elo-only
+baseline, and de-vigged market closing lines.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +18,9 @@ from sports_ml.core.calibration import (
     clip_probabilities,
     normalize_multiclass_probabilities,
 )
+
+if TYPE_CHECKING:
+    from sports_ml.core.market import MarketEdgeReport
 
 
 class EvaluationMetrics(BaseModel):
@@ -38,6 +43,8 @@ class BenchmarkComparisonReport(BaseModel):
     coin_flip_baseline: EvaluationMetrics
     home_win_rate_baseline: EvaluationMetrics
     elo_baseline: EvaluationMetrics | None = None
+    market_closing_baseline: EvaluationMetrics | None = None
+    market_edge_report: MarketEdgeReport | None = None
 
     @property
     def beats_home_baseline_brier(self) -> bool:
@@ -111,13 +118,16 @@ def compare_against_baselines(
     *,
     train_home_win_rate: float = 0.535,
     elo_probs: NDArray[np.float64] | None = None,
+    market_probs: NDArray[np.float64] | None = None,
+    market_decimal_odds: NDArray[np.float64] | None = None,
     n_bins: int = 10,
 ) -> BenchmarkComparisonReport:
-    """Evaluate `model_probs` alongside coin-flip, empirical home-win rate, and Elo baselines."""
+    """Evaluate `model_probs` alongside coin-flip, empirical home-win rate, Elo, and market."""
     y = np.asarray(y_true, dtype=np.int64).ravel()
+    m_arr = np.asarray(model_probs, dtype=np.float64).ravel()
     n = y.size
 
-    model_metrics = evaluate_probabilities(model_probs, y, n_bins=n_bins)
+    model_metrics = evaluate_probabilities(m_arr, y, n_bins=n_bins)
     coin_probs = np.full(n, 0.50, dtype=np.float64)
     home_probs = np.full(n, float(train_home_win_rate), dtype=np.float64)
 
@@ -127,11 +137,41 @@ def compare_against_baselines(
         evaluate_probabilities(elo_probs, y, n_bins=n_bins) if elo_probs is not None else None
     )
 
+    market_metrics: EvaluationMetrics | None = None
+    market_edge: MarketEdgeReport | None = None
+    if market_probs is not None:
+        from sports_ml.core.market import evaluate_market_edge
+
+        mkt_arr = np.asarray(market_probs, dtype=np.float64).ravel()
+        valid_mask = np.isfinite(mkt_arr) & (mkt_arr > 0.0) & (mkt_arr < 1.0)
+        if int(np.sum(valid_mask)) > 0:
+            sub_mod = m_arr[valid_mask]
+            sub_mkt = mkt_arr[valid_mask]
+            sub_y = y[valid_mask]
+            sub_odds: NDArray[np.float64] | None = None
+            if market_decimal_odds is not None:
+                odds_arr = np.asarray(market_decimal_odds, dtype=np.float64)
+                if odds_arr.shape[0] == n:
+                    cand_odds = odds_arr[valid_mask]
+                    if np.all(np.isfinite(cand_odds)) and np.all(cand_odds > 1.0):
+                        sub_odds = cand_odds
+
+            market_metrics = evaluate_probabilities(sub_mkt, sub_y, n_bins=n_bins)
+            market_edge = evaluate_market_edge(
+                sub_mod,
+                sub_mkt,
+                sub_y,
+                decimal_odds=sub_odds,
+                n_bins=n_bins,
+            )
+
     return BenchmarkComparisonReport(
         model=model_metrics,
         coin_flip_baseline=coin_metrics,
         home_win_rate_baseline=home_metrics,
         elo_baseline=elo_metrics,
+        market_closing_baseline=market_metrics,
+        market_edge_report=market_edge,
     )
 
 
@@ -156,6 +196,8 @@ class MulticlassBenchmarkReport(BaseModel):
     uniform_baseline: MulticlassEvaluationMetrics
     empirical_prior_baseline: MulticlassEvaluationMetrics
     elo_baseline: MulticlassEvaluationMetrics | None = None
+    market_closing_baseline: MulticlassEvaluationMetrics | None = None
+    market_edge_report: MarketEdgeReport | None = None
 
     @property
     def beats_empirical_prior_rps(self) -> bool:
@@ -264,9 +306,11 @@ def compare_multiclass_against_baselines(
     *,
     empirical_prior: tuple[float, float, float] = (0.45, 0.24, 0.31),
     elo_probs: NDArray[np.float64] | None = None,
+    market_probs: NDArray[np.float64] | None = None,
+    market_decimal_odds: NDArray[np.float64] | None = None,
     n_bins: int = 10,
 ) -> MulticlassBenchmarkReport:
-    """Evaluate `1X2` model probabilities against uniform, empirical EPL prior, and Elo."""
+    """Evaluate `1X2` model probabilities against uniform, empirical EPL prior, Elo, and market."""
     p = normalize_multiclass_probabilities(np.asarray(model_probs, dtype=np.float64))
     y = np.asarray(y_true, dtype=np.int64).ravel()
     n_samples, n_classes = p.shape
@@ -286,9 +330,47 @@ def compare_multiclass_against_baselines(
         else None
     )
 
+    market_metrics: MulticlassEvaluationMetrics | None = None
+    market_edge: MarketEdgeReport | None = None
+    if market_probs is not None:
+        from sports_ml.core.market import evaluate_market_edge
+
+        mkt_mat = np.asarray(market_probs, dtype=np.float64)
+        if mkt_mat.ndim == 2 and mkt_mat.shape == p.shape:
+            valid_mask = np.all(np.isfinite(mkt_mat) & (mkt_mat > 0.0) & (mkt_mat < 1.0), axis=1)
+            if int(np.sum(valid_mask)) > 0:
+                sub_mod = p[valid_mask]
+                sub_mkt = normalize_multiclass_probabilities(mkt_mat[valid_mask])
+                sub_y = y[valid_mask]
+                sub_odds: NDArray[np.float64] | None = None
+                if market_decimal_odds is not None:
+                    odds_arr = np.asarray(market_decimal_odds, dtype=np.float64)
+                    if odds_arr.shape == p.shape:
+                        cand_odds = odds_arr[valid_mask]
+                        if np.all(np.isfinite(cand_odds)) and np.all(cand_odds > 1.0):
+                            sub_odds = cand_odds
+
+                market_metrics = evaluate_multiclass_probabilities(sub_mkt, sub_y, n_bins=n_bins)
+                market_edge = evaluate_market_edge(
+                    sub_mod,
+                    sub_mkt,
+                    sub_y,
+                    decimal_odds=sub_odds,
+                    n_bins=n_bins,
+                )
+
     return MulticlassBenchmarkReport(
         model=model_metrics,
         uniform_baseline=uniform_metrics,
         empirical_prior_baseline=prior_metrics,
         elo_baseline=elo_metrics,
+        market_closing_baseline=market_metrics,
+        market_edge_report=market_edge,
     )
+
+
+# Rebuild models referencing forward-declared MarketEdgeReport at import time
+from sports_ml.core.market import MarketEdgeReport as _MarketEdgeReport  # noqa: E402
+
+BenchmarkComparisonReport.model_rebuild(_types_namespace={"MarketEdgeReport": _MarketEdgeReport})
+MulticlassBenchmarkReport.model_rebuild(_types_namespace={"MarketEdgeReport": _MarketEdgeReport})

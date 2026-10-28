@@ -70,6 +70,7 @@ def build_stage2_player_features(
     team_features: pl.DataFrame,
     goalie_features: pl.DataFrame,
     *,
+    skater_pbp_micro_logs: pl.DataFrame | None = None,
     stage1_predictions: pl.DataFrame | None = None,
     windows: Sequence[int] = DEFAULT_PLAYER_WINDOWS,
     ewma_alpha: float = DEFAULT_EWMA_ALPHA,
@@ -77,13 +78,61 @@ def build_stage2_player_features(
 ) -> pl.DataFrame:
     """Construct leak-free pre-game player-matchup features for Stage 2 stat projections."""
     prepared = _ensure_skater_log_columns(skater_game_logs)
+    event_col = "game_id" if "game_id" in prepared.columns else "event_id"
+
+    if skater_pbp_micro_logs is not None and not skater_pbp_micro_logs.is_empty():
+        sm_ev_col = "game_id" if "game_id" in skater_pbp_micro_logs.columns else "event_id"
+        sm_cols = [
+            "rush_ixg_5v5",
+            "rebound_ixg_5v5",
+            "inner_slot_ixg_5v5",
+            "qoc_opponent_toi_share",
+            "qot_teammate_ixg_per_60",
+        ]
+        avail_sm = [c for c in sm_cols if c in skater_pbp_micro_logs.columns]
+        sm_lookup = skater_pbp_micro_logs.select(
+            [
+                pl.col(sm_ev_col).cast(pl.Int64).alias(event_col),
+                pl.col("player_id").cast(pl.Int64),
+                *[pl.col(c).cast(pl.Float64).alias(f"_sm_{c}") for c in avail_sm],
+            ]
+        ).unique(subset=[event_col, "player_id"], keep="last")
+        prepared = prepared.join(sm_lookup, on=[event_col, "player_id"], how="left")
+        for c in avail_sm:
+            if c in prepared.columns:
+                prepared = prepared.with_columns(
+                    pl.coalesce([pl.col(f"_sm_{c}"), pl.col(c).cast(pl.Float64)]).alias(c)
+                )
+            else:
+                prepared = prepared.with_columns(pl.col(f"_sm_{c}").alias(c))
+        prepared = prepared.drop([f"_sm_{c}" for c in avail_sm])
+
+    skater_micro_defaults: list[tuple[str, pl.Expr]] = [
+        ("rush_ixg_5v5", 0.14 * pl.col("ixg_5v5").cast(pl.Float64)),
+        ("rebound_ixg_5v5", 0.14 * pl.col("ixg_5v5").cast(pl.Float64)),
+        ("inner_slot_ixg_5v5", 0.42 * pl.col("ixg_5v5").cast(pl.Float64)),
+        ("qoc_opponent_toi_share", pl.lit(0.30, dtype=pl.Float64)),
+        ("qot_teammate_ixg_per_60", pl.lit(0.72, dtype=pl.Float64)),
+    ]
+    for col_name, fallback_expr in skater_micro_defaults:
+        if col_name in prepared.columns:
+            prepared = prepared.with_columns(
+                pl.col(col_name).cast(pl.Float64).fill_null(fallback_expr).alias(col_name)
+            )
+        else:
+            prepared = prepared.with_columns(fallback_expr.alias(col_name))
+
+    prepared = prepared.with_columns(
+        (
+            pl.col("rush_ixg_5v5").cast(pl.Float64) + pl.col("rebound_ixg_5v5").cast(pl.Float64)
+        ).alias("_game_rush_rebound_ixg")
+    )
     if "shifts" not in prepared.columns:
         prepared = prepared.with_columns(
             (pl.col("toi_total_min").cast(pl.Float64) * 1.25).alias("shifts")
         )
 
     sorted_df = sort_events_chronologically(prepared, extra_tiebreakers=["player_id"])
-    event_col = "game_id" if "game_id" in sorted_df.columns else "event_id"
 
     is_d = pl.col("position_group") == "D"
     with_priors = sorted_df.with_columns(
@@ -132,6 +181,15 @@ def build_stage2_player_features(
         r_pts_60 = pregame_exposure_rate(
             "points", "toi_total_min", window=w, group_by="player_id", scale_factor=60.0
         )
+        r_rush_reb_60 = pregame_exposure_rate(
+            "_game_rush_rebound_ixg",
+            "toi_total_min",
+            window=w,
+            group_by="player_id",
+            scale_factor=60.0,
+        )
+        r_qoc = pregame_rolling_mean("qoc_opponent_toi_share", window=w, group_by="player_id")
+        r_qot = pregame_rolling_mean("qot_teammate_ixg_per_60", window=w, group_by="player_id")
 
         exprs.extend(
             [
@@ -164,6 +222,13 @@ def build_stage2_player_features(
                 ),
                 bayesian_shrinkage(r_pts_60, n_w, pl.col("_p_pts_60"), shrinkage_k).alias(
                     f"rolling_points_per_60_w{w}"
+                ),
+                bayesian_shrinkage(
+                    r_rush_reb_60, n_w, 0.28 * pl.col("_p_ixg_60"), shrinkage_k
+                ).alias(f"rolling_rush_rebound_ixg_per_60_w{w}"),
+                bayesian_shrinkage(r_qoc, n_w, 0.30, shrinkage_k).alias(f"rolling_qoc_index_w{w}"),
+                bayesian_shrinkage(r_qot, n_w, 0.72, shrinkage_k).alias(
+                    f"rolling_qot_teammate_ixg_per_60_w{w}"
                 ),
             ]
         )
@@ -202,6 +267,13 @@ def build_stage2_player_features(
         pl.col(f"rolling_goals_per_60_w{ref_w}").alias("rolling_goals_per_60"),
         pl.col(f"rolling_assists_per_60_w{ref_w}").alias("rolling_assists_per_60"),
         pl.col(f"rolling_points_per_60_w{ref_w}").alias("rolling_points_per_60"),
+        pl.col(f"rolling_rush_rebound_ixg_per_60_w{ref_w}").alias(
+            "rolling_rush_rebound_ixg_per_60"
+        ),
+        pl.col(f"rolling_qoc_index_w{ref_w}").alias("rolling_qoc_index"),
+        pl.col(f"rolling_qot_teammate_ixg_per_60_w{ref_w}").alias(
+            "rolling_qot_teammate_ixg_per_60"
+        ),
         (pl.col("player_prior_games_n") < shrinkage_k).alias("is_low_sample_skater"),
     )
 
@@ -328,6 +400,12 @@ def build_stage2_player_features(
         )
 
     drop_temp = [
+        "_game_rush_rebound_ixg",
+        "rush_ixg_5v5",
+        "rebound_ixg_5v5",
+        "inner_slot_ixg_5v5",
+        "qoc_opponent_toi_share",
+        "qot_teammate_ixg_per_60",
         "_p_toi_tot",
         "_p_toi_ev",
         "_p_toi_pp",

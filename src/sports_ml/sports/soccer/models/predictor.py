@@ -42,6 +42,7 @@ from sports_ml.sports.soccer.ingestion.fpl_api import (
     parse_bootstrap_squad_df,
 )
 from sports_ml.sports.soccer.ingestion.lineups import SoccerPreMatchLineupResolver
+from sports_ml.sports.soccer.ingestion.odds import fetch_espn_epl_date_odds
 from sports_ml.sports.soccer.models.stage1_match import Stage1SoccerMatchModel
 from sports_ml.sports.soccer.models.stage2_player import Stage2SoccerPlayerModel
 
@@ -70,6 +71,12 @@ class SoccerMatchupPrediction(BaseModel):
     away_win_prob: float
     expected_home_goals: float
     expected_away_goals: float
+    market_prob_home: float | None = None
+    market_prob_draw: float | None = None
+    market_prob_away: float | None = None
+    market_home_decimal_odds: float | None = None
+    market_draw_decimal_odds: float | None = None
+    market_away_decimal_odds: float | None = None
     home_lineup_status: str = "HEURISTIC_XI"
     away_lineup_status: str = "HEURISTIC_XI"
     latest_silver_match_date: str | None = None
@@ -90,6 +97,8 @@ def build_and_persist_soccer_gold_features(
     teams_path = silver_dir / "team_match_logs.parquet"
     outfield_path = silver_dir / "outfield_match_logs.parquet"
     gk_path = silver_dir / "gk_match_logs.parquet"
+    all_comp_path = silver_dir / "club_all_competitions_schedule.parquet"
+    shot_micro_path = silver_dir / "team_shot_micro_logs.parquet"
 
     if not matches_path.exists() or not teams_path.exists():
         raise FileNotFoundError(
@@ -101,6 +110,8 @@ def build_and_persist_soccer_gold_features(
     team_logs_df = pl.read_parquet(teams_path)
     outfield_logs_df = pl.read_parquet(outfield_path) if outfield_path.exists() else pl.DataFrame()
     gk_logs_df = pl.read_parquet(gk_path) if gk_path.exists() else pl.DataFrame()
+    all_comp_df = pl.read_parquet(all_comp_path) if all_comp_path.exists() else None
+    shot_micro_df = pl.read_parquet(shot_micro_path) if shot_micro_path.exists() else None
 
     # Load cached FPL bootstrap squad metadata if available
     squad_meta_df: pl.DataFrame | None = None
@@ -115,7 +126,11 @@ def build_and_persist_soccer_gold_features(
         except Exception:
             squad_meta_df = None
 
-    team_feat_df = build_soccer_team_rolling_features(team_logs_df)
+    team_feat_df = build_soccer_team_rolling_features(
+        team_logs_df,
+        all_comp_schedule_df=all_comp_df,
+        team_shot_micro_logs=shot_micro_df,
+    )
     gk_feat_df = (
         build_goalkeeper_rolling_features(gk_logs_df)
         if not gk_logs_df.is_empty()
@@ -126,6 +141,8 @@ def build_and_persist_soccer_gold_features(
         team_logs_df,
         outfield_logs_df if not outfield_logs_df.is_empty() else None,
         gk_logs_df if not gk_logs_df.is_empty() else None,
+        all_comp_schedule_df=all_comp_df,
+        team_shot_micro_logs=shot_micro_df,
     )
     stage2_df = (
         build_soccer_stage2_player_features(
@@ -160,6 +177,7 @@ class SoccerMatchupPredictor:
         self.stage1_model = stage1_model
         self.stage2_model = stage2_model
         self.settings = settings or get_settings()
+        self._live_odds_cache: dict[date, pl.DataFrame] = {}
 
     @classmethod
     def from_artifacts(
@@ -435,6 +453,12 @@ class SoccerMatchupPredictor:
                 "away_win_prob": [pred.away_win_prob],
                 "expected_home_goals": [pred.expected_home_goals],
                 "expected_away_goals": [pred.expected_away_goals],
+                "market_prob_home": [pred.market_prob_home],
+                "market_prob_draw": [pred.market_prob_draw],
+                "market_prob_away": [pred.market_prob_away],
+                "market_home_decimal_odds": [pred.market_home_decimal_odds],
+                "market_draw_decimal_odds": [pred.market_draw_decimal_odds],
+                "market_away_decimal_odds": [pred.market_away_decimal_odds],
                 "home_lineup_status": [pred.home_lineup_status],
                 "away_lineup_status": [pred.away_lineup_status],
                 "included_stage2": [pred.player_projections is not None],
@@ -442,7 +466,7 @@ class SoccerMatchupPredictor:
         )
         if ledger_path.exists():
             existing = pl.read_parquet(ledger_path)
-            combined = pl.concat([existing, new_row], how="vertical").unique(
+            combined = pl.concat([existing, new_row], how="diagonal_relaxed").unique(
                 subset=["match_date", "home_team", "away_team", "model_version"],
                 keep="last",
             )
@@ -450,6 +474,68 @@ class SoccerMatchupPredictor:
             combined = new_row
         combined.write_parquet(ledger_path, compression="zstd")
         return ledger_path
+
+    def _resolve_matchup_market_odds(
+        self,
+        p_row: dict[str, object],
+        home_code: str,
+        away_code: str,
+        match_date: date,
+        *,
+        offline: bool = False,
+    ) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None]:
+        """Resolve evaluation-only de-vigged `1X2` market probabilities and decimal odds."""
+        raw_ph = p_row.get("market_prob_home")
+        raw_pd = p_row.get("market_prob_draw")
+        raw_pa = p_row.get("market_prob_away")
+        raw_dh = p_row.get("market_home_decimal_odds")
+        raw_dd = p_row.get("market_draw_decimal_odds")
+        raw_da = p_row.get("market_away_decimal_odds")
+        if (
+            isinstance(raw_ph, (int, float))
+            and isinstance(raw_pd, (int, float))
+            and isinstance(raw_pa, (int, float))
+        ):
+            return (
+                float(raw_ph),
+                float(raw_pd),
+                float(raw_pa),
+                float(raw_dh) if isinstance(raw_dh, (int, float)) else None,
+                float(raw_dd) if isinstance(raw_dd, (int, float)) else None,
+                float(raw_da) if isinstance(raw_da, (int, float)) else None,
+            )
+
+        if offline:
+            return (None, None, None, None, None, None)
+
+        if match_date not in self._live_odds_cache:
+            self._live_odds_cache[match_date] = fetch_espn_epl_date_odds(match_date, offline=False)
+
+        day_odds = self._live_odds_cache[match_date]
+        if day_odds.is_empty():
+            return (None, None, None, None, None, None)
+
+        matched = day_odds.filter(
+            (pl.col("home_team") == home_code) & (pl.col("away_team") == away_code)
+        )
+        if matched.is_empty():
+            return (None, None, None, None, None, None)
+
+        r = matched.row(-1, named=True)
+        return (
+            float(r["market_prob_home"]) if r.get("market_prob_home") is not None else None,
+            float(r["market_prob_draw"]) if r.get("market_prob_draw") is not None else None,
+            float(r["market_prob_away"]) if r.get("market_prob_away") is not None else None,
+            float(r["market_home_decimal_odds"])
+            if r.get("market_home_decimal_odds") is not None
+            else None,
+            float(r["market_draw_decimal_odds"])
+            if r.get("market_draw_decimal_odds") is not None
+            else None,
+            float(r["market_away_decimal_odds"])
+            if r.get("market_away_decimal_odds") is not None
+            else None,
+        )
 
     def predict_matchup(
         self,
@@ -623,6 +709,21 @@ class SoccerMatchupPredictor:
                     goalkeepers=gks_pred,
                 )
 
+        (
+            mkt_p_home,
+            mkt_p_draw,
+            mkt_p_away,
+            mkt_d_home,
+            mkt_d_draw,
+            mkt_d_away,
+        ) = self._resolve_matchup_market_odds(
+            p_row,
+            home_code,
+            away_code,
+            match_date,
+            offline=offline,
+        )
+
         pred_obj = SoccerMatchupPrediction(
             match_id=match_id_val,
             match_date=match_date,
@@ -633,6 +734,12 @@ class SoccerMatchupPredictor:
             away_win_prob=away_prob,
             expected_home_goals=exp_home_g,
             expected_away_goals=exp_away_g,
+            market_prob_home=mkt_p_home,
+            market_prob_draw=mkt_p_draw,
+            market_prob_away=mkt_p_away,
+            market_home_decimal_odds=mkt_d_home,
+            market_draw_decimal_odds=mkt_d_draw,
+            market_away_decimal_odds=mkt_d_away,
             home_lineup_status=home_lineup.lineup_status,
             away_lineup_status=away_lineup.lineup_status,
             latest_silver_match_date=latest_silver_date,
@@ -786,14 +893,39 @@ def score_soccer_prediction_ledger(settings: Settings) -> MulticlassBenchmarkRep
     matches_df = pl.read_parquet(matches_path).filter(
         (pl.col("game_state") == "FINAL") & pl.col("outcome_1x2").is_not_null()
     )
+    sel_cols = ["match_date", "home_team", "away_team", "outcome_1x2"]
+    for m_col in (
+        "market_prob_home",
+        "market_prob_draw",
+        "market_prob_away",
+        "market_home_decimal_odds",
+        "market_draw_decimal_odds",
+        "market_away_decimal_odds",
+    ):
+        if m_col in matches_df.columns:
+            sel_cols.append(m_col)
 
     joined = ledger_df.join(
-        matches_df.select(["match_date", "home_team", "away_team", "outcome_1x2"]),
+        matches_df.select(sel_cols),
         on=["match_date", "home_team", "away_team"],
         how="inner",
     )
     if joined.is_empty():
         raise ValueError("No completed FINAL matches matched the soccer prediction ledger yet.")
+
+    for m_col in (
+        "market_prob_home",
+        "market_prob_draw",
+        "market_prob_away",
+        "market_home_decimal_odds",
+        "market_draw_decimal_odds",
+        "market_away_decimal_odds",
+    ):
+        right_col = f"{m_col}_right"
+        if right_col in joined.columns:
+            joined = joined.with_columns(
+                pl.coalesce([pl.col(m_col), pl.col(right_col)]).alias(m_col)
+            ).drop(right_col)
 
     model_probs = np.column_stack(
         [
@@ -803,4 +935,36 @@ def score_soccer_prediction_ledger(settings: Settings) -> MulticlassBenchmarkRep
         ]
     )
     y_true = np.asarray(joined["outcome_1x2"].cast(pl.Int64).to_numpy(), dtype=np.int64)
-    return compare_multiclass_against_baselines(model_probs, y_true)
+
+    market_probs = (
+        np.column_stack(
+            [
+                joined["market_prob_home"].cast(pl.Float64).to_numpy(),
+                joined["market_prob_draw"].cast(pl.Float64).to_numpy(),
+                joined["market_prob_away"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {"market_prob_home", "market_prob_draw", "market_prob_away"}.issubset(joined.columns)
+        else None
+    )
+    market_odds = (
+        np.column_stack(
+            [
+                joined["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_draw_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {
+            "market_home_decimal_odds",
+            "market_draw_decimal_odds",
+            "market_away_decimal_odds",
+        }.issubset(joined.columns)
+        else None
+    )
+    return compare_multiclass_against_baselines(
+        model_probs,
+        y_true,
+        market_probs=market_probs,
+        market_decimal_odds=market_odds,
+    )

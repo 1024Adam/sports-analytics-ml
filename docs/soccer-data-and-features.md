@@ -139,3 +139,24 @@ To eliminate early-season variance (Matchweeks 1–8) and handle promoted clubs 
 * **Outfield Projections**: `proj_minutes` ($\in [0, 90]$), `proj_goals`, `proj_assists`, `proj_goal_involvements` ($G+A$), `proj_shots`, `proj_sot`, `prob_1plus_goal`, `prob_1plus_assist`, and `prob_1plus_gi`.
 * **Goalkeeper Projections**: `proj_saves`, `proj_goals_against`, `proj_save_pct`, and `prob_clean_sheet`.
 * **Cross-Stage Coherence ($\gamma = 0.50$)**: Outfield player `proj_goals` and `proj_assists` are soft-scaled toward Stage 1's $\hat{\lambda}_{\text{team}}$ (with EPL assist-to-goal ratio $\approx 0.72$).
+
+---
+
+## 5. Phase 4 Extensions: Market Benchmarking, Cross-Competition Fatigue & Shot Micro-Features
+
+### 5.1 Evaluation-Only 1X2 Closing Odds (`market_*` Firewall, `Milestone 13`)
+* Extracted directly from the cached `Football-Data.co.uk` `E0_{code}.csv.gz` files (`PSCH`/`PSCD`/`PSCA` Pinnacle closing odds, with fallback to `B365CH`/`B365CD`/`B365CA` and opening lines) at zero additional network cost.
+* Stored in `matches.parquet` as `market_home_decimal_odds`, `market_draw_decimal_odds`, `market_away_decimal_odds`, and power-de-vigged `market_prob_home`, `market_prob_draw`, `market_prob_away`.
+* **Hard Feature Firewall**: Never included in `STAGE1_FEATURE_COLUMNS` or `STAGE2_FEATURE_COLUMNS`. Used strictly in `sports-ml backtest` and `sports-ml score-predictions` to compare model **RPS / Log Loss / Brier** against the closing market and evaluate simulated ROI when $|P_{\text{model}} - P_{\text{market}}| \ge 5\%$.
+
+### 5.2 Cross-Competition Schedule & Squad Fatigue (`Milestone 14`)
+* Non-league fixtures (**UEFA Champions League**, **Europa League**, **Conference League**, **FA Cup**, **EFL Cup**) for the 20 EPL clubs are stored in `data/silver/soccer/club_all_competitions_schedule.parquet`.
+* **Fatigue-Only Usage**: Used strictly to compute `true_all_comp_rest_days`, `had_midweek_european_match`, `european_travel_km_last_7d`, `all_comp_matches_last_14d`, `cup_extra_time_last_7d`, and `active_xi_14d_all_comp_minutes`.
+* **Tactical Isolation**: Rolling EPL $npxGF/90$, $npxGA/90$, $PPDA$, and club Elo ratings filter exclusively on `competition_type == "EPL"` so cup ties against lower-division or foreign opponents never distort domestic tactical ratings.
+
+### 5.3 Shot-Coordinate & Situation Micro-Features (`Milestone 15`)
+* Extracted from Understat match shot arrays (`situation`, $(X, Y)$ coordinates, `lastAction`, minute, and live score-state) into `data/silver/soccer/team_shot_micro_logs.parquet`:
+  * **Open-Play vs. Set-Piece $xG$ Split (`open_play_xgf`, `set_piece_xgf`, `open_play_xga`, `set_piece_xga`)**: Separates sustainable open-play chance creation from corner/free-kick efficiency and set-piece defensive vulnerability.
+  * **Game-State Neutral $npxG$ (`tied_state_npxgd_per_90`)**: Strips out late-game score-effect distortion when a club trails by $2+$ goals.
+  * **Spatial Box & Throughball Danger (`box_shot_share`, `throughball_xgf`)**: Captures central 18-yard box penetration vs. low-probability long shots.
+

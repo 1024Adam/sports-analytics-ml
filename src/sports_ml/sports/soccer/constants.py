@@ -329,6 +329,13 @@ SILVER_MATCHES_SCHEMA: Final[dict[str, pl.DataType]] = {
     "home_win": pl.Int8(),
     "is_draw": pl.Int8(),
     "away_win": pl.Int8(),
+    "market_home_decimal_odds": pl.Float64(),
+    "market_draw_decimal_odds": pl.Float64(),
+    "market_away_decimal_odds": pl.Float64(),
+    "market_prob_home": pl.Float64(),
+    "market_prob_draw": pl.Float64(),
+    "market_prob_away": pl.Float64(),
+    "market_overround": pl.Float64(),
 }
 
 SILVER_TEAM_MATCH_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
@@ -407,4 +414,40 @@ SILVER_GK_MATCH_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "clean_sheet": pl.Int8(),
     "xga_faced": pl.Float64(),
     "gsaa": pl.Float64(),
+}
+
+SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "season": pl.Int32(),
+    "match_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "competition_type": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "venue_lat": pl.Float64(),
+    "venue_lon": pl.Float64(),
+    "extra_time_played": pl.Boolean(),
+    "squad_minutes_load": pl.Float64(),
+}
+
+SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "match_id": pl.Int64(),
+    "match_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "open_play_xgf": pl.Float64(),
+    "open_play_xga": pl.Float64(),
+    "set_piece_xgf": pl.Float64(),
+    "set_piece_xga": pl.Float64(),
+    "penalty_xgf": pl.Float64(),
+    "penalty_xga": pl.Float64(),
+    "total_xgf": pl.Float64(),
+    "total_xga": pl.Float64(),
+    "tied_state_npxgd_per_90": pl.Float64(),
+    "box_shot_share": pl.Float64(),
+    "six_yard_shot_share": pl.Float64(),
+    "throughball_xgf": pl.Float64(),
 }

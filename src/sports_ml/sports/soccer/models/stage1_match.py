@@ -33,6 +33,7 @@ from sports_ml.core.evaluation import (
     MulticlassBenchmarkReport,
     compare_multiclass_against_baselines,
 )
+from sports_ml.core.market import is_forbidden_market_column
 from sports_ml.core.ratings import compute_elo_1x2_probabilities
 from sports_ml.core.temporal import sort_events_chronologically
 from sports_ml.core.validation import WalkForwardValidator
@@ -44,6 +45,8 @@ SOCCER_STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "elo_draw_prob",
     "elo_away_win_prob",
     "npxgd_per_90_w10_diff",
+    "diff_open_play_npxgd_90",
+    "diff_set_piece_xg_edge",
     "npxgf_pct_w10_diff",
     "pressing_intensity_diff",
     "deep_completions_per_90_w10_diff",
@@ -59,6 +62,22 @@ SOCCER_STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "npxga_per_90_w10_away",
     "npxgd_per_90_w10_home",
     "npxgd_per_90_w10_away",
+    "open_play_xgf_per_90_w10_home",
+    "open_play_xgf_per_90_w10_away",
+    "open_play_xga_per_90_w10_home",
+    "open_play_xga_per_90_w10_away",
+    "open_play_npxgd_per_90_w10_home",
+    "open_play_npxgd_per_90_w10_away",
+    "set_piece_xgf_per_90_w10_home",
+    "set_piece_xgf_per_90_w10_away",
+    "set_piece_xga_per_90_w10_home",
+    "set_piece_xga_per_90_w10_away",
+    "tied_state_npxgd_per_90_w10_home",
+    "tied_state_npxgd_per_90_w10_away",
+    "box_shot_share_w10_home",
+    "box_shot_share_w10_away",
+    "throughball_xgf_per_90_w10_home",
+    "throughball_xgf_per_90_w10_away",
     "npxgf_pct_w10_home",
     "npxgf_pct_w10_away",
     "npxgf_pct_ewma_home",
@@ -87,10 +106,24 @@ SOCCER_STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "defensive_ga_above_xga_w10_away",
     "rest_days_home",
     "rest_days_away",
+    "true_all_comp_rest_days_home",
+    "true_all_comp_rest_days_away",
     "is_midweek_turnaround_home",
     "is_midweek_turnaround_away",
+    "had_midweek_european_match_home",
+    "had_midweek_european_match_away",
+    "had_midweek_away_european_match_home",
+    "had_midweek_away_european_match_away",
+    "european_travel_km_last_7d_home",
+    "european_travel_km_last_7d_away",
     "matches_last_14d_home",
     "matches_last_14d_away",
+    "all_comp_matches_last_14d_home",
+    "all_comp_matches_last_14d_away",
+    "all_comp_matches_last_28d_home",
+    "all_comp_matches_last_28d_away",
+    "cup_extra_time_last_7d_home",
+    "cup_extra_time_last_7d_away",
     "travel_km_prev_game_home",
     "travel_km_prev_game_away",
     "is_promoted_team_home",
@@ -117,6 +150,8 @@ SOCCER_STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
     "def_weighted_xg_buildup_per_90_away",
     "missing_regular_minutes_home",
     "missing_regular_minutes_away",
+    "active_xi_14d_all_comp_minutes_home",
+    "active_xi_14d_all_comp_minutes_away",
 )
 
 
@@ -228,9 +263,11 @@ class Stage1SoccerMatchModel:
 
     @staticmethod
     def resolve_feature_columns(df: pl.DataFrame) -> list[str]:
-        """Select ordered numerical pre-match feature columns present in `df`."""
+        """Select ordered numerical pre-match feature columns (excluding `market_*` / `*odds*`)."""
         candidate_set = set(SOCCER_STAGE1_CANDIDATE_FEATURE_COLS)
-        preferred = [c for c in df.columns if c in candidate_set]
+        preferred = [
+            c for c in df.columns if c in candidate_set and not is_forbidden_market_column(c)
+        ]
         if preferred:
             return preferred
 
@@ -261,7 +298,9 @@ class Stage1SoccerMatchModel:
         fallback = [
             col
             for col, dtype in df.schema.items()
-            if col not in excluded and (dtype.is_numeric() or dtype == pl.Boolean)
+            if col not in excluded
+            and not is_forbidden_market_column(col)
+            and (dtype.is_numeric() or dtype == pl.Boolean)
         ]
         if not fallback:
             raise ValueError("No valid numeric pre-match feature columns found in DataFrame.")
@@ -674,11 +713,54 @@ def run_soccer_stage1_walk_forward_backtest(
             ]
         )
 
+    market_probs: NDArray[np.float64] | None = None
+    market_decimal_odds: NDArray[np.float64] | None = None
+    odds_cols = {
+        "market_home_decimal_odds",
+        "market_draw_decimal_odds",
+        "market_away_decimal_odds",
+    }
+    prob_cols = {"market_prob_home", "market_prob_draw", "market_prob_away"}
+    if prob_cols.issubset(oof_df.columns):
+        market_probs = np.column_stack(
+            [
+                oof_df["market_prob_home"].cast(pl.Float64).to_numpy(),
+                oof_df["market_prob_draw"].cast(pl.Float64).to_numpy(),
+                oof_df["market_prob_away"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if odds_cols.issubset(oof_df.columns):
+            market_decimal_odds = np.column_stack(
+                [
+                    oof_df["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                    oof_df["market_draw_decimal_odds"].cast(pl.Float64).to_numpy(),
+                    oof_df["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+                ]
+            )
+    elif odds_cols.issubset(oof_df.columns):
+        from sports_ml.core.market import devig_probabilities
+
+        raw_odds = np.column_stack(
+            [
+                oof_df["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                oof_df["market_draw_decimal_odds"].cast(pl.Float64).to_numpy(),
+                oof_df["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        valid_rows = np.all(np.isfinite(raw_odds) & (raw_odds > 1.0), axis=1)
+        if int(np.sum(valid_rows)) > 0:
+            mkt_mat = np.full((oof_df.height, 3), np.nan, dtype=np.float64)
+            mkt_mat[valid_rows] = devig_probabilities(raw_odds[valid_rows], method="power")
+            market_probs = mkt_mat
+            market_decimal_odds = raw_odds
+
     report = compare_multiclass_against_baselines(
         model_probs,
         y_true,
         empirical_prior=(0.45, 0.24, 0.31),
         elo_probs=elo_probs,
+        market_probs=market_probs,
+        market_decimal_odds=market_decimal_odds,
     )
 
     return SoccerStage1BacktestResult(

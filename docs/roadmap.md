@@ -309,4 +309,108 @@ Shrink the local `data/raw/` footprint by **~93% (`6.2 GB` $\rightarrow$ `~415 M
   - Verify `NHLWebAPIClient`, `FootballDataClient`, `FPLAPIClient`, and `UnderstatClient` write `.gz` cache files on ingest and produce **bit-for-bit identical** Silver Parquet tables.
 - [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
+---
+
+# Phase 4: Market Benchmarking, Cross-Competition Fatigue & Micro-Event Play-by-Play
+
+## Milestone 13: Evaluation-Only Historical Closing Odds, De-Vigging & CLV Backtest Benchmarking
+**Status**: `[x] Completed`
+
+### Goal
+Benchmark fundamental Stage 1 predictions against sharp sportsbook closing lines (Pinnacle / Bet365 / Market Consensus) in `sports-ml backtest` and `sports-ml score-predictions` while enforcing a **strict anti-contamination firewall** that forbids betting odds from ever entering `FEATURE_COLUMNS` (`X`).
+
+### Architectural Firewall (Zero Odds Contamination)
+1. **Evaluation-Only Namespace (`market_*`)**: All odds and market-implied probability columns are prefixed with `market_` (`market_home_decimal_odds`, `market_draw_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_draw`, `market_prob_away`, `market_overround`).
+2. **Hard Feature Firewall**: Both `sports/hockey/features/pipeline.py` and `sports/soccer/features/pipeline.py` (plus a dedicated anti-contamination test) explicitly strip/ban any `market_*` or `*odds*` columns from `STAGE1_FEATURE_COLUMNS` and `STAGE2_FEATURE_COLUMNS` so the ML models remain **100% first-principles fundamental models**.
+
+### Deliverables
+- [x] `src/sports_ml/core/market.py`: Sport-agnostic market odds math, de-vigging, and edge/ROI evaluation:
+  - `american_to_decimal(odds: float | NDArray) -> float | NDArray` and `decimal_to_raw_prob(decimal_odds: float | NDArray) -> float | NDArray`.
+  - `devig_probabilities(decimal_odds: NDArray[np.float64], method: Literal["power", "multiplicative", "shin"] = "power") -> NDArray[np.float64]`:
+    - **Multiplicative (Proportional)**: $P_i = \frac{1/d_i}{\sum_j 1/d_j}$.
+    - **Power Method (Default for 2-way NHL & 3-way EPL)**: Solves for exponent $k > 1$ such that $\sum_i (1/d_i)^k = 1.0$, accounting for the favorite-longshot bias.
+  - `evaluate_market_edge(...) -> MarketEdgeReport`: Computes head-to-head metrics on the subset of backtest games with closing odds:
+    - Model vs. Market **Log Loss**, **Brier Score**, **RPS** (soccer), and **ECE**.
+    - **Disagreement / Residual Slices**: Model accuracy, Brier score, and simulated flat-stake & fractional-Kelly ROI when $|P_{\text{model}} - P_{\text{market}}| \ge \tau$ (for $\tau \in \{0.03, 0.05, 0.08\}$), isolating situational pockets where the fundamental model beats the closing line.
+- [x] `src/sports_ml/sports/soccer/ingestion/football_data.py` & `reconciler.py`:
+  - Extract historical closing & opening `1X2` and Over/Under `2.5` odds already embedded in the cached `Football-Data.co.uk` `E0_{code}.csv.gz` files (`PSCH`/`PSCD`/`PSCA` Pinnacle closing, falling back to `B365CH`/`B365CD`/`B365CA` or opening `PSH`/`PSD`/`PSA` / `B365H`/`B365D`/`B365A` for earlier seasons) with zero extra network calls.
+  - Persist `market_home_decimal_odds`, `market_draw_decimal_odds`, `market_away_decimal_odds`, and power-de-vigged `market_prob_home`, `market_prob_draw`, `market_prob_away` as nullable evaluation columns in `data/silver/soccer/matches.parquet`.
+- [x] `src/sports_ml/sports/hockey/ingestion/odds.py` & `reconciler.py`:
+  - `NHLOddsIngestor`: Supports importing local/public historical NHL closing moneyline & total CSV archives (`data/raw/odds/nhl_historical_odds.csv.gz`, converting American moneylines like `-145` / `+125` to decimal and power-de-vigged probabilities) plus an optional pre-game odds snapshot hook (`THE_ODDS_API_KEY` env var if provided, gracefully skipped when absent).
+  - Persist nullable `market_home_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_away` on `data/silver/hockey/games.parquet`.
+- [x] `src/sports_ml/core/evaluation.py` & `src/sports_ml/cli.py`:
+  - Extend `BenchmarkComparisonReport` and `MulticlassBenchmarkReport` with optional `market_closing_baseline` and `MarketEdgeReport`.
+  - Update `sports-ml backtest` and `sports-ml score-predictions` Rich CLI tables to display the **De-Vigged Market Closing Line** benchmark alongside Elo/prior baselines and print the **Fundamental vs. Market Disagreement (`>5% Edge`)** performance breakdown when odds are present.
+
+### Verification & Acceptance Criteria
+- [x] `tests/core/test_market.py`:
+  - Verify `devig_probabilities` (`"multiplicative"` and `"power"`) produces probabilities strictly in $(0, 1)$ that sum to `1.0` (within `1e-9`) for both 2-way NHL moneylines and 3-way EPL `1X2` odds, and that the `"power"` method shrinks longshot probabilities more than heavy favorites.
+  - Verify `evaluate_market_edge` accurately computes flat-stake ROI, Kelly edge, and disagreement-bucket accuracy.
+- [x] `tests/sports/hockey/test_odds_firewall.py` & `tests/sports/soccer/test_odds_firewall.py`:
+  - **Strict Anti-Contamination Test**: Verify that no column starting with `market_` or containing `odds` is ever present in `STAGE1_FEATURE_COLUMNS` or `STAGE2_FEATURE_COLUMNS`, and that mutating `market_*` columns in Silver tables changes `0.0` of the model's predicted probabilities while updating the backtest market benchmark report.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 14: EPL Cross-Competition Schedule & Squad Fatigue (UEFA Champions/Europa/Conference League, FA Cup & EFL Cup)
+**Status**: `[x] Completed`
+
+### Goal
+Eliminate the EPL-only schedule blind spot by ingesting non-league competitive fixtures (**UEFA Champions League**, **Europa League**, **Conference League**, **FA Cup**, and **EFL Carabao Cup**) for all 20 EPL clubs and using them **strictly to compute true multi-competition schedule rest, European travel distance, 14-day match congestion, and squad rotation/minutes load**—without polluting domestic EPL tactical $xG$ rates or Elo ratings with lower-tier cup opponents.
+
+### Deliverables
+- [x] `src/sports_ml/sports/soccer/ingestion/non_league_fixtures.py` & `reconciler.py`:
+  - Ingest historical and active-season non-EPL club fixtures (`competition_type` $\in \{\text{"UCL"}, \text{"UEL"}, \text{"UECL"}, \text{"FA\_CUP"}, \text{"EFL\_CUP"}\}$) from Understat/Football-Data/FPL cup & European feeds into `data/silver/soccer/club_all_competitions_schedule.parquet` (`match_date`, `start_time_utc`, `team`, `opponent`, `competition_type`, `is_home`, `venue_lat`, `venue_lon`, `extra_time_played`, `squad_minutes_load`).
+- [x] `src/sports_ml/sports/soccer/features/team.py` & `roster.py`:
+  - Upgrade pre-match EPL schedule & fatigue features to query the unified all-competition timeline (`strictly < T_match`) before every EPL fixture:
+    - `true_all_comp_rest_days`: Calendar/hour rest since the club's last competitive match in **any** competition (correctly identifying a Wednesday Champions League match before a Saturday EPL kickoff as `2.5–3 days` rest instead of `7 days`).
+    - `had_midweek_european_match`: Binary indicator (`1` if the club played a `UCL` / `UEL` / `UECL` fixture within the last 5 days).
+    - `had_midweek_away_european_match` & `european_travel_km_last_7d`: Captures long-haul midweek European away trips (e.g., Champions League away match followed by an early Saturday EPL kickoff).
+    - `all_comp_matches_last_14d` & `all_comp_matches_last_28d`: True multi-competition fixture density.
+    - `cup_extra_time_last_7d`: Flag for 120-minute FA Cup / EFL Cup / UEFA knockout ties in the prior 7 days.
+    - `active_xi_14d_all_comp_minutes`: Rolling 14-day cumulative minutes across all competitions for projected starters (`roster.py`).
+  - **Tactical Isolation Guarantee**: Ensure rolling $npxGF/90$, $npxGA/90$, $PPDA$, and EPL Elo updates continue to filter exclusively on `competition_type == "EPL"` so facing a League One club in the FA Cup never distorts a club's Premier League shot-quality ratings.
+
+### Verification & Acceptance Criteria
+- [x] `tests/sports/soccer/test_cross_competition_fatigue.py`:
+  - Verify that inserting a Wednesday UEFA Champions League away match between two Saturday EPL fixtures reduces the Saturday EPL pre-match `true_all_comp_rest_days` from `7.0` to `3.0`, sets `had_midweek_european_match = 1`, and increases `all_comp_matches_last_14d` by `+1`.
+  - **Tactical Isolation Test**: Verify that mutating goals or $xG$ in `UCL` / `FA_CUP` / `EFL_CUP` fixtures produces **bit-for-bit identical** EPL Elo ratings and rolling EPL $npxGF/90$ & $PPDA$ features.
+  - **Temporal Firewall Test**: Verify that future UEFA/Cup fixtures at $\ge T_{\text{match}}$ never leak into pre-match features at $< T_{\text{match}}$.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 15: Shot-Coordinate & Shift-Level Play-by-Play Micro-Features (Score-Adjusted $xG$, Rush/Rebound Creation & TOI Quality of Competition)
+**Status**: `[x] Completed`
+
+### Goal
+Move beyond coarse game-level boxscore aggregates by ingesting **shot-level event streams** and **shift/matchup summaries** for both NHL Hockey and EPL Soccer, compressing millions of micro-events into compact, high-signal pre-game Silver/Gold features (**Score-Adjusted $xG$**, **Rush & Rebound Shot Creation**, **Slot Shot Share**, **TOI Quality of Competition**, and **Open-Play vs. Set-Piece $xG$ Split**).
+
+### Storage & Compaction Design
+Instead of keeping 15+ GB of raw per-game JSONs uncompressed on disk, the ingestion layer streams bulk shot archives (`MoneyPuck` shot zips for NHL, `Understat` match shot arrays for EPL) and NHL shift/play-by-play summaries, aggregates them into compact **game-team** and **game-player micro-feature Silver tables** (`zstd`-compressed Parquet, adding only `~50–120 MB` total to `data/silver/`), and caches raw archives as `.csv.gz` / `.json.gz`.
+
+### Deliverables
+- [x] `src/sports_ml/sports/hockey/ingestion/pbp_shots.py` & `shifts.py`:
+  - Ingest MoneyPuck bulk shot-level archives (`shots_{YYYY}.csv.gz`) and NHL API play-by-play / shift-chart summaries (`/v1/gamecenter/{GAME_ID}/play-by-play`) into `data/silver/hockey/team_pbp_micro_logs.parquet` and `skater_pbp_micro_logs.parquet`:
+    - **Score-Venue Adjusted 5v5 $xG$ & Fenwick (`score_adj_xgf_5v5`, `score_adj_xga_5v5`, `score_adj_ff_5v5`)**: Discounts trailing-team "score effects" (garbage-time shot volume when down by $2+$ goals) and boosts shots generated while tied or leading.
+    - **Rush & Rebound $xG$ Generation (`rush_xgf_5v5`, `rebound_xgf_5v5`, `rebound_xga_5v5`)**: Separates transition offense and net-front second-chance creation from perimeter point shots, and measures goalie rebound control (`rebound_xga_per_60`).
+    - **Shot Distance, Angle & Slot Share (`avg_shot_distance_5v5`, `inner_slot_xg_share`)**: Spatial shot-profile quality derived from $(x, y)$ ice coordinates.
+    - **Skater TOI Quality of Competition (`qoc_opponent_toi_share`) & Quality of Teammates (`qot_teammate_ixg_per_60`)**: Measures whether a forward line or defense pair plays heavy shutdown minutes against the opponent's top-6 forwards or sheltered 3rd-pair matchups.
+- [x] `src/sports_ml/sports/soccer/ingestion/shot_events.py`:
+  - Extract shot-level event records (`situation` $\in \{\text{"OpenPlay"}, \text{"FromCorner"}, \text{"SetPiece"}, \text{"DirectFreekick"}, \text{"Penalty"}\}$, `shotType`, $(X, Y)$ pitch coordinates, `lastAction` $\in \{\text{"Throughball"}, \text{"Cross"}, \text{"Rebound"}, \text{"Standard"}\}$, and minute/score-state at shot timestamp) from Understat match payloads into `data/silver/soccer/team_shot_micro_logs.parquet`:
+    - **Open-Play vs. Set-Piece $xG$ Split (`open_play_xgf`, `open_play_xga`, `set_piece_xgf`, `set_piece_xga`)**: Isolates repeatable open-play chance creation from set-piece specialists and corners/free-kicks matchup edges.
+    - **Game-State Neutral / Tied $npxG$ Rate (`tied_state_npxgd_per_90`)**: Filters out late-game desperation shots when a team trails by $2+$ goals vs. a low block.
+    - **Box-Entry & Throughball Danger (`box_shot_share`, `throughball_xgf`)**: Spatial shot quality inside the 18-yard box and 6-yard zone.
+- [x] `src/sports_ml/sports/hockey/features/` & `src/sports_ml/sports/soccer/features/`:
+  - Wire rolling left-closed (`.shift(1)`) micro-features into Stage 1 team matchup differentials (e.g., `diff_score_adj_xgf_pct_5v5`, `diff_rush_rebound_xg_rate`, `diff_set_piece_xg_edge`, `diff_open_play_npxgd_90`) and Stage 2 player projections (skater `rolling_rush_rebound_ixg_per_60`, `rolling_qoc_index`; outfield `rolling_open_play_npxg_per_90`, `rolling_set_piece_xg_share`).
+
+### Verification & Acceptance Criteria
+- [x] `tests/sports/hockey/test_pbp_micro_features.py` & `tests/sports/soccer/test_shot_micro_features.py`:
+  - **Score-Adjustment Invariant Test**: Verify that a 5v5 shot taken while leading by `+2` receives a higher score-adjusted weight than an identical shot taken while trailing by `-2`, and that game-total `score_adj_xgf_5v5` remains strictly non-negative.
+  - **Open-Play + Set-Piece Conservation Test**: Verify `open_play_xgf + set_piece_xgf + penalty_xgf == total_xgf` (within `1e-6`) for every match.
+  - **Strict Temporal Anti-Leakage Test**: Verify mutating shot coordinates, score states, or shift overlaps at event $\ge t$ leaves all pre-game micro-features at $< t$ bit-for-bit unchanged.
+- [x] Run `sports-ml backtest --sport hockey` and `sports-ml backtest --sport soccer` against the Milestone 13 closing-line benchmark to verify out-of-sample Log Loss / Brier / RPS improvement.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+
 

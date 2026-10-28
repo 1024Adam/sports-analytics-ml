@@ -88,6 +88,7 @@ def build_soccer_stage2_player_features(
     team_features: pl.DataFrame,
     gk_features: pl.DataFrame,
     *,
+    player_shot_micro_logs: pl.DataFrame | None = None,
     squad_metadata_df: pl.DataFrame | None = None,
     stage1_predictions: pl.DataFrame | None = None,
     excluded_ids_by_match_team: Mapping[tuple[int, str], Sequence[int]] | None = None,
@@ -100,8 +101,40 @@ def build_soccer_stage2_player_features(
         pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
         pl.col("opponent").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
     )
+    event_col = "match_id" if "match_id" in prepared.columns else "event_id"
+
+    if player_shot_micro_logs is not None and not player_shot_micro_logs.is_empty():
+        pm_ev_col = "match_id" if "match_id" in player_shot_micro_logs.columns else "event_id"
+        pm_cols = ["open_play_npxg", "set_piece_xg"]
+        avail_pm = [c for c in pm_cols if c in player_shot_micro_logs.columns]
+        if avail_pm:
+            pm_lookup = player_shot_micro_logs.select(
+                [
+                    pl.col(pm_ev_col).cast(pl.Int64).alias(event_col),
+                    pl.col("player_id").cast(pl.Int64),
+                    *[pl.col(c).cast(pl.Float64).alias(f"_pm_{c}") for c in avail_pm],
+                ]
+            ).unique(subset=[event_col, "player_id"], keep="last")
+            prepared = prepared.join(pm_lookup, on=[event_col, "player_id"], how="left")
+            for c in avail_pm:
+                if c in prepared.columns:
+                    prepared = prepared.with_columns(
+                        pl.coalesce([pl.col(f"_pm_{c}"), pl.col(c).cast(pl.Float64)]).alias(c)
+                    )
+                else:
+                    prepared = prepared.with_columns(pl.col(f"_pm_{c}").alias(c))
+            prepared = prepared.drop([f"_pm_{c}" for c in avail_pm])
+
+    for col_name, frac in (("open_play_npxg", 0.78), ("set_piece_xg", 0.22)):
+        fallback_expr = frac * pl.col("npxg").cast(pl.Float64)
+        if col_name in prepared.columns:
+            prepared = prepared.with_columns(
+                pl.col(col_name).cast(pl.Float64).fill_null(fallback_expr).alias(col_name)
+            )
+        else:
+            prepared = prepared.with_columns(fallback_expr.alias(col_name))
+
     sorted_df = sort_events_chronologically(prepared, extra_tiebreakers=["player_id"])
-    event_col = "match_id" if "match_id" in sorted_df.columns else "event_id"
 
     is_fwd = pl.col("position_group") == "FWD"
     is_def = pl.col("position_group") == "DEF"
@@ -212,6 +245,12 @@ def build_soccer_stage2_player_features(
         r_a_90 = pregame_exposure_rate(
             "assists", "minutes", window=w, group_by="player_id", scale_factor=90.0
         )
+        r_op_npxg_90 = pregame_exposure_rate(
+            "open_play_npxg", "minutes", window=w, group_by="player_id", scale_factor=90.0
+        )
+        r_sp_xg_share = pregame_exposure_rate(
+            "set_piece_xg", "xg", window=w, group_by="player_id", scale_factor=1.0
+        )
 
         exprs.extend(
             [
@@ -224,6 +263,12 @@ def build_soccer_stage2_player_features(
                 bayesian_shrinkage(r_npxg_90, n_w, pl.col("_p_npxg_90"), shrinkage_k).alias(
                     f"rolling_npxg_per_90_w{w}"
                 ),
+                bayesian_shrinkage(
+                    r_op_npxg_90, n_w, 0.78 * pl.col("_p_npxg_90"), shrinkage_k
+                ).alias(f"rolling_open_play_npxg_per_90_w{w}"),
+                bayesian_shrinkage(r_sp_xg_share, n_w, 0.22, shrinkage_k)
+                .clip(0.0, 1.0)
+                .alias(f"rolling_set_piece_xg_share_w{w}"),
                 bayesian_shrinkage(r_xg_90, n_w, pl.col("_p_npxg_90"), shrinkage_k).alias(
                     f"rolling_xg_per_90_w{w}"
                 ),
@@ -276,6 +321,8 @@ def build_soccer_stage2_player_features(
         pl.col(f"rolling_minutes_w{ref_w}").alias("rolling_minutes"),
         pl.col(f"rolling_start_rate_w{ref_w}").alias("rolling_start_rate"),
         pl.col(f"rolling_npxg_per_90_w{ref_w}").alias("rolling_npxg_per_90"),
+        pl.col(f"rolling_open_play_npxg_per_90_w{ref_w}").alias("rolling_open_play_npxg_per_90"),
+        pl.col(f"rolling_set_piece_xg_share_w{ref_w}").alias("rolling_set_piece_xg_share"),
         pl.col(f"rolling_xg_per_90_w{ref_w}").alias("rolling_xg_per_90"),
         pl.col(f"rolling_xa_per_90_w{ref_w}").alias("rolling_xa_per_90"),
         pl.col(f"rolling_xg_chain_per_90_w{ref_w}").alias("rolling_xg_chain_per_90"),
@@ -491,6 +538,8 @@ def build_soccer_stage2_player_features(
 
     drop_internal = [
         "_starter_num",
+        "open_play_npxg",
+        "set_piece_xg",
         "_p_min",
         "_p_npxg_90",
         "_p_xa_90",

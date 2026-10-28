@@ -18,6 +18,7 @@ from lightgbm import LGBMRegressor
 from numpy.typing import NDArray
 
 from sports_ml.config import RANDOM_SEED
+from sports_ml.core.market import is_forbidden_market_column
 
 STAGE2_SKATER_FEATURE_COLS: Final[tuple[str, ...]] = (
     "rolling_toi_ev_min",
@@ -31,6 +32,9 @@ STAGE2_SKATER_FEATURE_COLS: Final[tuple[str, ...]] = (
     "rolling_goals_per_60",
     "rolling_assists_per_60",
     "rolling_points_per_60",
+    "rolling_rush_rebound_ixg_per_60",
+    "rolling_qoc_index",
+    "rolling_qot_teammate_ixg_per_60",
     "career_shooting_pct_shrunk",
     "opp_xga_per_60_5v5",
     "opp_sa_per_60_5v5",
@@ -133,9 +137,11 @@ class Stage2PlayerProjectionModel:
 
     @staticmethod
     def resolve_feature_columns(df: pl.DataFrame) -> list[str]:
-        """Return ordered Stage 2 skater feature columns available in `df`."""
+        """Return ordered Stage 2 skater feature columns (excluding `market_*` / `*odds*`)."""
         candidate_set = set(STAGE2_SKATER_FEATURE_COLS)
-        preferred = [c for c in df.columns if c in candidate_set]
+        preferred = [
+            c for c in df.columns if c in candidate_set and not is_forbidden_market_column(c)
+        ]
         if preferred:
             return preferred
         excluded = {
@@ -162,7 +168,9 @@ class Stage2PlayerProjectionModel:
         fallback = [
             col
             for col, dtype in df.schema.items()
-            if col not in excluded and (dtype.is_numeric() or dtype == pl.Boolean)
+            if col not in excluded
+            and not is_forbidden_market_column(col)
+            and (dtype.is_numeric() or dtype == pl.Boolean)
         ]
         if not fallback:
             raise ValueError("No valid numeric Stage 2 feature columns found in DataFrame.")

@@ -25,6 +25,7 @@ from sports_ml.core.evaluation import (
     evaluate_multiclass_probabilities,
     evaluate_probabilities,
 )
+from sports_ml.core.market import MarketEdgeReport
 from sports_ml.core.registry import ModelRegistry
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
 from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
@@ -35,6 +36,8 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
     parse_boxscore_payload,
     parse_schedule_payload,
 )
+from sports_ml.sports.hockey.ingestion.odds import NHLOddsIngestor
+from sports_ml.sports.hockey.ingestion.pbp_shots import NHLPbpShotsIngestor
 from sports_ml.sports.hockey.ingestion.reconciler import HockeySilverReconciler
 from sports_ml.sports.hockey.models.predictor import (
     HockeyMatchupPredictor,
@@ -51,6 +54,8 @@ from sports_ml.sports.soccer.features.player import build_soccer_stage2_player_f
 from sports_ml.sports.soccer.ingestion import (
     FootballDataClient,
     FPLAPIClient,
+    NonLeagueFixturesIngestor,
+    SoccerShotEventsIngestor,
     SoccerSilverReconciler,
     UnderstatClient,
     check_soccer_data_sources,
@@ -463,11 +468,22 @@ def _run_hockey_ingestion(
     mp_skaters_df = pl.concat(mp_skaters_list, how="vertical") if mp_skaters_list else None
     mp_goalies_df = pl.concat(mp_goalies_list, how="vertical") if mp_goalies_list else None
 
+    odds_ingestor = NHLOddsIngestor(cache_dir=settings.paths.raw_dir / "odds")
+    nhl_odds_df = odds_ingestor.load_all_odds(offline=offline)
+
     reconciled_games_df: pl.DataFrame | None = None
     if schedule_frames:
-        reconciled_games_df = reconciler.reconcile_games(pl.concat(schedule_frames, how="vertical"))
+        reconciled_games_df = reconciler.reconcile_games(
+            pl.concat(schedule_frames, how="vertical"),
+            odds_df=nhl_odds_df,
+        )
     elif reconciler.games_path.exists():
-        reconciled_games_df = pl.read_parquet(reconciler.games_path)
+        existing_games = pl.read_parquet(reconciler.games_path)
+        reconciled_games_df = (
+            reconciler.reconcile_games(existing_games, odds_df=nhl_odds_df)
+            if not nhl_odds_df.is_empty()
+            else existing_games
+        )
 
     if team_frames or reconciled_games_df is not None:
         from sports_ml.sports.hockey.constants import SILVER_TEAM_GAME_LOGS_SCHEMA
@@ -492,6 +508,13 @@ def _run_hockey_ingestion(
             pl.concat(goalie_frames, how="vertical"),
             moneypuck_goalies_df=mp_goalies_df,
         )
+
+    pbp_ingestor = NHLPbpShotsIngestor(moneypuck_dir=raw_mp_dir, nhl_api_dir=raw_nhl_dir)
+    t_micro_df, s_micro_df = pbp_ingestor.load_cached_micro_logs()
+    if not t_micro_df.is_empty():
+        reconciler.reconcile_team_pbp_micro_logs(t_micro_df)
+    if not s_micro_df.is_empty():
+        reconciler.reconcile_skater_pbp_micro_logs(s_micro_df)
 
     if reconciler.games_path.exists():
         return pl.read_parquet(reconciler.games_path)
@@ -678,6 +701,20 @@ def _run_soccer_ingestion(
             team_logs_df=team_logs_df,
         )
 
+    nl_ingestor = NonLeagueFixturesIngestor(
+        cache_dir=settings.paths.raw_dir / "non_league_fixtures"
+    )
+    nl_df = nl_ingestor.load_cached_non_league_fixtures()
+    reconciler.reconcile_all_competitions_schedule(
+        nl_df,
+        epl_matches_df=reconciled_matches,
+    )
+
+    shot_ingestor = SoccerShotEventsIngestor(understat_dir=raw_us_dir)
+    t_shot_micro_df, _ = shot_ingestor.load_cached_shot_micro_logs()
+    if not t_shot_micro_df.is_empty():
+        reconciler.reconcile_team_shot_micro_logs(t_shot_micro_df)
+
     _ = np
     if reconciler.matches_path.exists():
         return pl.read_parquet(reconciler.matches_path)
@@ -800,6 +837,44 @@ def features_build_command(
     )
 
 
+def _render_market_disagreement_table(edge_report: MarketEdgeReport | None, sport: str) -> None:
+    """Render Fundamental vs. Market Disagreement (`>5% Edge`) performance breakdown."""
+    if edge_report is None or edge_report.n_games_with_odds == 0:
+        return
+
+    edge_table = Table(
+        title=(
+            f"Fundamental vs. Market Disagreement Breakdown ({sport.upper()} — "
+            f"n={edge_report.n_games_with_odds} games with closing odds, "
+            f"vig={edge_report.mean_overround:+.2%})"
+        )
+    )
+    edge_table.add_column("Disagreement Slice", style="cyan")
+    edge_table.add_column("Games", justify="right")
+    edge_table.add_column("Bets Placed", justify="right")
+    edge_table.add_column("Model Brier", justify="right", style="bold green")
+    edge_table.add_column("Market Brier", justify="right")
+    edge_table.add_column("Model Acc", justify="right")
+    edge_table.add_column("Market Acc", justify="right")
+    edge_table.add_column("Flat-Stake ROI", justify="right")
+    edge_table.add_column("Frac-Kelly ROI", justify="right")
+
+    for sl in edge_report.disagreement_slices:
+        label = f">{int(round(sl.threshold * 100))}% Edge (|P_mod - P_mkt| >= {sl.threshold:.2f})"
+        edge_table.add_row(
+            label,
+            str(sl.sample_count),
+            str(sl.bet_count),
+            f"{sl.model_brier_score:.4f}",
+            f"{sl.market_brier_score:.4f}",
+            f"{sl.model_accuracy:.3f}",
+            f"{sl.market_accuracy:.3f}",
+            f"{sl.flat_stake_roi:+.2%}",
+            f"{sl.fractional_kelly_roi:+.2%}",
+        )
+    console.print(edge_table)
+
+
 @app.command("backtest")
 def backtest_command(
     sport: Annotated[
@@ -847,6 +922,24 @@ def backtest_command(
             f"{rep_s.model.ece:.4f}",
             f"{rep_s.model.accuracy:.3f}",
         )
+        if rep_s.market_closing_baseline is not None:
+            table.add_row(
+                "De-Vigged Market Closing Line",
+                f"{rep_s.market_closing_baseline.rps:.4f}",
+                f"{rep_s.market_closing_baseline.log_loss:.4f}",
+                f"{rep_s.market_closing_baseline.brier_score:.4f}",
+                f"{rep_s.market_closing_baseline.ece:.4f}",
+                f"{rep_s.market_closing_baseline.accuracy:.3f}",
+            )
+        if rep_s.elo_baseline is not None:
+            table.add_row(
+                "3-Way Elo Baseline",
+                f"{rep_s.elo_baseline.rps:.4f}",
+                f"{rep_s.elo_baseline.log_loss:.4f}",
+                f"{rep_s.elo_baseline.brier_score:.4f}",
+                f"{rep_s.elo_baseline.ece:.4f}",
+                f"{rep_s.elo_baseline.accuracy:.3f}",
+            )
         table.add_row(
             "Empirical EPL Prior (45/24/31)",
             f"{rep_s.empirical_prior_baseline.rps:.4f}",
@@ -864,6 +957,7 @@ def backtest_command(
             f"{rep_s.uniform_baseline.accuracy:.3f}",
         )
         console.print(table)
+        _render_market_disagreement_table(rep_s.market_edge_report, slug)
 
         if stage in {"2", "all"} and not s2_df.is_empty():
             s2_soccer_model = Stage2SoccerPlayerModel(random_seed=RANDOM_SEED)
@@ -908,6 +1002,22 @@ def backtest_command(
         f"{rep.model.ece:.4f}",
         f"{rep.model.accuracy:.3f}",
     )
+    if rep.market_closing_baseline is not None:
+        table.add_row(
+            "De-Vigged Market Closing Line",
+            f"{rep.market_closing_baseline.log_loss:.4f}",
+            f"{rep.market_closing_baseline.brier_score:.4f}",
+            f"{rep.market_closing_baseline.ece:.4f}",
+            f"{rep.market_closing_baseline.accuracy:.3f}",
+        )
+    if rep.elo_baseline is not None:
+        table.add_row(
+            "Elo Baseline",
+            f"{rep.elo_baseline.log_loss:.4f}",
+            f"{rep.elo_baseline.brier_score:.4f}",
+            f"{rep.elo_baseline.ece:.4f}",
+            f"{rep.elo_baseline.accuracy:.3f}",
+        )
     table.add_row(
         "Home Win-Rate Baseline",
         f"{rep.home_win_rate_baseline.log_loss:.4f}",
@@ -923,6 +1033,7 @@ def backtest_command(
         f"{rep.coin_flip_baseline.accuracy:.3f}",
     )
     console.print(table)
+    _render_market_disagreement_table(rep.market_edge_report, slug)
 
     if stage in {"2", "all"} and not s2_df.is_empty():
         s2_model = Stage2PlayerProjectionModel(random_seed=RANDOM_SEED)
@@ -1106,20 +1217,26 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
     game_table.add_column("Date", style="cyan", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
-    game_table.add_column("P(Away Win)", justify="right", style="yellow")
-    game_table.add_column("P(Home Win)", justify="right", style="green")
-    game_table.add_column("E[Away Goals]", justify="right")
-    game_table.add_column("E[Home Goals]", justify="right")
+    game_table.add_column("P(Away)", justify="right", style="yellow")
+    game_table.add_column("P(Home)", justify="right", style="green")
+    game_table.add_column("Mkt A/H (Edge)", justify="right")
+    game_table.add_column("E[G] A/H", justify="right")
     game_table.add_column("Goalie Status")
 
     for pred in predictions:
+        if pred.market_prob_away is not None and pred.market_prob_home is not None:
+            edge_val = pred.home_win_prob - pred.market_prob_home
+            mkt_str = f"{pred.market_prob_away:.0%}/{pred.market_prob_home:.0%} (H {edge_val:+.1%})"
+        else:
+            mkt_str = "—"
+
         game_table.add_row(
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             f"{pred.away_win_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
-            f"{pred.expected_away_goals:.2f}",
-            f"{pred.expected_home_goals:.2f}",
+            mkt_str,
+            f"{pred.expected_away_goals:.2f}/{pred.expected_home_goals:.2f}",
             f"A:{pred.away_goalie_status} / H:{pred.home_goalie_status}",
         )
     console.print(game_table)
@@ -1206,23 +1323,41 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
     """Render EPL Stage 1 `1X2` and optional Stage 2 projections as Rich terminal tables."""
     match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
     match_table.add_column("Date", style="cyan", no_wrap=True)
-    match_table.add_column("Matchup (Away @ Home)", style="bold", no_wrap=True)
-    match_table.add_column("P(Away Win)", justify="right", style="yellow")
+    match_table.add_column("Matchup", style="bold", no_wrap=True)
+    match_table.add_column("P(Away)", justify="right", style="yellow")
     match_table.add_column("P(Draw)", justify="right", style="magenta")
-    match_table.add_column("P(Home Win)", justify="right", style="green")
-    match_table.add_column("E[Away Goals]", justify="right")
-    match_table.add_column("E[Home Goals]", justify="right")
+    match_table.add_column("P(Home)", justify="right", style="green")
+    match_table.add_column("Mkt 1X2 (Edge)", justify="right")
+    match_table.add_column("E[G] A/H", justify="right")
     match_table.add_column("Lineup Status")
 
     for pred in predictions:
+        if (
+            pred.market_prob_away is not None
+            and pred.market_prob_draw is not None
+            and pred.market_prob_home is not None
+        ):
+            edges = (
+                ("A", pred.away_win_prob - pred.market_prob_away),
+                ("D", pred.draw_prob - pred.market_prob_draw),
+                ("H", pred.home_win_prob - pred.market_prob_home),
+            )
+            best_side, best_edge = max(edges, key=lambda x: x[1])
+            mkt_1x2_str = (
+                f"{pred.market_prob_away:.0%}/{pred.market_prob_draw:.0%}/"
+                f"{pred.market_prob_home:.0%} ({best_side}{best_edge:+.0%})"
+            )
+        else:
+            mkt_1x2_str = "—"
+
         match_table.add_row(
             pred.match_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             f"{pred.away_win_prob:.1%}",
             f"{pred.draw_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
-            f"{pred.expected_away_goals:.2f}",
-            f"{pred.expected_home_goals:.2f}",
+            mkt_1x2_str,
+            f"{pred.expected_away_goals:.2f}/{pred.expected_home_goals:.2f}",
             f"A:{pred.away_lineup_status} / H:{pred.home_lineup_status}",
         )
     console.print(match_table)
@@ -1430,40 +1565,66 @@ def score_predictions_command(
         table = Table(title=f"Live Prediction Ledger Accuracy ({slug.upper()} 1X2)")
         table.add_column("Metric", style="cyan")
         table.add_column("Live Predictions", justify="right", style="bold green")
+        if rep_s.market_closing_baseline is not None:
+            table.add_column("De-Vigged Market Closing Line", justify="right")
         table.add_column("Empirical EPL Prior", justify="right")
         table.add_column("Uniform 1/3 Baseline", justify="right")
 
+        def _s_row(
+            name: str, m_val: str, mkt_val: str | None, prior_val: str, unif_val: str
+        ) -> tuple[str, ...]:
+            if mkt_val is not None:
+                return (name, m_val, mkt_val, prior_val, unif_val)
+            return (name, m_val, prior_val, unif_val)
+
+        mkt_s = rep_s.market_closing_baseline
         table.add_row(
-            "Ranked Probability Score (RPS)",
-            f"{rep_s.model.rps:.4f}",
-            f"{rep_s.empirical_prior_baseline.rps:.4f}",
-            f"{rep_s.uniform_baseline.rps:.4f}",
+            *_s_row(
+                "Ranked Probability Score (RPS)",
+                f"{rep_s.model.rps:.4f}",
+                f"{mkt_s.rps:.4f}" if mkt_s is not None else None,
+                f"{rep_s.empirical_prior_baseline.rps:.4f}",
+                f"{rep_s.uniform_baseline.rps:.4f}",
+            )
         )
         table.add_row(
-            "3-Class Log Loss",
-            f"{rep_s.model.log_loss:.4f}",
-            f"{rep_s.empirical_prior_baseline.log_loss:.4f}",
-            f"{rep_s.uniform_baseline.log_loss:.4f}",
+            *_s_row(
+                "3-Class Log Loss",
+                f"{rep_s.model.log_loss:.4f}",
+                f"{mkt_s.log_loss:.4f}" if mkt_s is not None else None,
+                f"{rep_s.empirical_prior_baseline.log_loss:.4f}",
+                f"{rep_s.uniform_baseline.log_loss:.4f}",
+            )
         )
         table.add_row(
-            "Multi-Class Brier Score",
-            f"{rep_s.model.brier_score:.4f}",
-            f"{rep_s.empirical_prior_baseline.brier_score:.4f}",
-            f"{rep_s.uniform_baseline.brier_score:.4f}",
+            *_s_row(
+                "Multi-Class Brier Score",
+                f"{rep_s.model.brier_score:.4f}",
+                f"{mkt_s.brier_score:.4f}" if mkt_s is not None else None,
+                f"{rep_s.empirical_prior_baseline.brier_score:.4f}",
+                f"{rep_s.uniform_baseline.brier_score:.4f}",
+            )
         )
         table.add_row(
-            "ECE",
-            f"{rep_s.model.ece:.4f}",
-            f"{rep_s.empirical_prior_baseline.ece:.4f}",
-            f"{rep_s.uniform_baseline.ece:.4f}",
+            *_s_row(
+                "ECE",
+                f"{rep_s.model.ece:.4f}",
+                f"{mkt_s.ece:.4f}" if mkt_s is not None else None,
+                f"{rep_s.empirical_prior_baseline.ece:.4f}",
+                f"{rep_s.uniform_baseline.ece:.4f}",
+            )
         )
         table.add_row(
-            "Accuracy",
-            f"{rep_s.model.accuracy:.3f}",
-            f"{rep_s.empirical_prior_baseline.accuracy:.3f}",
-            f"{rep_s.uniform_baseline.accuracy:.3f}",
+            *_s_row(
+                "Accuracy",
+                f"{rep_s.model.accuracy:.3f}",
+                f"{mkt_s.accuracy:.3f}" if mkt_s is not None else None,
+                f"{rep_s.empirical_prior_baseline.accuracy:.3f}",
+                f"{rep_s.uniform_baseline.accuracy:.3f}",
+            )
         )
         console.print(table)
+        _render_market_disagreement_table(rep_s.market_edge_report, slug)
         return
 
     report = score_prediction_ledger(settings)
@@ -1471,34 +1632,57 @@ def score_predictions_command(
     table = Table(title=f"Live Prediction Ledger Accuracy ({slug.upper()})")
     table.add_column("Metric", style="cyan")
     table.add_column("Live Predictions", justify="right", style="bold green")
+    if report.market_closing_baseline is not None:
+        table.add_column("De-Vigged Market Closing Line", justify="right")
     table.add_column("Home Win-Rate Baseline", justify="right")
     table.add_column("Coin-Flip Baseline", justify="right")
 
+    def _h_row(
+        name: str, m_val: str, mkt_val: str | None, home_val: str, coin_val: str
+    ) -> tuple[str, ...]:
+        if mkt_val is not None:
+            return (name, m_val, mkt_val, home_val, coin_val)
+        return (name, m_val, home_val, coin_val)
+
+    mkt_h = report.market_closing_baseline
     table.add_row(
-        "Log Loss",
-        f"{report.model.log_loss:.4f}",
-        f"{report.home_win_rate_baseline.log_loss:.4f}",
-        f"{report.coin_flip_baseline.log_loss:.4f}",
+        *_h_row(
+            "Log Loss",
+            f"{report.model.log_loss:.4f}",
+            f"{mkt_h.log_loss:.4f}" if mkt_h is not None else None,
+            f"{report.home_win_rate_baseline.log_loss:.4f}",
+            f"{report.coin_flip_baseline.log_loss:.4f}",
+        )
     )
     table.add_row(
-        "Brier Score",
-        f"{report.model.brier_score:.4f}",
-        f"{report.home_win_rate_baseline.brier_score:.4f}",
-        f"{report.coin_flip_baseline.brier_score:.4f}",
+        *_h_row(
+            "Brier Score",
+            f"{report.model.brier_score:.4f}",
+            f"{mkt_h.brier_score:.4f}" if mkt_h is not None else None,
+            f"{report.home_win_rate_baseline.brier_score:.4f}",
+            f"{report.coin_flip_baseline.brier_score:.4f}",
+        )
     )
     table.add_row(
-        "ECE",
-        f"{report.model.ece:.4f}",
-        f"{report.home_win_rate_baseline.ece:.4f}",
-        f"{report.coin_flip_baseline.ece:.4f}",
+        *_h_row(
+            "ECE",
+            f"{report.model.ece:.4f}",
+            f"{mkt_h.ece:.4f}" if mkt_h is not None else None,
+            f"{report.home_win_rate_baseline.ece:.4f}",
+            f"{report.coin_flip_baseline.ece:.4f}",
+        )
     )
     table.add_row(
-        "Accuracy",
-        f"{report.model.accuracy:.3f}",
-        f"{report.home_win_rate_baseline.accuracy:.3f}",
-        f"{report.coin_flip_baseline.accuracy:.3f}",
+        *_h_row(
+            "Accuracy",
+            f"{report.model.accuracy:.3f}",
+            f"{mkt_h.accuracy:.3f}" if mkt_h is not None else None,
+            f"{report.home_win_rate_baseline.accuracy:.3f}",
+            f"{report.coin_flip_baseline.accuracy:.3f}",
+        )
     )
     console.print(table)
+    _render_market_disagreement_table(report.market_edge_report, slug)
 
 
 @app.command("check-sources")

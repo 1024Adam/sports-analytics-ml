@@ -41,6 +41,7 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
     derive_active_nhl_season,
     parse_roster_payload,
 )
+from sports_ml.sports.hockey.ingestion.odds import NHLOddsIngestor
 from sports_ml.sports.hockey.models.stage1_game import Stage1GameOutcomeModel
 from sports_ml.sports.hockey.models.stage2_player import Stage2PlayerProjectionModel
 
@@ -68,6 +69,10 @@ class MatchupPrediction(BaseModel):
     away_win_prob: float
     expected_home_goals: float
     expected_away_goals: float
+    market_prob_home: float | None = None
+    market_prob_away: float | None = None
+    market_home_decimal_odds: float | None = None
+    market_away_decimal_odds: float | None = None
     home_goalie_status: str = "PROJECTED_HEURISTIC"
     away_goalie_status: str = "PROJECTED_HEURISTIC"
     latest_silver_game_date: str | None = None
@@ -88,6 +93,8 @@ def build_and_persist_gold_features(
     teams_path = silver_dir / "team_game_logs.parquet"
     skaters_path = silver_dir / "skater_game_logs.parquet"
     goalies_path = silver_dir / "goalie_game_logs.parquet"
+    team_micro_path = silver_dir / "team_pbp_micro_logs.parquet"
+    skater_micro_path = silver_dir / "skater_pbp_micro_logs.parquet"
 
     if not games_path.exists() or not teams_path.exists():
         raise FileNotFoundError(
@@ -98,8 +105,10 @@ def build_and_persist_gold_features(
     team_logs_df = pl.read_parquet(teams_path)
     skater_logs_df = pl.read_parquet(skaters_path) if skaters_path.exists() else pl.DataFrame()
     goalie_logs_df = pl.read_parquet(goalies_path) if goalies_path.exists() else pl.DataFrame()
+    team_micro_df = pl.read_parquet(team_micro_path) if team_micro_path.exists() else None
+    skater_micro_df = pl.read_parquet(skater_micro_path) if skater_micro_path.exists() else None
 
-    team_feat_df = build_team_rolling_features(team_logs_df)
+    team_feat_df = build_team_rolling_features(team_logs_df, team_pbp_micro_logs=team_micro_df)
     goalie_feat_df = (
         build_goalie_rolling_features(goalie_logs_df)
         if not goalie_logs_df.is_empty()
@@ -110,9 +119,15 @@ def build_and_persist_gold_features(
         team_logs_df,
         skater_logs_df if not skater_logs_df.is_empty() else None,
         goalie_logs_df if not goalie_logs_df.is_empty() else None,
+        team_pbp_micro_logs=team_micro_df,
     )
     stage2_df = (
-        build_stage2_player_features(skater_logs_df, team_feat_df, goalie_feat_df)
+        build_stage2_player_features(
+            skater_logs_df,
+            team_feat_df,
+            goalie_feat_df,
+            skater_pbp_micro_logs=skater_micro_df,
+        )
         if not skater_logs_df.is_empty()
         else pl.DataFrame()
     )
@@ -139,6 +154,7 @@ class HockeyMatchupPredictor:
         self.stage1_model = stage1_model
         self.stage2_model = stage2_model
         self.settings = settings or get_settings()
+        self._live_odds_cache: dict[date, pl.DataFrame] = {}
 
     @classmethod
     def from_artifacts(
@@ -318,6 +334,10 @@ class HockeyMatchupPredictor:
                 "away_win_prob": [prediction.away_win_prob],
                 "expected_home_goals": [prediction.expected_home_goals],
                 "expected_away_goals": [prediction.expected_away_goals],
+                "market_prob_home": [prediction.market_prob_home],
+                "market_prob_away": [prediction.market_prob_away],
+                "market_home_decimal_odds": [prediction.market_home_decimal_odds],
+                "market_away_decimal_odds": [prediction.market_away_decimal_odds],
                 "home_goalie_status": [prediction.home_goalie_status],
                 "away_goalie_status": [prediction.away_goalie_status],
                 "has_moneypuck_xg": [prediction.has_moneypuck_xg],
@@ -327,12 +347,66 @@ class HockeyMatchupPredictor:
 
         if ledger_path.exists():
             existing = pl.read_parquet(ledger_path)
-            combined = pl.concat([existing, new_row], how="vertical")
+            combined = pl.concat([existing, new_row], how="diagonal_relaxed")
         else:
             combined = new_row
 
         combined.write_parquet(ledger_path, compression="zstd")
         return ledger_path
+
+    def _resolve_matchup_market_odds(
+        self,
+        s1_row: dict[str, object],
+        home_code: str,
+        away_code: str,
+        game_date: date,
+        *,
+        offline: bool = False,
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        """Resolve evaluation-only de-vigged market probabilities and decimal odds for a matchup."""
+        raw_ph = s1_row.get("market_prob_home")
+        raw_pa = s1_row.get("market_prob_away")
+        raw_dh = s1_row.get("market_home_decimal_odds")
+        raw_da = s1_row.get("market_away_decimal_odds")
+        if isinstance(raw_ph, (int, float)) and isinstance(raw_pa, (int, float)):
+            dh_val = float(raw_dh) if isinstance(raw_dh, (int, float)) else None
+            da_val = float(raw_da) if isinstance(raw_da, (int, float)) else None
+            return (float(raw_ph), float(raw_pa), dh_val, da_val)
+
+        if offline:
+            return (None, None, None, None)
+
+        if game_date not in self._live_odds_cache:
+            ing = NHLOddsIngestor(cache_dir=self.settings.paths.raw_dir / "odds")
+            espn_df = ing.fetch_espn_date_odds(game_date, offline=False)
+            live_df = ing.fetch_live_odds_snapshot(offline=False)
+            self._live_odds_cache[game_date] = (
+                pl.concat([espn_df, live_df], how="vertical")
+                if not espn_df.is_empty() and not live_df.is_empty()
+                else (espn_df if not espn_df.is_empty() else live_df)
+            )
+
+        day_odds = self._live_odds_cache[game_date]
+        if day_odds.is_empty():
+            return (None, None, None, None)
+
+        matched = day_odds.filter(
+            (pl.col("home_team") == home_code) & (pl.col("away_team") == away_code)
+        )
+        if matched.is_empty():
+            return (None, None, None, None)
+
+        r = matched.row(-1, named=True)
+        return (
+            float(r["market_prob_home"]) if r.get("market_prob_home") is not None else None,
+            float(r["market_prob_away"]) if r.get("market_prob_away") is not None else None,
+            float(r["market_home_decimal_odds"])
+            if r.get("market_home_decimal_odds") is not None
+            else None,
+            float(r["market_away_decimal_odds"])
+            if r.get("market_away_decimal_odds") is not None
+            else None,
+        )
 
     def _resolve_matchup_goalie_statuses(
         self,
@@ -808,6 +882,14 @@ class HockeyMatchupPredictor:
                     goalies=goalies_pred,
                 )
 
+        mkt_p_home, mkt_p_away, mkt_d_home, mkt_d_away = self._resolve_matchup_market_odds(
+            s1_row,
+            home_code,
+            away_code,
+            game_date,
+            offline=offline,
+        )
+
         pred_obj = MatchupPrediction(
             game_id=game_id_val,
             game_date=game_date,
@@ -817,6 +899,10 @@ class HockeyMatchupPredictor:
             away_win_prob=away_prob,
             expected_home_goals=exp_home_g,
             expected_away_goals=exp_away_g,
+            market_prob_home=mkt_p_home,
+            market_prob_away=mkt_p_away,
+            market_home_decimal_odds=mkt_d_home,
+            market_away_decimal_odds=mkt_d_away,
             home_goalie_status=resolved_home_status,
             away_goalie_status=resolved_away_status,
             latest_silver_game_date=latest_silver_date,
@@ -967,11 +1053,14 @@ def score_prediction_ledger(settings: Settings) -> BenchmarkComparisonReport:
     ledger_df = pl.read_parquet(ledger_path).unique(
         subset=["game_date", "home_team", "away_team"], keep="last"
     )
-    completed_games = (
-        pl.read_parquet(games_path)
-        .filter((pl.col("game_state") == "FINAL") & pl.col("home_win").is_not_null())
-        .select(["game_date", "home_team", "away_team", "home_win"])
+    raw_games = pl.read_parquet(games_path).filter(
+        (pl.col("game_state") == "FINAL") & pl.col("home_win").is_not_null()
     )
+    sel_cols = ["game_date", "home_team", "away_team", "home_win"]
+    for m_col in ("market_prob_home", "market_home_decimal_odds", "market_away_decimal_odds"):
+        if m_col in raw_games.columns:
+            sel_cols.append(m_col)
+    completed_games = raw_games.select(sel_cols)
 
     joined = ledger_df.join(
         completed_games, on=["game_date", "home_team", "away_team"], how="inner"
@@ -981,4 +1070,32 @@ def score_prediction_ledger(settings: Settings) -> BenchmarkComparisonReport:
 
     probs = np.asarray(joined["home_win_prob"].to_numpy(), dtype=np.float64)
     y_true = np.asarray(joined["home_win"].cast(pl.Int64).to_numpy(), dtype=np.int64)
-    return compare_against_baselines(probs, y_true)
+
+    for m_col in ("market_prob_home", "market_home_decimal_odds", "market_away_decimal_odds"):
+        right_col = f"{m_col}_right"
+        if right_col in joined.columns:
+            joined = joined.with_columns(
+                pl.coalesce([pl.col(m_col), pl.col(right_col)]).alias(m_col)
+            ).drop(right_col)
+
+    market_probs = (
+        np.asarray(joined["market_prob_home"].cast(pl.Float64).to_numpy(), dtype=np.float64)
+        if "market_prob_home" in joined.columns
+        else None
+    )
+    market_odds = (
+        np.column_stack(
+            [
+                joined["market_home_decimal_odds"].cast(pl.Float64).to_numpy(),
+                joined["market_away_decimal_odds"].cast(pl.Float64).to_numpy(),
+            ]
+        )
+        if {"market_home_decimal_odds", "market_away_decimal_odds"}.issubset(joined.columns)
+        else None
+    )
+    return compare_against_baselines(
+        probs,
+        y_true,
+        market_probs=market_probs,
+        market_decimal_odds=market_odds,
+    )

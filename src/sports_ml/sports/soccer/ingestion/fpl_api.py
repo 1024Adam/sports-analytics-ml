@@ -225,6 +225,13 @@ def parse_fixtures_payload(
                 "home_win": home_win,
                 "is_draw": is_draw,
                 "away_win": away_win,
+                "market_home_decimal_odds": None,
+                "market_draw_decimal_odds": None,
+                "market_away_decimal_odds": None,
+                "market_prob_home": None,
+                "market_prob_draw": None,
+                "market_prob_away": None,
+                "market_overround": None,
             }
         )
 
