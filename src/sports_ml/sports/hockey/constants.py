@@ -409,3 +409,38 @@ SILVER_GOALIE_GAME_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "xga_all": pl.Float64(),
     "gsax": pl.Float64(),
 }
+
+SILVER_TEAM_PBP_MICRO_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "game_id": pl.Int64(),
+    "game_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "score_adj_xgf_5v5": pl.Float64(),
+    "score_adj_xga_5v5": pl.Float64(),
+    "score_adj_ff_5v5": pl.Float64(),
+    "score_adj_fa_5v5": pl.Float64(),
+    "rush_xgf_5v5": pl.Float64(),
+    "rebound_xgf_5v5": pl.Float64(),
+    "rebound_xga_5v5": pl.Float64(),
+    "avg_shot_distance_5v5": pl.Float64(),
+    "inner_slot_xg_share": pl.Float64(),
+}
+
+SILVER_SKATER_PBP_MICRO_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "game_id": pl.Int64(),
+    "game_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "player_id": pl.Int64(),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "rush_ixg_5v5": pl.Float64(),
+    "rebound_ixg_5v5": pl.Float64(),
+    "inner_slot_ixg_5v5": pl.Float64(),
+    "qoc_opponent_toi_share": pl.Float64(),
+    "qot_teammate_ixg_per_60": pl.Float64(),
+}

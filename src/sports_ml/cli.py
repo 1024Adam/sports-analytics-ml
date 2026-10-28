@@ -37,6 +37,7 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
     parse_schedule_payload,
 )
 from sports_ml.sports.hockey.ingestion.odds import NHLOddsIngestor
+from sports_ml.sports.hockey.ingestion.pbp_shots import NHLPbpShotsIngestor
 from sports_ml.sports.hockey.ingestion.reconciler import HockeySilverReconciler
 from sports_ml.sports.hockey.models.predictor import (
     HockeyMatchupPredictor,
@@ -54,6 +55,7 @@ from sports_ml.sports.soccer.ingestion import (
     FootballDataClient,
     FPLAPIClient,
     NonLeagueFixturesIngestor,
+    SoccerShotEventsIngestor,
     SoccerSilverReconciler,
     UnderstatClient,
     check_soccer_data_sources,
@@ -507,6 +509,13 @@ def _run_hockey_ingestion(
             moneypuck_goalies_df=mp_goalies_df,
         )
 
+    pbp_ingestor = NHLPbpShotsIngestor(moneypuck_dir=raw_mp_dir, nhl_api_dir=raw_nhl_dir)
+    t_micro_df, s_micro_df = pbp_ingestor.load_cached_micro_logs()
+    if not t_micro_df.is_empty():
+        reconciler.reconcile_team_pbp_micro_logs(t_micro_df)
+    if not s_micro_df.is_empty():
+        reconciler.reconcile_skater_pbp_micro_logs(s_micro_df)
+
     if reconciler.games_path.exists():
         return pl.read_parquet(reconciler.games_path)
     return pl.DataFrame()
@@ -700,6 +709,11 @@ def _run_soccer_ingestion(
         nl_df,
         epl_matches_df=reconciled_matches,
     )
+
+    shot_ingestor = SoccerShotEventsIngestor(understat_dir=raw_us_dir)
+    t_shot_micro_df, _ = shot_ingestor.load_cached_shot_micro_logs()
+    if not t_shot_micro_df.is_empty():
+        reconciler.reconcile_team_shot_micro_logs(t_shot_micro_df)
 
     _ = np
     if reconciler.matches_path.exists():

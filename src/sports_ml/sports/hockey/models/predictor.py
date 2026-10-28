@@ -88,6 +88,8 @@ def build_and_persist_gold_features(
     teams_path = silver_dir / "team_game_logs.parquet"
     skaters_path = silver_dir / "skater_game_logs.parquet"
     goalies_path = silver_dir / "goalie_game_logs.parquet"
+    team_micro_path = silver_dir / "team_pbp_micro_logs.parquet"
+    skater_micro_path = silver_dir / "skater_pbp_micro_logs.parquet"
 
     if not games_path.exists() or not teams_path.exists():
         raise FileNotFoundError(
@@ -98,8 +100,10 @@ def build_and_persist_gold_features(
     team_logs_df = pl.read_parquet(teams_path)
     skater_logs_df = pl.read_parquet(skaters_path) if skaters_path.exists() else pl.DataFrame()
     goalie_logs_df = pl.read_parquet(goalies_path) if goalies_path.exists() else pl.DataFrame()
+    team_micro_df = pl.read_parquet(team_micro_path) if team_micro_path.exists() else None
+    skater_micro_df = pl.read_parquet(skater_micro_path) if skater_micro_path.exists() else None
 
-    team_feat_df = build_team_rolling_features(team_logs_df)
+    team_feat_df = build_team_rolling_features(team_logs_df, team_pbp_micro_logs=team_micro_df)
     goalie_feat_df = (
         build_goalie_rolling_features(goalie_logs_df)
         if not goalie_logs_df.is_empty()
@@ -110,9 +114,15 @@ def build_and_persist_gold_features(
         team_logs_df,
         skater_logs_df if not skater_logs_df.is_empty() else None,
         goalie_logs_df if not goalie_logs_df.is_empty() else None,
+        team_pbp_micro_logs=team_micro_df,
     )
     stage2_df = (
-        build_stage2_player_features(skater_logs_df, team_feat_df, goalie_feat_df)
+        build_stage2_player_features(
+            skater_logs_df,
+            team_feat_df,
+            goalie_feat_df,
+            skater_pbp_micro_logs=skater_micro_df,
+        )
         if not skater_logs_df.is_empty()
         else pl.DataFrame()
     )

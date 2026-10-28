@@ -26,6 +26,8 @@ SOCCER_STAGE2_OUTFIELD_FEATURE_COLS: Final[tuple[str, ...]] = (
     "availability_weight",
     "team_injury_vacated_minutes_pos",
     "rolling_npxg_per_90",
+    "rolling_open_play_npxg_per_90",
+    "rolling_set_piece_xg_share",
     "rolling_xg_per_90",
     "rolling_xa_per_90",
     "rolling_xg_chain_per_90",

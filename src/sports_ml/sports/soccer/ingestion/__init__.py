@@ -38,6 +38,12 @@ from sports_ml.sports.soccer.ingestion.non_league_fixtures import (
     resolve_fixture_venue_coords,
 )
 from sports_ml.sports.soccer.ingestion.reconciler import SoccerSilverReconciler
+from sports_ml.sports.soccer.ingestion.shot_events import (
+    SoccerShotEventsIngestor,
+    classify_shot_situation,
+    is_18_yard_box_shot,
+    parse_understat_match_shots_payload,
+)
 from sports_ml.sports.soccer.ingestion.understat import (
     UnderstatClient,
     parse_understat_player_matches_payload,
@@ -53,6 +59,7 @@ __all__ = [
     "ResolvedSoccerTeamLineup",
     "SoccerLineupStatus",
     "SoccerPreMatchLineupResolver",
+    "SoccerShotEventsIngestor",
     "SoccerSilverReconciler",
     "UnderstatClient",
     "VALID_COMPETITION_TYPES",
@@ -61,7 +68,9 @@ __all__ = [
     "check_fpl_bootstrap_and_fixtures_source",
     "check_soccer_data_sources",
     "check_understat_epl_source",
+    "classify_shot_situation",
     "derive_active_epl_season",
+    "is_18_yard_box_shot",
     "make_canonical_match_id",
     "normalize_competition_type",
     "normalize_soccer_club",
@@ -73,6 +82,7 @@ __all__ = [
     "parse_football_data_csv",
     "parse_non_league_fixtures_csv",
     "parse_non_league_fixtures_records",
+    "parse_understat_match_shots_payload",
     "parse_understat_player_matches_payload",
     "parse_understat_team_matches_payload",
     "resolve_fixture_venue_coords",

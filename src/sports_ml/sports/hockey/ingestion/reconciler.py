@@ -14,9 +14,12 @@ from sports_ml.sports.hockey.constants import (
     SILVER_GAMES_SCHEMA,
     SILVER_GOALIE_GAME_LOGS_SCHEMA,
     SILVER_SKATER_GAME_LOGS_SCHEMA,
+    SILVER_SKATER_PBP_MICRO_LOGS_SCHEMA,
     SILVER_TEAM_GAME_LOGS_SCHEMA,
+    SILVER_TEAM_PBP_MICRO_LOGS_SCHEMA,
     normalize_tricode,
 )
+from sports_ml.sports.hockey.ingestion.shifts import enrich_skater_micro_logs_with_shifts
 
 
 def _cast_to_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
@@ -51,6 +54,14 @@ class HockeySilverReconciler:
     @property
     def goalie_logs_path(self) -> Path:
         return self.silver_dir / "goalie_game_logs.parquet"
+
+    @property
+    def team_pbp_micro_logs_path(self) -> Path:
+        return self.silver_dir / "team_pbp_micro_logs.parquet"
+
+    @property
+    def skater_pbp_micro_logs_path(self) -> Path:
+        return self.silver_dir / "skater_pbp_micro_logs.parquet"
 
     @staticmethod
     def _upsert_frame(
@@ -502,4 +513,70 @@ class HockeySilverReconciler:
         )
         if persist:
             merged.write_parquet(self.goalie_logs_path, compression="zstd")
+        return merged
+
+    def reconcile_team_pbp_micro_logs(
+        self,
+        team_micro_df: pl.DataFrame,
+        *,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Normalize tricodes and upsert `team_pbp_micro_logs.parquet` on `(game_id, team)`."""
+        if team_micro_df.is_empty():
+            normalized = pl.DataFrame(schema=SILVER_TEAM_PBP_MICRO_LOGS_SCHEMA)
+        else:
+            normalized = _cast_to_schema(
+                team_micro_df, SILVER_TEAM_PBP_MICRO_LOGS_SCHEMA
+            ).with_columns(
+                pl.col("team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+                pl.col("opponent").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+            )
+        existing = (
+            pl.read_parquet(self.team_pbp_micro_logs_path)
+            if self.team_pbp_micro_logs_path.exists()
+            else None
+        )
+        merged = self._upsert_frame(
+            existing,
+            normalized,
+            unique_keys=["game_id", "team"],
+            sort_keys=["game_date", "start_time_utc", "game_id", "team"],
+            schema=SILVER_TEAM_PBP_MICRO_LOGS_SCHEMA,
+        )
+        if persist:
+            merged.write_parquet(self.team_pbp_micro_logs_path, compression="zstd")
+        return merged
+
+    def reconcile_skater_pbp_micro_logs(
+        self,
+        skater_micro_df: pl.DataFrame,
+        shifts_qoc_df: pl.DataFrame | None = None,
+        *,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Enrich skater micro logs with QoC/QoT and upsert `skater_pbp_micro_logs.parquet`."""
+        if skater_micro_df.is_empty():
+            normalized = pl.DataFrame(schema=SILVER_SKATER_PBP_MICRO_LOGS_SCHEMA)
+        else:
+            typed = _cast_to_schema(
+                skater_micro_df, SILVER_SKATER_PBP_MICRO_LOGS_SCHEMA
+            ).with_columns(
+                pl.col("team").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+                pl.col("opponent").map_elements(normalize_tricode, return_dtype=pl.Utf8),
+            )
+            normalized = enrich_skater_micro_logs_with_shifts(typed, shifts_qoc_df=shifts_qoc_df)
+        existing = (
+            pl.read_parquet(self.skater_pbp_micro_logs_path)
+            if self.skater_pbp_micro_logs_path.exists()
+            else None
+        )
+        merged = self._upsert_frame(
+            existing,
+            normalized,
+            unique_keys=["game_id", "player_id"],
+            sort_keys=["game_date", "start_time_utc", "game_id", "player_id"],
+            schema=SILVER_SKATER_PBP_MICRO_LOGS_SCHEMA,
+        )
+        if persist:
+            merged.write_parquet(self.skater_pbp_micro_logs_path, compression="zstd")
         return merged

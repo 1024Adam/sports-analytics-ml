@@ -429,3 +429,25 @@ SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA: Final[dict[str, pl.DataType]] = {
     "extra_time_played": pl.Boolean(),
     "squad_minutes_load": pl.Float64(),
 }
+
+SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "match_id": pl.Int64(),
+    "match_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "open_play_xgf": pl.Float64(),
+    "open_play_xga": pl.Float64(),
+    "set_piece_xgf": pl.Float64(),
+    "set_piece_xga": pl.Float64(),
+    "penalty_xgf": pl.Float64(),
+    "penalty_xga": pl.Float64(),
+    "total_xgf": pl.Float64(),
+    "total_xga": pl.Float64(),
+    "tied_state_npxgd_per_90": pl.Float64(),
+    "box_shot_share": pl.Float64(),
+    "six_yard_shot_share": pl.Float64(),
+    "throughball_xgf": pl.Float64(),
+}

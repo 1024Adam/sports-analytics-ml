@@ -91,6 +91,7 @@ def build_and_persist_soccer_gold_features(
     outfield_path = silver_dir / "outfield_match_logs.parquet"
     gk_path = silver_dir / "gk_match_logs.parquet"
     all_comp_path = silver_dir / "club_all_competitions_schedule.parquet"
+    shot_micro_path = silver_dir / "team_shot_micro_logs.parquet"
 
     if not matches_path.exists() or not teams_path.exists():
         raise FileNotFoundError(
@@ -103,6 +104,7 @@ def build_and_persist_soccer_gold_features(
     outfield_logs_df = pl.read_parquet(outfield_path) if outfield_path.exists() else pl.DataFrame()
     gk_logs_df = pl.read_parquet(gk_path) if gk_path.exists() else pl.DataFrame()
     all_comp_df = pl.read_parquet(all_comp_path) if all_comp_path.exists() else None
+    shot_micro_df = pl.read_parquet(shot_micro_path) if shot_micro_path.exists() else None
 
     # Load cached FPL bootstrap squad metadata if available
     squad_meta_df: pl.DataFrame | None = None
@@ -118,7 +120,9 @@ def build_and_persist_soccer_gold_features(
             squad_meta_df = None
 
     team_feat_df = build_soccer_team_rolling_features(
-        team_logs_df, all_comp_schedule_df=all_comp_df
+        team_logs_df,
+        all_comp_schedule_df=all_comp_df,
+        team_shot_micro_logs=shot_micro_df,
     )
     gk_feat_df = (
         build_goalkeeper_rolling_features(gk_logs_df)
@@ -131,6 +135,7 @@ def build_and_persist_soccer_gold_features(
         outfield_logs_df if not outfield_logs_df.is_empty() else None,
         gk_logs_df if not gk_logs_df.is_empty() else None,
         all_comp_schedule_df=all_comp_df,
+        team_shot_micro_logs=shot_micro_df,
     )
     stage2_df = (
         build_soccer_stage2_player_features(

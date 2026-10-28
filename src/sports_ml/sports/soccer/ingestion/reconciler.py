@@ -17,6 +17,7 @@ from sports_ml.sports.soccer.constants import (
     SILVER_MATCHES_SCHEMA,
     SILVER_OUTFIELD_MATCH_LOGS_SCHEMA,
     SILVER_TEAM_MATCH_LOGS_SCHEMA,
+    SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA,
     normalize_soccer_club,
 )
 from sports_ml.sports.soccer.ingestion.lineups import normalize_soccer_player_name
@@ -62,6 +63,10 @@ class SoccerSilverReconciler:
     @property
     def all_competitions_schedule_path(self) -> Path:
         return self.silver_dir / "club_all_competitions_schedule.parquet"
+
+    @property
+    def team_shot_micro_logs_path(self) -> Path:
+        return self.silver_dir / "team_shot_micro_logs.parquet"
 
     @staticmethod
     def _upsert_frame(
@@ -548,4 +553,36 @@ class SoccerSilverReconciler:
         )
         if persist:
             merged.write_parquet(self.all_competitions_schedule_path, compression="zstd")
+        return merged
+
+    def reconcile_team_shot_micro_logs(
+        self,
+        shot_micro_df: pl.DataFrame,
+        *,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Normalize club codes and upsert `team_shot_micro_logs.parquet` on `(match_id, team)`."""
+        if shot_micro_df.is_empty():
+            normalized = pl.DataFrame(schema=SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA)
+        else:
+            normalized = _cast_to_schema(
+                shot_micro_df, SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA
+            ).with_columns(
+                pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
+                pl.col("opponent").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
+            )
+        existing = (
+            pl.read_parquet(self.team_shot_micro_logs_path)
+            if self.team_shot_micro_logs_path.exists()
+            else None
+        )
+        merged = self._upsert_frame(
+            existing,
+            normalized,
+            unique_keys=["match_id", "team"],
+            sort_keys=["match_date", "start_time_utc", "match_id", "team"],
+            schema=SILVER_TEAM_SHOT_MICRO_LOGS_SCHEMA,
+        )
+        if persist:
+            merged.write_parquet(self.team_shot_micro_logs_path, compression="zstd")
         return merged

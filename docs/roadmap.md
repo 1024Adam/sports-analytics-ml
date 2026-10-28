@@ -381,7 +381,7 @@ Eliminate the EPL-only schedule blind spot by ingesting non-league competitive f
 ---
 
 ## Milestone 15: Shot-Coordinate & Shift-Level Play-by-Play Micro-Features (Score-Adjusted $xG$, Rush/Rebound Creation & TOI Quality of Competition)
-**Status**: `[ ] Planned`
+**Status**: `[x] Completed`
 
 ### Goal
 Move beyond coarse game-level boxscore aggregates by ingesting **shot-level event streams** and **shift/matchup summaries** for both NHL Hockey and EPL Soccer, compressing millions of micro-events into compact, high-signal pre-game Silver/Gold features (**Score-Adjusted $xG$**, **Rush & Rebound Shot Creation**, **Slot Shot Share**, **TOI Quality of Competition**, and **Open-Play vs. Set-Piece $xG$ Split**).
@@ -390,27 +390,27 @@ Move beyond coarse game-level boxscore aggregates by ingesting **shot-level even
 Instead of keeping 15+ GB of raw per-game JSONs uncompressed on disk, the ingestion layer streams bulk shot archives (`MoneyPuck` shot zips for NHL, `Understat` match shot arrays for EPL) and NHL shift/play-by-play summaries, aggregates them into compact **game-team** and **game-player micro-feature Silver tables** (`zstd`-compressed Parquet, adding only `~50–120 MB` total to `data/silver/`), and caches raw archives as `.csv.gz` / `.json.gz`.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/hockey/ingestion/pbp_shots.py` & `shifts.py`:
+- [x] `src/sports_ml/sports/hockey/ingestion/pbp_shots.py` & `shifts.py`:
   - Ingest MoneyPuck bulk shot-level archives (`shots_{YYYY}.csv.gz`) and NHL API play-by-play / shift-chart summaries (`/v1/gamecenter/{GAME_ID}/play-by-play`) into `data/silver/hockey/team_pbp_micro_logs.parquet` and `skater_pbp_micro_logs.parquet`:
     - **Score-Venue Adjusted 5v5 $xG$ & Fenwick (`score_adj_xgf_5v5`, `score_adj_xga_5v5`, `score_adj_ff_5v5`)**: Discounts trailing-team "score effects" (garbage-time shot volume when down by $2+$ goals) and boosts shots generated while tied or leading.
     - **Rush & Rebound $xG$ Generation (`rush_xgf_5v5`, `rebound_xgf_5v5`, `rebound_xga_5v5`)**: Separates transition offense and net-front second-chance creation from perimeter point shots, and measures goalie rebound control (`rebound_xga_per_60`).
     - **Shot Distance, Angle & Slot Share (`avg_shot_distance_5v5`, `inner_slot_xg_share`)**: Spatial shot-profile quality derived from $(x, y)$ ice coordinates.
     - **Skater TOI Quality of Competition (`qoc_opponent_toi_share`) & Quality of Teammates (`qot_teammate_ixg_per_60`)**: Measures whether a forward line or defense pair plays heavy shutdown minutes against the opponent's top-6 forwards or sheltered 3rd-pair matchups.
-- [ ] `src/sports_ml/sports/soccer/ingestion/shot_events.py`:
+- [x] `src/sports_ml/sports/soccer/ingestion/shot_events.py`:
   - Extract shot-level event records (`situation` $\in \{\text{"OpenPlay"}, \text{"FromCorner"}, \text{"SetPiece"}, \text{"DirectFreekick"}, \text{"Penalty"}\}$, `shotType`, $(X, Y)$ pitch coordinates, `lastAction` $\in \{\text{"Throughball"}, \text{"Cross"}, \text{"Rebound"}, \text{"Standard"}\}$, and minute/score-state at shot timestamp) from Understat match payloads into `data/silver/soccer/team_shot_micro_logs.parquet`:
     - **Open-Play vs. Set-Piece $xG$ Split (`open_play_xgf`, `open_play_xga`, `set_piece_xgf`, `set_piece_xga`)**: Isolates repeatable open-play chance creation from set-piece specialists and corners/free-kicks matchup edges.
     - **Game-State Neutral / Tied $npxG$ Rate (`tied_state_npxgd_per_90`)**: Filters out late-game desperation shots when a team trails by $2+$ goals vs. a low block.
     - **Box-Entry & Throughball Danger (`box_shot_share`, `throughball_xgf`)**: Spatial shot quality inside the 18-yard box and 6-yard zone.
-- [ ] `src/sports_ml/sports/hockey/features/` & `src/sports_ml/sports/soccer/features/`:
+- [x] `src/sports_ml/sports/hockey/features/` & `src/sports_ml/sports/soccer/features/`:
   - Wire rolling left-closed (`.shift(1)`) micro-features into Stage 1 team matchup differentials (e.g., `diff_score_adj_xgf_pct_5v5`, `diff_rush_rebound_xg_rate`, `diff_set_piece_xg_edge`, `diff_open_play_npxgd_90`) and Stage 2 player projections (skater `rolling_rush_rebound_ixg_per_60`, `rolling_qoc_index`; outfield `rolling_open_play_npxg_per_90`, `rolling_set_piece_xg_share`).
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/hockey/test_pbp_micro_features.py` & `tests/sports/soccer/test_shot_micro_features.py`:
+- [x] `tests/sports/hockey/test_pbp_micro_features.py` & `tests/sports/soccer/test_shot_micro_features.py`:
   - **Score-Adjustment Invariant Test**: Verify that a 5v5 shot taken while leading by `+2` receives a higher score-adjusted weight than an identical shot taken while trailing by `-2`, and that game-total `score_adj_xgf_5v5` remains strictly non-negative.
   - **Open-Play + Set-Piece Conservation Test**: Verify `open_play_xgf + set_piece_xgf + penalty_xgf == total_xgf` (within `1e-6`) for every match.
   - **Strict Temporal Anti-Leakage Test**: Verify mutating shot coordinates, score states, or shift overlaps at event $\ge t$ leaves all pre-game micro-features at $< t$ bit-for-bit unchanged.
-- [ ] Run `sports-ml backtest --sport hockey` and `sports-ml backtest --sport soccer` against the Milestone 13 closing-line benchmark to verify out-of-sample Log Loss / Brier / RPS improvement.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] Run `sports-ml backtest --sport hockey` and `sports-ml backtest --sport soccer` against the Milestone 13 closing-line benchmark to verify out-of-sample Log Loss / Brier / RPS improvement.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 
 

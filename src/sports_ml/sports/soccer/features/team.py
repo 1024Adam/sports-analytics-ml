@@ -69,6 +69,12 @@ PRIOR_SOT_AGAINST_PER_90: Final[float] = 4.5
 PRIOR_SOT_PCT: Final[float] = 0.34
 PRIOR_PPDA: Final[float] = 11.5
 PRIOR_DEEP_PER_90: Final[float] = 6.5
+PRIOR_OPEN_PLAY_XGF_PER_90: Final[float] = 1.00
+PRIOR_OPEN_PLAY_XGA_PER_90: Final[float] = 1.00
+PRIOR_SET_PIECE_XGF_PER_90: Final[float] = 0.35
+PRIOR_SET_PIECE_XGA_PER_90: Final[float] = 0.35
+PRIOR_BOX_SHOT_SHARE: Final[float] = 0.62
+PRIOR_THROUGHBALL_XGF_PER_90: Final[float] = 0.14
 
 
 def _ensure_soccer_team_log_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -382,6 +388,7 @@ def build_soccer_team_rolling_features(
     team_match_logs: pl.DataFrame,
     *,
     all_comp_schedule_df: pl.DataFrame | None = None,
+    team_shot_micro_logs: pl.DataFrame | None = None,
     windows: Sequence[int] = DEFAULT_SOCCER_TEAM_WINDOWS,
     ewma_alpha: float = DEFAULT_SOCCER_EWMA_ALPHA,
     shrinkage_k: float = SOCCER_TEAM_SHRINKAGE_K,
@@ -419,6 +426,63 @@ def build_soccer_team_rolling_features(
         pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
         pl.col("opponent").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
     )
+    event_col = "match_id" if "match_id" in prepared.columns else "event_id"
+
+    if team_shot_micro_logs is not None and not team_shot_micro_logs.is_empty():
+        sm_ev_col = "match_id" if "match_id" in team_shot_micro_logs.columns else "event_id"
+        sm_cols = [
+            "open_play_xgf",
+            "open_play_xga",
+            "set_piece_xgf",
+            "set_piece_xga",
+            "tied_state_npxgd_per_90",
+            "box_shot_share",
+            "throughball_xgf",
+        ]
+        avail_sm = [c for c in sm_cols if c in team_shot_micro_logs.columns]
+        sm_lookup = (
+            team_shot_micro_logs.with_columns(
+                pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8)
+            )
+            .select(
+                [
+                    pl.col(sm_ev_col).cast(pl.Int64).alias(event_col),
+                    pl.col("team"),
+                    *[pl.col(c).cast(pl.Float64).alias(f"_sm_{c}") for c in avail_sm],
+                ]
+            )
+            .unique(subset=[event_col, "team"], keep="last")
+        )
+        prepared = prepared.join(sm_lookup, on=[event_col, "team"], how="left")
+        for c in avail_sm:
+            if c in prepared.columns:
+                prepared = prepared.with_columns(
+                    pl.coalesce([pl.col(f"_sm_{c}"), pl.col(c).cast(pl.Float64)]).alias(c)
+                )
+            else:
+                prepared = prepared.with_columns(pl.col(f"_sm_{c}").alias(c))
+        prepared = prepared.drop([f"_sm_{c}" for c in avail_sm])
+
+    shot_micro_defaults: list[tuple[str, pl.Expr]] = [
+        ("open_play_xgf", 0.74 * pl.col("npxgf").cast(pl.Float64)),
+        ("open_play_xga", 0.74 * pl.col("npxga").cast(pl.Float64)),
+        ("set_piece_xgf", 0.26 * pl.col("npxgf").cast(pl.Float64)),
+        ("set_piece_xga", 0.26 * pl.col("npxga").cast(pl.Float64)),
+        (
+            "tied_state_npxgd_per_90",
+            pl.col("npxgf").cast(pl.Float64) - pl.col("npxga").cast(pl.Float64),
+        ),
+        ("box_shot_share", pl.lit(PRIOR_BOX_SHOT_SHARE, dtype=pl.Float64)),
+        ("throughball_xgf", 0.10 * pl.col("npxgf").cast(pl.Float64)),
+    ]
+    for col_name, fallback_expr in shot_micro_defaults:
+        if col_name in prepared.columns:
+            prepared = prepared.with_columns(
+                pl.col(col_name).cast(pl.Float64).fill_null(fallback_expr).alias(col_name)
+            )
+        else:
+            prepared = prepared.with_columns(fallback_expr.alias(col_name))
+
     sorted_df = sort_events_chronologically(prepared, extra_tiebreakers=["team"])
     annotated = _annotate_promoted_and_matches_14d(sorted_df)
     with_sched = compute_schedule_features(annotated, entity_col="team", date_col="game_date")
@@ -486,15 +550,40 @@ def build_soccer_team_rolling_features(
         )
         r_finishing = pregame_rolling_mean("_match_finishing_above_xg", window=w, group_by="team")
         r_ga_luck = pregame_rolling_mean("_match_ga_above_xga", window=w, group_by="team")
+        r_op_xgf = pregame_rolling_mean("open_play_xgf", window=w, group_by="team")
+        r_op_xga = pregame_rolling_mean("open_play_xga", window=w, group_by="team")
+        r_sp_xgf = pregame_rolling_mean("set_piece_xgf", window=w, group_by="team")
+        r_sp_xga = pregame_rolling_mean("set_piece_xga", window=w, group_by="team")
+        r_tied_npxgd = pregame_rolling_mean("tied_state_npxgd_per_90", window=w, group_by="team")
+        r_box_share = pregame_rolling_mean("box_shot_share", window=w, group_by="team")
+        r_tb_xgf = pregame_rolling_mean("throughball_xgf", window=w, group_by="team")
 
         shrunk_npxgf = bayesian_shrinkage(r_npxgf, n_w, pl.col("_p_npxgf"), shrinkage_k)
         shrunk_npxga = bayesian_shrinkage(r_npxga, n_w, pl.col("_p_npxga"), shrinkage_k)
+        shrunk_op_xgf = bayesian_shrinkage(r_op_xgf, n_w, PRIOR_OPEN_PLAY_XGF_PER_90, shrinkage_k)
+        shrunk_op_xga = bayesian_shrinkage(r_op_xga, n_w, PRIOR_OPEN_PLAY_XGA_PER_90, shrinkage_k)
+        shrunk_sp_xgf = bayesian_shrinkage(r_sp_xgf, n_w, PRIOR_SET_PIECE_XGF_PER_90, shrinkage_k)
+        shrunk_sp_xga = bayesian_shrinkage(r_sp_xga, n_w, PRIOR_SET_PIECE_XGA_PER_90, shrinkage_k)
 
         exprs.extend(
             [
                 shrunk_npxgf.alias(f"npxgf_per_90_w{w}"),
                 shrunk_npxga.alias(f"npxga_per_90_w{w}"),
                 (shrunk_npxgf - shrunk_npxga).alias(f"npxgd_per_90_w{w}"),
+                shrunk_op_xgf.alias(f"open_play_xgf_per_90_w{w}"),
+                shrunk_op_xga.alias(f"open_play_xga_per_90_w{w}"),
+                (shrunk_op_xgf - shrunk_op_xga).alias(f"open_play_npxgd_per_90_w{w}"),
+                shrunk_sp_xgf.alias(f"set_piece_xgf_per_90_w{w}"),
+                shrunk_sp_xga.alias(f"set_piece_xga_per_90_w{w}"),
+                bayesian_shrinkage(r_tied_npxgd, n_w, 0.0, shrinkage_k).alias(
+                    f"tied_state_npxgd_per_90_w{w}"
+                ),
+                bayesian_shrinkage(r_box_share, n_w, PRIOR_BOX_SHOT_SHARE, shrinkage_k).alias(
+                    f"box_shot_share_w{w}"
+                ),
+                bayesian_shrinkage(r_tb_xgf, n_w, PRIOR_THROUGHBALL_XGF_PER_90, shrinkage_k).alias(
+                    f"throughball_xgf_per_90_w{w}"
+                ),
                 bayesian_shrinkage(r_npxgf_pct, n_w, pl.col("_p_share"), shrinkage_k).alias(
                     f"npxgf_pct_w{w}"
                 ),
@@ -571,6 +660,13 @@ def build_soccer_team_rolling_features(
             "_p_xgf",
             "_p_xga",
             "_p_share",
+            "open_play_xgf",
+            "open_play_xga",
+            "set_piece_xgf",
+            "set_piece_xga",
+            "tied_state_npxgd_per_90",
+            "box_shot_share",
+            "throughball_xgf",
         ]
     )
 
@@ -622,16 +718,13 @@ def build_soccer_stage1_match_features(
     gk_match_logs: pl.DataFrame | None = None,
     *,
     all_comp_schedule_df: pl.DataFrame | None = None,
+    team_shot_micro_logs: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Assemble the complete Stage 1 pre-match EPL feature matrix (`Home`, `Away`, and `Diff`).
 
     Combines 3-way (`1X2`) Elo with promotion/relegation priors, team rolling `npxG`/`xG`/`PPDA`/
-    deep completions/finishing regression, cross-competition schedule congestion/UEFA travel,
-    starting GK `GSAA/90`, and minutes-weighted squad strength across `FWD`, `MID`, and `DEF`.
-
-    Tactical Isolation Guarantee:
-    EPL Elo and rolling `npxG`/`PPDA` features filter exclusively on `competition_type == "EPL"`,
-    while `all_comp_schedule_df` updates cross-competition rest, UEFA travel, and squad fatigue.
+    deep completions/finishing regression, open-play vs. set-piece xG splits, cross-competition
+    schedule congestion/UEFA travel, starting GK `GSAA/90`, and minutes-weighted squad strength.
     """
     from sports_ml.sports.soccer.features.goalkeeper import (
         PRIOR_GK_CLEAN_SHEET_RATE,
@@ -681,7 +774,9 @@ def build_soccer_stage1_match_features(
 
     team_feat = _compute_postmatch_team_features(
         build_soccer_team_rolling_features(
-            team_match_logs, all_comp_schedule_df=all_comp_schedule_df
+            team_match_logs,
+            all_comp_schedule_df=all_comp_schedule_df,
+            team_shot_micro_logs=team_shot_micro_logs,
         )
     )
     t_ev_col = "match_id" if "match_id" in team_feat.columns else "event_id"
@@ -690,6 +785,14 @@ def build_soccer_stage1_match_features(
         "npxgf_per_90_w10",
         "npxga_per_90_w10",
         "npxgd_per_90_w10",
+        "open_play_xgf_per_90_w10",
+        "open_play_xga_per_90_w10",
+        "open_play_npxgd_per_90_w10",
+        "set_piece_xgf_per_90_w10",
+        "set_piece_xga_per_90_w10",
+        "tied_state_npxgd_per_90_w10",
+        "box_shot_share_w10",
+        "throughball_xgf_per_90_w10",
         "npxgf_pct_w10",
         "npxgf_pct_ewma",
         "npxgd_per_90_ewma",
@@ -802,6 +905,14 @@ def build_soccer_stage1_match_features(
         ("npxgf_per_90_w10", PRIOR_NPXGF_PER_90),
         ("npxga_per_90_w10", PRIOR_NPXGA_PER_90),
         ("npxgd_per_90_w10", 0.0),
+        ("open_play_xgf_per_90_w10", PRIOR_OPEN_PLAY_XGF_PER_90),
+        ("open_play_xga_per_90_w10", PRIOR_OPEN_PLAY_XGA_PER_90),
+        ("open_play_npxgd_per_90_w10", 0.0),
+        ("set_piece_xgf_per_90_w10", PRIOR_SET_PIECE_XGF_PER_90),
+        ("set_piece_xga_per_90_w10", PRIOR_SET_PIECE_XGA_PER_90),
+        ("tied_state_npxgd_per_90_w10", 0.0),
+        ("box_shot_share_w10", PRIOR_BOX_SHOT_SHARE),
+        ("throughball_xgf_per_90_w10", PRIOR_THROUGHBALL_XGF_PER_90),
         ("npxgf_pct_w10", PRIOR_SHARE_50),
         ("npxgf_pct_ewma", PRIOR_SHARE_50),
         ("npxgd_per_90_ewma", 0.0),
@@ -1033,6 +1144,13 @@ def build_soccer_stage1_match_features(
         (pl.col("npxgd_per_90_w10_home") - pl.col("npxgd_per_90_w10_away")).alias(
             "npxgd_per_90_w10_diff"
         ),
+        (
+            pl.col("open_play_npxgd_per_90_w10_home") - pl.col("open_play_npxgd_per_90_w10_away")
+        ).alias("diff_open_play_npxgd_90"),
+        (
+            (pl.col("set_piece_xgf_per_90_w10_home") - pl.col("set_piece_xga_per_90_w10_away"))
+            - (pl.col("set_piece_xgf_per_90_w10_away") - pl.col("set_piece_xga_per_90_w10_home"))
+        ).alias("diff_set_piece_xg_edge"),
         (pl.col("npxgf_pct_w10_home") - pl.col("npxgf_pct_w10_away")).alias("npxgf_pct_w10_diff"),
         (pl.col("ppda_w10_away") - pl.col("ppda_w10_home")).alias("pressing_intensity_diff"),
         (

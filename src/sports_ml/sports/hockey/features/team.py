@@ -37,6 +37,10 @@ PRIOR_PK_XGA_PER_60: Final[float] = 7.50
 PRIOR_PP_PCT: Final[float] = 0.205
 PRIOR_PK_PCT: Final[float] = 0.795
 PRIOR_DRAW_RATE: Final[float] = 3.0
+PRIOR_RUSH_REBOUND_XG_PER_60: Final[float] = 0.65
+PRIOR_REBOUND_XGA_PER_60: Final[float] = 0.35
+PRIOR_AVG_SHOT_DISTANCE: Final[float] = 34.0
+PRIOR_INNER_SLOT_SHARE: Final[float] = 0.42
 
 
 def _ensure_team_log_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -82,12 +86,66 @@ def _pregame_share_expr(
 def build_team_rolling_features(
     team_game_logs: pl.DataFrame,
     *,
+    team_pbp_micro_logs: pl.DataFrame | None = None,
     windows: Sequence[int] = DEFAULT_TEAM_WINDOWS,
     ewma_alpha: float = DEFAULT_EWMA_ALPHA,
     shrinkage_k: float = TEAM_SHRINKAGE_K,
 ) -> pl.DataFrame:
-    """Compute leak-free pre-game team process and special-teams rolling features."""
+    """Compute leak-free pre-game team process, special-teams, and PBP micro rolling features."""
     prepared = _ensure_team_log_columns(team_game_logs)
+    event_col = "game_id" if "game_id" in prepared.columns else "event_id"
+
+    if team_pbp_micro_logs is not None and not team_pbp_micro_logs.is_empty():
+        m_ev_col = "game_id" if "game_id" in team_pbp_micro_logs.columns else "event_id"
+        m_cols = [
+            "score_adj_xgf_5v5",
+            "score_adj_xga_5v5",
+            "score_adj_ff_5v5",
+            "score_adj_fa_5v5",
+            "rush_xgf_5v5",
+            "rebound_xgf_5v5",
+            "rebound_xga_5v5",
+            "avg_shot_distance_5v5",
+            "inner_slot_xg_share",
+        ]
+        avail_m = [c for c in m_cols if c in team_pbp_micro_logs.columns]
+        m_lookup = team_pbp_micro_logs.select(
+            [
+                pl.col(m_ev_col).cast(pl.Int64).alias(event_col),
+                pl.col("team"),
+                *[pl.col(c).cast(pl.Float64).alias(f"_pbp_{c}") for c in avail_m],
+            ]
+        ).unique(subset=[event_col, "team"], keep="last")
+        prepared = prepared.join(m_lookup, on=[event_col, "team"], how="left")
+        for c in avail_m:
+            if c in prepared.columns:
+                prepared = prepared.with_columns(
+                    pl.coalesce([pl.col(f"_pbp_{c}"), pl.col(c).cast(pl.Float64)]).alias(c)
+                )
+            else:
+                prepared = prepared.with_columns(pl.col(f"_pbp_{c}").alias(c))
+        prepared = prepared.drop([f"_pbp_{c}" for c in avail_m])
+
+    # Populate micro defaults from 5v5 xG/FF when explicit PBP micro logs are absent
+    micro_defaults: list[tuple[str, pl.Expr]] = [
+        ("score_adj_xgf_5v5", pl.col("xgf_5v5").cast(pl.Float64)),
+        ("score_adj_xga_5v5", pl.col("xga_5v5").cast(pl.Float64)),
+        ("score_adj_ff_5v5", pl.col("ff_5v5").cast(pl.Float64)),
+        ("score_adj_fa_5v5", pl.col("fa_5v5").cast(pl.Float64)),
+        ("rush_xgf_5v5", (0.14 * pl.col("xgf_5v5").cast(pl.Float64))),
+        ("rebound_xgf_5v5", (0.14 * pl.col("xgf_5v5").cast(pl.Float64))),
+        ("rebound_xga_5v5", (0.14 * pl.col("xga_5v5").cast(pl.Float64))),
+        ("avg_shot_distance_5v5", pl.lit(PRIOR_AVG_SHOT_DISTANCE, dtype=pl.Float64)),
+        ("inner_slot_xg_share", pl.lit(PRIOR_INNER_SLOT_SHARE, dtype=pl.Float64)),
+    ]
+    for col_name, fallback_expr in micro_defaults:
+        if col_name in prepared.columns:
+            prepared = prepared.with_columns(
+                pl.col(col_name).cast(pl.Float64).fill_null(fallback_expr).alias(col_name)
+            )
+        else:
+            prepared = prepared.with_columns(fallback_expr.alias(col_name))
+
     sorted_df = sort_events_chronologically(prepared, extra_tiebreakers=["team"])
 
     # Compute per-game derived series strictly before shifting inside core/temporal helpers
@@ -101,6 +159,9 @@ def build_team_rolling_features(
             .then(pl.col("xgf_5v5") + pl.col("xga_5v5"))
             .otherwise(0.50)
         ).alias("_game_xgf_share_5v5"),
+        (
+            pl.col("rush_xgf_5v5").cast(pl.Float64) + pl.col("rebound_xgf_5v5").cast(pl.Float64)
+        ).alias("_game_rush_rebound_xgf_5v5"),
         pregame_sample_count("xgf_5v5", group_by="team").alias("team_prior_games_n"),
     )
 
@@ -154,6 +215,28 @@ def build_team_rolling_features(
         raw_penalties_taken = pregame_rolling_mean(
             "pk_times_shorthanded", window=w, group_by="team"
         )
+        raw_score_adj_xgf_pct = _pregame_share_expr(
+            "score_adj_xgf_5v5", "score_adj_xga_5v5", window=w, group_by="team"
+        )
+        raw_score_adj_ff_pct = _pregame_share_expr(
+            "score_adj_ff_5v5", "score_adj_fa_5v5", window=w, group_by="team"
+        )
+        raw_rush_reb_60 = pregame_exposure_rate(
+            "_game_rush_rebound_xgf_5v5",
+            "toi_5v5_minutes",
+            window=w,
+            group_by="team",
+            scale_factor=60.0,
+        )
+        raw_reb_xga_60 = pregame_exposure_rate(
+            "rebound_xga_5v5",
+            "toi_5v5_minutes",
+            window=w,
+            group_by="team",
+            scale_factor=60.0,
+        )
+        raw_avg_dist = pregame_rolling_mean("avg_shot_distance_5v5", window=w, group_by="team")
+        raw_slot_share = pregame_rolling_mean("inner_slot_xg_share", window=w, group_by="team")
 
         n_w_expr = pregame_sample_count("xgf_5v5", group_by="team", window=w)
 
@@ -163,6 +246,24 @@ def build_team_rolling_features(
                 bayesian_shrinkage(raw_xgf_pct, n_w_expr, PRIOR_SHARE_50, shrinkage_k).alias(
                     f"xgf_pct_5v5_w{w}"
                 ),
+                bayesian_shrinkage(
+                    raw_score_adj_xgf_pct, n_w_expr, PRIOR_SHARE_50, shrinkage_k
+                ).alias(f"score_adj_xgf_pct_5v5_w{w}"),
+                bayesian_shrinkage(
+                    raw_score_adj_ff_pct, n_w_expr, PRIOR_SHARE_50, shrinkage_k
+                ).alias(f"score_adj_ff_pct_5v5_w{w}"),
+                bayesian_shrinkage(
+                    raw_rush_reb_60, n_w_expr, PRIOR_RUSH_REBOUND_XG_PER_60, shrinkage_k
+                ).alias(f"rush_rebound_xg_per_60_w{w}"),
+                bayesian_shrinkage(
+                    raw_reb_xga_60, n_w_expr, PRIOR_REBOUND_XGA_PER_60, shrinkage_k
+                ).alias(f"rebound_xga_per_60_w{w}"),
+                bayesian_shrinkage(
+                    raw_avg_dist, n_w_expr, PRIOR_AVG_SHOT_DISTANCE, shrinkage_k
+                ).alias(f"avg_shot_distance_5v5_w{w}"),
+                bayesian_shrinkage(
+                    raw_slot_share, n_w_expr, PRIOR_INNER_SLOT_SHARE, shrinkage_k
+                ).alias(f"inner_slot_xg_share_w{w}"),
                 bayesian_shrinkage(raw_xgf_60, n_w_expr, PRIOR_XGF_PER_60, shrinkage_k).alias(
                     f"xgf_per_60_5v5_w{w}"
                 ),
@@ -253,6 +354,16 @@ def build_team_rolling_features(
     drop_temp = [
         "_game_finishing_above_xg",
         "_game_xgf_share_5v5",
+        "_game_rush_rebound_xgf_5v5",
+        "score_adj_xgf_5v5",
+        "score_adj_xga_5v5",
+        "score_adj_ff_5v5",
+        "score_adj_fa_5v5",
+        "rush_xgf_5v5",
+        "rebound_xgf_5v5",
+        "rebound_xga_5v5",
+        "avg_shot_distance_5v5",
+        "inner_slot_xg_share",
         *[f"_n_w{w}" for w in windows],
     ]
     return result.drop([c for c in drop_temp if c in result.columns])
@@ -355,13 +466,14 @@ def build_stage1_game_features(
     team_game_logs: pl.DataFrame,
     skater_game_logs: pl.DataFrame | None = None,
     goalie_game_logs: pl.DataFrame | None = None,
+    *,
+    team_pbp_micro_logs: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Assemble the complete Stage 1 pre-game matchup feature matrix (`Home`, `Away`, and `Diff`).
 
     Combines Dynamic Elo, schedule/rest/travel, team 5v5 process/PDO/Special Teams Net Edge,
-    starting goalie shrunk GSAx/60, and TOI-weighted active roster strength.
-    For upcoming (`FUT`) games without boxscore rows in `team_game_logs`, inherits each
-    team's strictly prior completed state via backward `join_asof`.
+    score-venue adjusted 5v5 xGF%, rush/rebound xG creation, starting goalie shrunk GSAx/60,
+    and TOI-weighted active roster strength.
     """
     from sports_ml.core.ratings import PairwiseEloEngine
     from sports_ml.core.schedule import compute_schedule_features
@@ -382,12 +494,18 @@ def build_stage1_game_features(
     event_col = "game_id" if "game_id" in games_df.columns else "event_id"
     elo_df = PairwiseEloEngine().compute_ratings(games_df)
 
-    team_feat = build_team_rolling_features(team_game_logs)
+    team_feat = build_team_rolling_features(team_game_logs, team_pbp_micro_logs=team_pbp_micro_logs)
     team_with_sched = _compute_postgame_team_features(compute_schedule_features(team_feat))
     t_ev_col = "game_id" if "game_id" in team_with_sched.columns else "event_id"
 
     core_team_cols = [
         "xgf_pct_5v5_w10",
+        "score_adj_xgf_pct_5v5_w10",
+        "score_adj_ff_pct_5v5_w10",
+        "rush_rebound_xg_per_60_w10",
+        "rebound_xga_per_60_w10",
+        "avg_shot_distance_5v5_w10",
+        "inner_slot_xg_share_w10",
         "xgf_pct_5v5_ewma",
         "xgf_per_60_5v5_w10",
         "xga_per_60_5v5_w10",
@@ -712,6 +830,16 @@ def build_stage1_game_features(
             pl.lit(0.0).alias("missing_regular_toi_away"),
         )
 
+    for side in ("home", "away"):
+        matchup = matchup.with_columns(
+            pl.col(f"score_adj_xgf_pct_5v5_w10_{side}").fill_null(PRIOR_SHARE_50),
+            pl.col(f"score_adj_ff_pct_5v5_w10_{side}").fill_null(PRIOR_SHARE_50),
+            pl.col(f"rush_rebound_xg_per_60_w10_{side}").fill_null(PRIOR_RUSH_REBOUND_XG_PER_60),
+            pl.col(f"rebound_xga_per_60_w10_{side}").fill_null(PRIOR_REBOUND_XGA_PER_60),
+            pl.col(f"avg_shot_distance_5v5_w10_{side}").fill_null(PRIOR_AVG_SHOT_DISTANCE),
+            pl.col(f"inner_slot_xg_share_w10_{side}").fill_null(PRIOR_INNER_SLOT_SHARE),
+        )
+
     return matchup.with_columns(
         compute_special_teams_net_edge(
             "pp_xgf_per_60_home",
@@ -725,6 +853,12 @@ def build_stage1_game_features(
         (pl.col("xgf_pct_5v5_w10_home") - pl.col("xgf_pct_5v5_w10_away")).alias(
             "xgf_pct_5v5_w10_diff"
         ),
+        (pl.col("score_adj_xgf_pct_5v5_w10_home") - pl.col("score_adj_xgf_pct_5v5_w10_away")).alias(
+            "diff_score_adj_xgf_pct_5v5"
+        ),
+        (
+            pl.col("rush_rebound_xg_per_60_w10_home") - pl.col("rush_rebound_xg_per_60_w10_away")
+        ).alias("diff_rush_rebound_xg_rate"),
         (pl.col("cf_pct_5v5_w10_home") - pl.col("cf_pct_5v5_w10_away")).alias(
             "cf_pct_5v5_w10_diff"
         ),
