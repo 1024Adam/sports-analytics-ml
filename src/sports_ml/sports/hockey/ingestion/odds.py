@@ -465,6 +465,23 @@ class NHLOddsIngestor:
                 return pl.DataFrame(schema=NHL_ODDS_SCHEMA)
             return pl.DataFrame(valid_rows, schema=NHL_ODDS_SCHEMA).sort(["game_date", "home_team"])
 
+    def fetch_espn_date_odds(
+        self,
+        target_date: date,
+        *,
+        offline: bool = False,
+    ) -> pl.DataFrame:
+        """Fetch real-time/historical ESPN NHL moneylines for `target_date` (and adjacent day)."""
+        if offline or self.transport is not None:
+            return pl.DataFrame(schema=NHL_ODDS_SCHEMA)
+        date_token = target_date.strftime("%Y%m%d")
+        try:
+            return asyncio.run(
+                self._backfill_espn_historical_odds_async(months=[date_token], max_concurrency=16)
+            )
+        except Exception:
+            return pl.DataFrame(schema=NHL_ODDS_SCHEMA)
+
     def fetch_espn_historical_odds(
         self,
         months: Sequence[str] = DEFAULT_ESPN_BACKFILL_MONTHS,

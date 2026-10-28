@@ -1217,20 +1217,26 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
     game_table.add_column("Date", style="cyan", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
-    game_table.add_column("P(Away Win)", justify="right", style="yellow")
-    game_table.add_column("P(Home Win)", justify="right", style="green")
-    game_table.add_column("E[Away Goals]", justify="right")
-    game_table.add_column("E[Home Goals]", justify="right")
+    game_table.add_column("P(Away)", justify="right", style="yellow")
+    game_table.add_column("P(Home)", justify="right", style="green")
+    game_table.add_column("Mkt A/H (Edge)", justify="right")
+    game_table.add_column("E[G] A/H", justify="right")
     game_table.add_column("Goalie Status")
 
     for pred in predictions:
+        if pred.market_prob_away is not None and pred.market_prob_home is not None:
+            edge_val = pred.home_win_prob - pred.market_prob_home
+            mkt_str = f"{pred.market_prob_away:.0%}/{pred.market_prob_home:.0%} (H {edge_val:+.1%})"
+        else:
+            mkt_str = "—"
+
         game_table.add_row(
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             f"{pred.away_win_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
-            f"{pred.expected_away_goals:.2f}",
-            f"{pred.expected_home_goals:.2f}",
+            mkt_str,
+            f"{pred.expected_away_goals:.2f}/{pred.expected_home_goals:.2f}",
             f"A:{pred.away_goalie_status} / H:{pred.home_goalie_status}",
         )
     console.print(game_table)
@@ -1317,23 +1323,41 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
     """Render EPL Stage 1 `1X2` and optional Stage 2 projections as Rich terminal tables."""
     match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
     match_table.add_column("Date", style="cyan", no_wrap=True)
-    match_table.add_column("Matchup (Away @ Home)", style="bold", no_wrap=True)
-    match_table.add_column("P(Away Win)", justify="right", style="yellow")
+    match_table.add_column("Matchup", style="bold", no_wrap=True)
+    match_table.add_column("P(Away)", justify="right", style="yellow")
     match_table.add_column("P(Draw)", justify="right", style="magenta")
-    match_table.add_column("P(Home Win)", justify="right", style="green")
-    match_table.add_column("E[Away Goals]", justify="right")
-    match_table.add_column("E[Home Goals]", justify="right")
+    match_table.add_column("P(Home)", justify="right", style="green")
+    match_table.add_column("Mkt 1X2 (Edge)", justify="right")
+    match_table.add_column("E[G] A/H", justify="right")
     match_table.add_column("Lineup Status")
 
     for pred in predictions:
+        if (
+            pred.market_prob_away is not None
+            and pred.market_prob_draw is not None
+            and pred.market_prob_home is not None
+        ):
+            edges = (
+                ("A", pred.away_win_prob - pred.market_prob_away),
+                ("D", pred.draw_prob - pred.market_prob_draw),
+                ("H", pred.home_win_prob - pred.market_prob_home),
+            )
+            best_side, best_edge = max(edges, key=lambda x: x[1])
+            mkt_1x2_str = (
+                f"{pred.market_prob_away:.0%}/{pred.market_prob_draw:.0%}/"
+                f"{pred.market_prob_home:.0%} ({best_side}{best_edge:+.0%})"
+            )
+        else:
+            mkt_1x2_str = "—"
+
         match_table.add_row(
             pred.match_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             f"{pred.away_win_prob:.1%}",
             f"{pred.draw_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
-            f"{pred.expected_away_goals:.2f}",
-            f"{pred.expected_home_goals:.2f}",
+            mkt_1x2_str,
+            f"{pred.expected_away_goals:.2f}/{pred.expected_home_goals:.2f}",
             f"A:{pred.away_lineup_status} / H:{pred.home_lineup_status}",
         )
     console.print(match_table)

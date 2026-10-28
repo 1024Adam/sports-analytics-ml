@@ -37,6 +37,11 @@ from sports_ml.sports.soccer.ingestion.non_league_fixtures import (
     parse_non_league_fixtures_records,
     resolve_fixture_venue_coords,
 )
+from sports_ml.sports.soccer.ingestion.odds import (
+    SOCCER_ODDS_SCHEMA,
+    fetch_espn_epl_date_odds,
+    parse_espn_epl_1x2_odds_items,
+)
 from sports_ml.sports.soccer.ingestion.reconciler import SoccerSilverReconciler
 from sports_ml.sports.soccer.ingestion.shot_events import (
     SoccerShotEventsIngestor,
@@ -57,6 +62,7 @@ __all__ = [
     "FootballDataClient",
     "NonLeagueFixturesIngestor",
     "ResolvedSoccerTeamLineup",
+    "SOCCER_ODDS_SCHEMA",
     "SoccerLineupStatus",
     "SoccerPreMatchLineupResolver",
     "SoccerShotEventsIngestor",
@@ -70,6 +76,7 @@ __all__ = [
     "check_understat_epl_source",
     "classify_shot_situation",
     "derive_active_epl_season",
+    "fetch_espn_epl_date_odds",
     "is_18_yard_box_shot",
     "make_canonical_match_id",
     "normalize_competition_type",
@@ -78,6 +85,7 @@ __all__ = [
     "parse_bootstrap_squad_df",
     "parse_bootstrap_teams_map",
     "parse_element_summary_payload",
+    "parse_espn_epl_1x2_odds_items",
     "parse_fixtures_payload",
     "parse_football_data_csv",
     "parse_non_league_fixtures_csv",

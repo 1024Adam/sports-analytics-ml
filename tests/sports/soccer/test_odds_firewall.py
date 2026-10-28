@@ -20,6 +20,7 @@ from sports_ml.sports.soccer.features.pipeline import (
 )
 from sports_ml.sports.soccer.ingestion.football_data import parse_football_data_csv
 from sports_ml.sports.soccer.ingestion.fpl_api import parse_fixtures_payload
+from sports_ml.sports.soccer.ingestion.odds import parse_espn_epl_1x2_odds_items
 from sports_ml.sports.soccer.ingestion.reconciler import SoccerSilverReconciler
 from sports_ml.sports.soccer.models.stage1_match import (
     Stage1SoccerMatchModel,
@@ -219,3 +220,24 @@ def test_football_data_csv_closing_odds_waterfall_and_reconciler(tmp_path: Path)
     ars_row = merged.filter(pl.col("home_team") == "ARS").row(0, named=True)
     assert ars_row["market_home_decimal_odds"] == pytest.approx(1.22)
     assert ars_row["market_prob_home"] > 0.75
+
+    # Verify ESPN EPL 1X2 odds parser
+    espn_epl_items = [
+        {
+            "provider": {"name": "DraftKings"},
+            "homeTeamOdds": {"moneyLine": -125},
+            "drawOdds": {"moneyLine": 295.0},
+            "awayTeamOdds": {"moneyLine": 310},
+        },
+        {
+            "provider": {"name": "ESPN Bet - Live Odds"},
+            "homeTeamOdds": {"moneyLine": -1000},
+            "drawOdds": {"moneyLine": 800.0},
+            "awayTeamOdds": {"moneyLine": 1500},
+        },
+    ]
+    triplet = parse_espn_epl_1x2_odds_items(espn_epl_items)
+    assert triplet is not None
+    assert triplet[0] == pytest.approx(1.80)
+    assert triplet[1] == pytest.approx(3.95)
+    assert triplet[2] == pytest.approx(4.10)
