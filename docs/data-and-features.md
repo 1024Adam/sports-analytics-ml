@@ -250,3 +250,20 @@ After raw skater predictions $\hat{\mu}_{G, i}^{\text{raw}}$ are generated for t
 $$\hat{\mu}_{G, i}^{\text{reconciled}} = \hat{\mu}_{G, i}^{\text{raw}} \cdot \left( \frac{\hat{\lambda}_T}{\sum_{j \in \text{Roster}_T} \hat{\mu}_{G, j}^{\text{raw}}} \right)^\gamma$$
 
 This preserves relative player rankings while ensuring player projections scale realistically in high-scoring vs. low-scoring matchups.
+
+---
+
+## 6. Phase 4 Extensions: Evaluation-Only Odds & Play-by-Play Micro-Features
+
+### 6.1 Evaluation-Only Market Closing Odds (`market_*` Firewall)
+To benchmark fundamental NHL predictions against sportsbook closing lines without contaminating the model (`Milestone 13`):
+* `games.parquet` stores nullable evaluation-only columns: `market_home_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_away`, and `market_overround` (de-vigged via the Power method $\sum_i (1/d_i)^k = 1.0$).
+* **Hard Feature Firewall**: `STAGE1_FEATURE_COLUMNS` and `STAGE2_FEATURE_COLUMNS` strictly exclude all `market_*` and `*odds*` columns. These columns are read **exclusively** by `core/market.py` and `core/evaluation.py` during `sports-ml backtest` and `sports-ml score-predictions` to compute Closing Line Value (CLV), head-to-head Log Loss/Brier against Vegas, and simulated ROI on high-disagreement games ($|P_{\text{model}} - P_{\text{market}}| \ge 5\%$).
+
+### 6.2 Shot-Coordinate & Shift-Level Micro-Features (`Milestone 15`)
+Using MoneyPuck bulk shot archives (`shots_{YYYY}.csv.gz`) and NHL API play-by-play/shift summaries, raw game events are compressed into `team_pbp_micro_logs.parquet` and `skater_pbp_micro_logs.parquet` and rolled via strict left-closed (`.shift(1)`) windows:
+* **Score-Venue Adjusted 5v5 $xG$ & Fenwick (`score_adj_xgf_5v5`, `score_adj_xga_5v5`, `score_adj_ff_5v5`)**: Weights each 5v5 shot attempt by score-state ($\Delta G \in \{-3, \dots, +3\}$) and home/away venue multipliers to strip out trailing-team garbage-time shot inflation.
+* **Rush & Rebound Creation (`rush_xgf_5v5`, `rebound_xgf_5v5`, `rebound_xga_5v5`)**: Captures transition speed and net-front second-chance creation, plus goalie rebound suppression (`rebound_xga_per_60`).
+* **Spatial Slot Danger (`avg_shot_distance_5v5`, `inner_slot_xg_share`)**: Measures how effectively a team penetrates the inner slot vs. taking low-percentage point shots.
+* **Skater TOI Quality of Competition (`qoc_opponent_toi_share`) & Quality of Teammates (`qot_teammate_ixg_per_60`)**: Derived from shift-overlap matrices to distinguish top-line shutdown minutes from sheltered 3rd-line/3rd-pair usage in Stage 2 player projections.
+
