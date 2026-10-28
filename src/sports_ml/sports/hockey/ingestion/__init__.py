@@ -32,6 +32,7 @@ from sports_ml.sports.hockey.ingestion.nhl_api import (
 from sports_ml.sports.hockey.ingestion.odds import (
     NHL_ODDS_SCHEMA,
     NHLOddsIngestor,
+    parse_espn_core_odds_items,
     parse_nhl_historical_odds_csv,
     parse_the_odds_api_payload,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "estimate_shot_xg_from_coords",
     "normalize_player_name",
     "parse_boxscore_payload",
+    "parse_espn_core_odds_items",
     "parse_moneypuck_goalies_csv",
     "parse_moneypuck_shots_csv",
     "parse_moneypuck_skaters_csv",

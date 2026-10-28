@@ -182,8 +182,21 @@ class HockeySilverReconciler:
                     )
                     .unique(subset=["game_date", "home_team", "away_team"], keep="last")
                 )
+                # 1. Exact local game_date match
                 merged = (
                     merged.join(m_lookup, on=["game_date", "home_team", "away_team"], how="left")
+                    .with_columns(
+                        [pl.coalesce([pl.col(c), pl.col(f"_m_{c}")]).alias(c) for c in market_cols]
+                    )
+                    .drop([f"_m_{c}" for c in market_cols])
+                )
+                # 2. UTC date match (game_date + 1 day) for European/UTC feeds where evening
+                # North American NHL games are stamped with the next UTC calendar day
+                utc_lookup = m_lookup.with_columns(
+                    pl.col("game_date").dt.offset_by("-1d").alias("game_date")
+                ).unique(subset=["game_date", "home_team", "away_team"], keep="last")
+                merged = (
+                    merged.join(utc_lookup, on=["game_date", "home_team", "away_team"], how="left")
                     .with_columns(
                         [pl.coalesce([pl.col(c), pl.col(f"_m_{c}")]).alias(c) for c in market_cols]
                     )

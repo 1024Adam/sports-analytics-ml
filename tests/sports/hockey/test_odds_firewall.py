@@ -20,6 +20,7 @@ from sports_ml.sports.hockey.features.pipeline import (
 from sports_ml.sports.hockey.ingestion.nhl_api import parse_schedule_payload
 from sports_ml.sports.hockey.ingestion.odds import (
     NHLOddsIngestor,
+    parse_espn_core_odds_items,
     parse_nhl_historical_odds_csv,
     parse_the_odds_api_payload,
 )
@@ -256,3 +257,26 @@ def test_nhl_odds_ingestor_and_silver_reconciler_persistence(tmp_path: Path) -> 
     )
     assert parse_nhl_historical_odds_csv("").is_empty()
     assert date(2024, 10, 12) == live_parsed["game_date"][0]
+
+    # Verify ESPN Core API odds parser filters out live in-play lines and 3-way 60m regulation lines
+    espn_items = [
+        {
+            "provider": {"name": "ESPN BET"},
+            "homeTeamOdds": {"moneyLine": -200, "close": {"moneyLine": {"decimal": 1.50}}},
+            "awayTeamOdds": {"moneyLine": 165, "close": {"moneyLine": {"decimal": 2.65}}},
+        },
+        {
+            "provider": {"name": "ESPN Bet - Live Odds"},
+            "homeTeamOdds": {"moneyLine": -2500},
+            "awayTeamOdds": {"moneyLine": 1000},
+        },
+        {
+            "provider": {"name": "3-Way Reg"},
+            "homeTeamOdds": {"moneyLine": 145},
+            "awayTeamOdds": {"moneyLine": 160},
+        },
+    ]
+    espn_pair = parse_espn_core_odds_items(espn_items)
+    assert espn_pair is not None
+    assert espn_pair[0] == pytest.approx(1.50)
+    assert espn_pair[1] == pytest.approx(2.65)

@@ -18,6 +18,7 @@ import polars as pl
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from sports_ml.core.cache import read_cached_json, write_cached_json
+from sports_ml.core.market import american_to_decimal, devig_probabilities
 from sports_ml.sports.hockey.constants import (
     SILVER_GAMES_SCHEMA,
     SILVER_GOALIE_GAME_LOGS_SCHEMA,
@@ -76,6 +77,61 @@ def compute_single_game_score(
         + 0.05 * float(blocked_shots)
         - 0.075 * float(pim)
     )
+
+
+def _extract_embedded_nhl_schedule_odds(
+    home_obj: dict[str, Any],
+    away_obj: dict[str, Any],
+) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+    """Extract embedded partner moneylines from `homeTeam.odds` and `awayTeam.odds` if present."""
+    h_odds_raw = home_obj.get("odds")
+    a_odds_raw = away_obj.get("odds")
+    if not isinstance(h_odds_raw, list) or not isinstance(a_odds_raw, list):
+        return (None, None, None, None, None)
+
+    def _to_dec(raw_v: Any) -> float | None:
+        if raw_v is None:
+            return None
+        s = str(raw_v).strip().replace("+", "")
+        if not s:
+            return None
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+        if abs(v) >= 100.0:
+            return float(american_to_decimal(v))
+        return v if v > 1.0 else None
+
+    h_by_prov = {
+        int(item["providerId"]): _to_dec(item.get("value"))
+        for item in h_odds_raw
+        if isinstance(item, dict) and "providerId" in item
+    }
+    a_by_prov = {
+        int(item["providerId"]): _to_dec(item.get("value"))
+        for item in a_odds_raw
+        if isinstance(item, dict) and "providerId" in item
+    }
+    paired_h: list[float] = []
+    paired_a: list[float] = []
+    for prov_id, hd in h_by_prov.items():
+        ad = a_by_prov.get(prov_id)
+        if hd is not None and ad is not None:
+            # Exclude 3-way regulation lines where both sides are > 2.05 (overround < 0.90)
+            inv_sum = (1.0 / hd) + (1.0 / ad)
+            if 0.98 <= inv_sum <= 1.15:
+                paired_h.append(hd)
+                paired_a.append(ad)
+
+    if not paired_h or not paired_a:
+        return (None, None, None, None, None)
+
+    mean_h = float(sum(paired_h) / len(paired_h))
+    mean_a = float(sum(paired_a) / len(paired_a))
+    devigged = devig_probabilities([mean_h, mean_a], method="power")
+    overround = (1.0 / mean_h) + (1.0 / mean_a) - 1.0
+    return (mean_h, mean_a, float(devigged[0]), float(devigged[1]), float(overround))
 
 
 def parse_schedule_payload(
@@ -150,6 +206,14 @@ def parse_schedule_payload(
             away_reg_goals = None
             home_win = None
 
+        (
+            mkt_h_dec,
+            mkt_a_dec,
+            mkt_p_home,
+            mkt_p_away,
+            mkt_overround,
+        ) = _extract_embedded_nhl_schedule_odds(home_obj, away_obj)
+
         rows.append(
             {
                 "sport": "hockey",
@@ -168,11 +232,11 @@ def parse_schedule_payload(
                 "home_reg_goals": home_reg_goals,
                 "away_reg_goals": away_reg_goals,
                 "home_win": home_win,
-                "market_home_decimal_odds": None,
-                "market_away_decimal_odds": None,
-                "market_prob_home": None,
-                "market_prob_away": None,
-                "market_overround": None,
+                "market_home_decimal_odds": mkt_h_dec,
+                "market_away_decimal_odds": mkt_a_dec,
+                "market_prob_home": mkt_p_home,
+                "market_prob_away": mkt_p_away,
+                "market_overround": mkt_overround,
             }
         )
 
