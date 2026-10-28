@@ -12,6 +12,7 @@ from pathlib import Path
 import polars as pl
 
 from sports_ml.sports.soccer.constants import (
+    SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA,
     SILVER_GK_MATCH_LOGS_SCHEMA,
     SILVER_MATCHES_SCHEMA,
     SILVER_OUTFIELD_MATCH_LOGS_SCHEMA,
@@ -19,6 +20,10 @@ from sports_ml.sports.soccer.constants import (
     normalize_soccer_club,
 )
 from sports_ml.sports.soccer.ingestion.lineups import normalize_soccer_player_name
+from sports_ml.sports.soccer.ingestion.non_league_fixtures import (
+    build_epl_schedule_rows_from_matches,
+    normalize_competition_type,
+)
 
 
 def _cast_to_schema(df: pl.DataFrame, schema: dict[str, pl.DataType]) -> pl.DataFrame:
@@ -53,6 +58,10 @@ class SoccerSilverReconciler:
     @property
     def gk_logs_path(self) -> Path:
         return self.silver_dir / "gk_match_logs.parquet"
+
+    @property
+    def all_competitions_schedule_path(self) -> Path:
+        return self.silver_dir / "club_all_competitions_schedule.parquet"
 
     @staticmethod
     def _upsert_frame(
@@ -495,4 +504,48 @@ class SoccerSilverReconciler:
         )
         if persist:
             merged.write_parquet(self.gk_logs_path, compression="zstd")
+        return merged
+
+    def reconcile_all_competitions_schedule(
+        self,
+        non_league_df: pl.DataFrame,
+        *,
+        epl_matches_df: pl.DataFrame | None = None,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Upsert EPL + UEFA/Cup fixtures into `club_all_competitions_schedule.parquet`."""
+        frames: list[pl.DataFrame] = []
+        if epl_matches_df is not None and not epl_matches_df.is_empty():
+            frames.append(build_epl_schedule_rows_from_matches(epl_matches_df))
+        if not non_league_df.is_empty():
+            norm_nl = _cast_to_schema(
+                non_league_df, SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA
+            ).with_columns(
+                pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
+                pl.col("opponent").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
+                pl.col("competition_type").map_elements(
+                    normalize_competition_type, return_dtype=pl.Utf8
+                ),
+            )
+            frames.append(norm_nl)
+
+        incoming = (
+            pl.concat(frames, how="vertical")
+            if frames
+            else pl.DataFrame(schema=SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA)
+        )
+        existing = (
+            pl.read_parquet(self.all_competitions_schedule_path)
+            if self.all_competitions_schedule_path.exists()
+            else None
+        )
+        merged = self._upsert_frame(
+            existing,
+            incoming,
+            unique_keys=["start_time_utc", "team", "competition_type"],
+            sort_keys=["match_date", "start_time_utc", "team"],
+            schema=SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA,
+        )
+        if persist:
+            merged.write_parquet(self.all_competitions_schedule_path, compression="zstd")
         return merged

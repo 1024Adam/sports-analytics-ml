@@ -9,6 +9,7 @@ suspended, or absent regulars.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import Final
 
 import polars as pl
@@ -268,9 +269,113 @@ def _compute_missing_regular_minutes(
     return pl.DataFrame(out_rows)
 
 
+def _compute_active_xi_14d_all_comp_minutes(
+    outfield_feat_df: pl.DataFrame,
+    all_comp_schedule_df: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Compute leak-free 14-day cumulative all-comp minutes (`active_xi_14d_all_comp_minutes`).
+
+    Strictly filters prior appearances (`< start_time_utc`) within `[match_date - 14d, match_date)`:
+    1. Sums actual `minutes` logged by the club's top-10 projected outfield starters in prior
+       domestic appearances within the last 14 days.
+    2. Adds non-EPL (`UCL`, `UEL`, `UECL`, `FA_CUP`, `EFL_CUP`) squad minutes load for any
+       prior non-league fixtures played by the club in `(match_date - 14d, match_date)`
+       scaled to the 10-outfield-starter unit (`10/11 * squad_minutes_load`).
+    """
+    event_col = "match_id" if "match_id" in outfield_feat_df.columns else "event_id"
+    if outfield_feat_df.is_empty():
+        return pl.DataFrame(
+            schema={
+                event_col: pl.Int64(),
+                "team": pl.Utf8(),
+                "active_xi_14d_all_comp_minutes": pl.Float64(),
+            }
+        )
+
+    # Index non-EPL fixtures by (team, season) -> list of (start_time_utc, match_date, load)
+    non_epl_by_team: dict[tuple[str, int], list[tuple[datetime, date, float]]] = {}
+    if all_comp_schedule_df is not None and not all_comp_schedule_df.is_empty():
+        for r in all_comp_schedule_df.iter_rows(named=True):
+            comp = str(r.get("competition_type") or "EPL").strip().upper()
+            if comp == "EPL":
+                continue
+            t_code = normalize_soccer_club(str(r["team"]))
+            s_utc: datetime = r["start_time_utc"]
+            m_date: date = r.get("match_date") or r.get("game_date") or s_utc.date()
+            season_v = int(
+                r.get("season") or (m_date.year if m_date.month >= 7 else m_date.year - 1)
+            )
+            load_v = float(r.get("squad_minutes_load") or 990.0) * (10.0 / 11.0)
+            non_epl_by_team.setdefault((t_code, season_v), []).append((s_utc, m_date, load_v))
+
+    grouped = (
+        outfield_feat_df.group_by(
+            ["season", "start_time_utc", "event_seq", event_col, "team"],
+            maintain_order=True,
+        )
+        .agg(
+            pl.col("player_id"),
+            pl.col("proj_minutes"),
+            pl.col("minutes"),
+            pl.col("match_date").first()
+            if "match_date" in outfield_feat_df.columns
+            else pl.col("start_time_utc").first().dt.date().alias("match_date"),
+        )
+        .sort(["start_time_utc", "event_seq", event_col, "team"])
+    )
+
+    # Track per-(team, season, player_id) history of (start_time_utc, match_date, actual_minutes)
+    player_hist: dict[tuple[str, int, int], list[tuple[datetime, date, float]]] = {}
+    out_rows: list[dict[str, int | str | float]] = []
+
+    for row in grouped.iter_rows(named=True):
+        season = int(row["season"])
+        team = normalize_soccer_club(str(row["team"]))
+        ev_id = int(row[event_col])
+        curr_utc: datetime = row["start_time_utc"]
+        curr_date: date = row["match_date"]
+
+        pids: list[int] = [int(x) for x in row["player_id"]]
+        proj_m: list[float] = [float(x) for x in row["proj_minutes"]]
+        act_m: list[float] = [float(x) for x in row["minutes"]]
+
+        # Rank available outfield players by pre-match proj_minutes (top 10 outfield starters)
+        ranked_starters = sorted(zip(pids, proj_m, strict=True), key=lambda x: x[1], reverse=True)[
+            :10
+        ]
+        starter_14d_min = 0.0
+        for pid, _ in ranked_starters:
+            p_logs = player_hist.get((team, season, pid), ())
+            for p_utc, p_date, p_min in p_logs:
+                days_diff = (curr_date - p_date).days
+                if p_utc < curr_utc and 0 < days_diff <= 14:
+                    starter_14d_min += p_min
+
+        # Add non-EPL cup/UEFA minutes load strictly prior (< curr_utc) within 14 days
+        for nl_utc, nl_date, nl_load in non_epl_by_team.get((team, season), ()):
+            days_diff = (curr_date - nl_date).days
+            if nl_utc < curr_utc and 0 < days_diff <= 14:
+                starter_14d_min += nl_load
+
+        out_rows.append(
+            {
+                event_col: ev_id,
+                "team": team,
+                "active_xi_14d_all_comp_minutes": float(starter_14d_min),
+            }
+        )
+
+        # Record current match actual minutes strictly after computing pre-match feature
+        for pid, a_min in zip(pids, act_m, strict=True):
+            player_hist.setdefault((team, season, pid), []).append((curr_utc, curr_date, a_min))
+
+    return pl.DataFrame(out_rows)
+
+
 def build_soccer_roster_strength_features(
     outfield_match_logs: pl.DataFrame,
     *,
+    all_comp_schedule_df: pl.DataFrame | None = None,
     window: int = 10,
     shrinkage_k: float = OUTFIELD_SHRINKAGE_K,
     excluded_ids_by_match_team: Mapping[tuple[int, str], Sequence[int]] | None = None,
@@ -278,10 +383,15 @@ def build_soccer_roster_strength_features(
     """Aggregate pre-match available outfield player rolling metrics weighted by minutes share.
 
     Normalized separately across Forwards (`FWD`), Midfielders (`MID`), and Defenders (`DEF`)
-    for each `(match_id, team)`.
+    for each `(match_id, team)`, and computes `active_xi_14d_all_comp_minutes`.
     """
+    working_outfield = outfield_match_logs
+    if "competition_type" in working_outfield.columns:
+        working_outfield = working_outfield.filter(
+            pl.col("competition_type").str.to_uppercase() == "EPL"
+        )
     outfield_feat = build_outfield_rolling_features(
-        outfield_match_logs, window=window, shrinkage_k=shrinkage_k
+        working_outfield, window=window, shrinkage_k=shrinkage_k
     )
     event_col = "match_id" if "match_id" in outfield_feat.columns else "event_id"
 
@@ -303,11 +413,15 @@ def build_soccer_roster_strength_features(
                 "missing_regular_minutes_fwd": pl.Float64(),
                 "missing_regular_minutes_mid": pl.Float64(),
                 "missing_regular_minutes_def": pl.Float64(),
+                "active_xi_14d_all_comp_minutes": pl.Float64(),
             }
         )
 
     missing_df = _compute_missing_regular_minutes(
         outfield_feat, excluded_ids_by_match_team=excluded_ids_by_match_team
+    )
+    xi_load_df = _compute_active_xi_14d_all_comp_minutes(
+        outfield_feat, all_comp_schedule_df=all_comp_schedule_df
     )
 
     working = outfield_feat
@@ -411,4 +525,8 @@ def build_soccer_roster_strength_features(
         )
     )
 
-    return agg_df.join(missing_df, on=[event_col, "team"], how="left")
+    return (
+        agg_df.join(missing_df, on=[event_col, "team"], how="left")
+        .join(xi_load_df, on=[event_col, "team"], how="left")
+        .with_columns(pl.col("active_xi_14d_all_comp_minutes").fill_null(0.0))
+    )

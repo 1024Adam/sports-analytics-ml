@@ -353,15 +353,15 @@ Benchmark fundamental Stage 1 predictions against sharp sportsbook closing lines
 ---
 
 ## Milestone 14: EPL Cross-Competition Schedule & Squad Fatigue (UEFA Champions/Europa/Conference League, FA Cup & EFL Cup)
-**Status**: `[ ] Planned`
+**Status**: `[x] Completed`
 
 ### Goal
 Eliminate the EPL-only schedule blind spot by ingesting non-league competitive fixtures (**UEFA Champions League**, **Europa League**, **Conference League**, **FA Cup**, and **EFL Carabao Cup**) for all 20 EPL clubs and using them **strictly to compute true multi-competition schedule rest, European travel distance, 14-day match congestion, and squad rotation/minutes load**—without polluting domestic EPL tactical $xG$ rates or Elo ratings with lower-tier cup opponents.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/soccer/ingestion/non_league_fixtures.py` & `reconciler.py`:
+- [x] `src/sports_ml/sports/soccer/ingestion/non_league_fixtures.py` & `reconciler.py`:
   - Ingest historical and active-season non-EPL club fixtures (`competition_type` $\in \{\text{"UCL"}, \text{"UEL"}, \text{"UECL"}, \text{"FA\_CUP"}, \text{"EFL\_CUP"}\}$) from Understat/Football-Data/FPL cup & European feeds into `data/silver/soccer/club_all_competitions_schedule.parquet` (`match_date`, `start_time_utc`, `team`, `opponent`, `competition_type`, `is_home`, `venue_lat`, `venue_lon`, `extra_time_played`, `squad_minutes_load`).
-- [ ] `src/sports_ml/sports/soccer/features/team.py` & `roster.py`:
+- [x] `src/sports_ml/sports/soccer/features/team.py` & `roster.py`:
   - Upgrade pre-match EPL schedule & fatigue features to query the unified all-competition timeline (`strictly < T_match`) before every EPL fixture:
     - `true_all_comp_rest_days`: Calendar/hour rest since the club's last competitive match in **any** competition (correctly identifying a Wednesday Champions League match before a Saturday EPL kickoff as `2.5–3 days` rest instead of `7 days`).
     - `had_midweek_european_match`: Binary indicator (`1` if the club played a `UCL` / `UEL` / `UECL` fixture within the last 5 days).
@@ -372,11 +372,11 @@ Eliminate the EPL-only schedule blind spot by ingesting non-league competitive f
   - **Tactical Isolation Guarantee**: Ensure rolling $npxGF/90$, $npxGA/90$, $PPDA$, and EPL Elo updates continue to filter exclusively on `competition_type == "EPL"` so facing a League One club in the FA Cup never distorts a club's Premier League shot-quality ratings.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/soccer/test_cross_competition_fatigue.py`:
+- [x] `tests/sports/soccer/test_cross_competition_fatigue.py`:
   - Verify that inserting a Wednesday UEFA Champions League away match between two Saturday EPL fixtures reduces the Saturday EPL pre-match `true_all_comp_rest_days` from `7.0` to `3.0`, sets `had_midweek_european_match = 1`, and increases `all_comp_matches_last_14d` by `+1`.
   - **Tactical Isolation Test**: Verify that mutating goals or $xG$ in `UCL` / `FA_CUP` / `EFL_CUP` fixtures produces **bit-for-bit identical** EPL Elo ratings and rolling EPL $npxGF/90$ & $PPDA$ features.
   - **Temporal Firewall Test**: Verify that future UEFA/Cup fixtures at $\ge T_{\text{match}}$ never leak into pre-match features at $< T_{\text{match}}$.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

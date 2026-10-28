@@ -33,6 +33,7 @@ from sports_ml.sports.soccer.features.team import (
     SOCCER_TEAM_SHRINKAGE_K,
     build_soccer_stage1_match_features,
     build_soccer_team_rolling_features,
+    compute_cross_competition_fatigue_features,
 )
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     "build_soccer_stage1_match_features",
     "build_soccer_stage2_player_features",
     "build_soccer_team_rolling_features",
+    "compute_cross_competition_fatigue_features",
     "filter_forbidden_market_columns",
     "resolve_team_starting_gk_features",
     "strip_market_columns_from_frame",

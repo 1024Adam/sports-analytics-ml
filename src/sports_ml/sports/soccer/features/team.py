@@ -14,13 +14,13 @@ features for:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Final
 
 import polars as pl
 
 from sports_ml.core.ratings import EloConfig, PairwiseEloEngine
-from sports_ml.core.schedule import compute_schedule_features
+from sports_ml.core.schedule import compute_schedule_features, haversine_distance_km
 from sports_ml.core.shrinkage import bayesian_shrinkage
 from sports_ml.core.temporal import (
     pregame_ewma,
@@ -31,6 +31,11 @@ from sports_ml.core.temporal import (
     sort_events_chronologically,
 )
 from sports_ml.sports.soccer.constants import get_stadium_metadata, normalize_soccer_club
+from sports_ml.sports.soccer.ingestion.non_league_fixtures import (
+    EUROPEAN_COMPETITION_TYPES,
+    normalize_competition_type,
+    resolve_fixture_venue_coords,
+)
 
 SOCCER_TEAM_SHRINKAGE_K: Final[float] = 6.0
 DEFAULT_SOCCER_TEAM_WINDOWS: Final[tuple[int, ...]] = (5, 10, 19)
@@ -189,21 +194,240 @@ def _pregame_share_expr(
     return f_sum / pl.when(denom > 0.0).then(denom).otherwise(None)
 
 
+def compute_cross_competition_fatigue_features(
+    target_df: pl.DataFrame,
+    all_comp_schedule_df: pl.DataFrame | None = None,
+    *,
+    max_rest_days: float = 7.0,
+) -> pl.DataFrame:
+    """Annotate EPL team rows with cross-competition rest, UEFA travel, and congestion features.
+
+    Queries the unified all-competition timeline (`strictly < T_match`) before every
+    EPL fixture to compute:
+    - `true_all_comp_rest_days`: Calendar days since the club's last competitive match in
+      any competition (capped at `max_rest_days`, default `7.0`).
+    - `had_midweek_european_match`: Binary indicator (`1` if the club played a `UCL` /
+      `UEL` / `UECL` fixture within the last 5 days).
+    - `had_midweek_away_european_match`: Binary indicator (`1` if the club played an away
+      `UCL` / `UEL` / `UECL` fixture within the last 5 days).
+    - `european_travel_km_last_7d`: Total round-trip geodesic distance (km) traveled for
+      away European fixtures in the prior 7 days.
+    - `all_comp_matches_last_14d` & `all_comp_matches_last_28d`: True multi-competition
+      fixture density (including the current match, matching `matches_last_14d` semantics).
+    - `cup_extra_time_last_7d`: Binary indicator (`1` if the club played extra time in any
+      competition within the prior 7 days).
+    """
+    if target_df.is_empty():
+        return target_df.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("true_all_comp_rest_days"),
+            pl.lit(None, dtype=pl.Int8).alias("had_midweek_european_match"),
+            pl.lit(None, dtype=pl.Int8).alias("had_midweek_away_european_match"),
+            pl.lit(None, dtype=pl.Float64).alias("european_travel_km_last_7d"),
+            pl.lit(None, dtype=pl.Int32).alias("all_comp_matches_last_14d"),
+            pl.lit(None, dtype=pl.Int32).alias("all_comp_matches_last_28d"),
+            pl.lit(None, dtype=pl.Int8).alias("cup_extra_time_last_7d"),
+        )
+
+    # Build unified per-(team, season) timeline of all competitive appearances
+    # Each entry: (start_time_utc, match_date, comp_type, is_home, venue_lat, venue_lon, extra_time)
+    timeline_by_team: dict[
+        tuple[str, int],
+        list[tuple[datetime, date, str, bool, float, float, bool]],
+    ] = {}
+
+    def _add_entry(
+        team_raw: str,
+        opp_raw: str,
+        season_val: int,
+        start_utc: datetime,
+        m_date: date,
+        comp_raw: str,
+        is_home_val: bool,
+        v_lat: float | None,
+        v_lon: float | None,
+        et_val: bool,
+    ) -> None:
+        t_code = normalize_soccer_club(team_raw)
+        o_code = normalize_soccer_club(opp_raw)
+        c_type = normalize_competition_type(comp_raw)
+        lat_f, lon_f = resolve_fixture_venue_coords(
+            t_code, o_code, c_type, is_home_val, v_lat, v_lon
+        )
+        utc_norm = start_utc.astimezone(UTC) if start_utc.tzinfo else start_utc.replace(tzinfo=UTC)
+        timeline_by_team.setdefault((t_code, season_val), []).append(
+            (utc_norm, m_date, c_type, is_home_val, lat_f, lon_f, et_val)
+        )
+
+    for r in target_df.iter_rows(named=True):
+        s_utc: datetime = r["start_time_utc"]
+        d_val: date = r.get("match_date") or r.get("game_date") or s_utc.date()
+        _add_entry(
+            str(r["team"]),
+            str(r.get("opponent") or ""),
+            int(r["season"]),
+            s_utc,
+            d_val,
+            str(r.get("competition_type") or "EPL"),
+            bool(r.get("is_home", True)),
+            float(r["venue_lat"]) if r.get("venue_lat") is not None else None,
+            float(r["venue_lon"]) if r.get("venue_lon") is not None else None,
+            bool(r.get("extra_time_played", False)),
+        )
+
+    if all_comp_schedule_df is not None and not all_comp_schedule_df.is_empty():
+        for r in all_comp_schedule_df.iter_rows(named=True):
+            s_utc = r["start_time_utc"]
+            d_val = r.get("match_date") or r.get("game_date") or s_utc.date()
+            _add_entry(
+                str(r["team"]),
+                str(r.get("opponent") or ""),
+                int(r.get("season") or (d_val.year if d_val.month >= 7 else d_val.year - 1)),
+                s_utc,
+                d_val,
+                str(r.get("competition_type") or "EPL"),
+                bool(r.get("is_home", True)),
+                float(r["venue_lat"]) if r.get("venue_lat") is not None else None,
+                float(r["venue_lon"]) if r.get("venue_lon") is not None else None,
+                bool(r.get("extra_time_played", False)),
+            )
+
+    # Deduplicate (team, season) timelines by (match_date, comp_type) keeping latest metadata
+    dedup_timelines: dict[
+        tuple[str, int],
+        list[tuple[datetime, date, str, bool, float, float, bool]],
+    ] = {}
+    for key, entries in timeline_by_team.items():
+        by_date_comp: dict[
+            tuple[date, str], tuple[datetime, date, str, bool, float, float, bool]
+        ] = {}
+        for item in sorted(entries, key=lambda x: x[0]):
+            by_date_comp[(item[1], item[2])] = item
+        dedup_timelines[key] = sorted(by_date_comp.values(), key=lambda x: (x[0], x[1]))
+
+    n_rows = target_df.height
+    true_rest_out = [float(max_rest_days)] * n_rows
+    midweek_euro_out = [0] * n_rows
+    midweek_away_euro_out = [0] * n_rows
+    euro_travel_7d_out = [0.0] * n_rows
+    all_comp_14d_out = [1] * n_rows
+    all_comp_28d_out = [1] * n_rows
+    cup_et_7d_out = [0] * n_rows
+
+    for idx, r in enumerate(target_df.iter_rows(named=True)):
+        t_code = normalize_soccer_club(str(r["team"]))
+        season_val = int(r["season"])
+        s_utc = r["start_time_utc"]
+        curr_utc = s_utc.astimezone(UTC) if s_utc.tzinfo else s_utc.replace(tzinfo=UTC)
+        curr_date: date = r.get("match_date") or r.get("game_date") or curr_utc.date()
+
+        home_meta = get_stadium_metadata(t_code)
+        home_lat = home_meta.latitude if home_meta is not None else 51.5074
+        home_lon = home_meta.longitude if home_meta is not None else -0.1278
+
+        t_entries = dedup_timelines.get((t_code, season_val), [])
+        # Strictly prior matches (< curr_utc, and not the same EPL fixture on curr_date)
+        prior_entries = [
+            e for e in t_entries if e[0] < curr_utc and not (e[1] == curr_date and e[2] == "EPL")
+        ]
+
+        if prior_entries:
+            last_utc, last_date, _, _, _, _, _ = prior_entries[-1]
+            raw_days = float((curr_date - last_date).days)
+            if raw_days <= 0.0:
+                raw_days = max(0.0, (curr_utc - last_utc).total_seconds() / 86400.0)
+            true_rest_out[idx] = min(float(max_rest_days), raw_days)
+
+            has_euro_5d = False
+            has_away_euro_5d = False
+            euro_km_7d = 0.0
+            has_et_7d = False
+
+            for _, p_date, p_comp, p_home, p_lat, p_lon, p_et in prior_entries:
+                days_ago = (curr_date - p_date).days
+                if 0 < days_ago <= 5 and p_comp in EUROPEAN_COMPETITION_TYPES:
+                    has_euro_5d = True
+                    if not p_home:
+                        has_away_euro_5d = True
+                if 0 < days_ago <= 7:
+                    if p_et:
+                        has_et_7d = True
+                    if p_comp in EUROPEAN_COMPETITION_TYPES and not p_home:
+                        # Round-trip distance from club's home stadium to European away venue
+                        one_way = haversine_distance_km(home_lat, home_lon, p_lat, p_lon)
+                        euro_km_7d += 2.0 * one_way
+
+            midweek_euro_out[idx] = 1 if has_euro_5d else 0
+            midweek_away_euro_out[idx] = 1 if has_away_euro_5d else 0
+            euro_travel_7d_out[idx] = float(euro_km_7d)
+            cup_et_7d_out[idx] = 1 if has_et_7d else 0
+
+        # Window counts include current match (+1) plus prior matches in [curr_date - 13d]
+        prior_14d = sum(1 for e in prior_entries if 0 <= (curr_date - e[1]).days <= 13)
+        prior_28d = sum(1 for e in prior_entries if 0 <= (curr_date - e[1]).days <= 27)
+        all_comp_14d_out[idx] = 1 + prior_14d
+        all_comp_28d_out[idx] = 1 + prior_28d
+
+    return target_df.with_columns(
+        pl.Series("true_all_comp_rest_days", true_rest_out, dtype=pl.Float64),
+        pl.Series("had_midweek_european_match", midweek_euro_out, dtype=pl.Int8),
+        pl.Series("had_midweek_away_european_match", midweek_away_euro_out, dtype=pl.Int8),
+        pl.Series("european_travel_km_last_7d", euro_travel_7d_out, dtype=pl.Float64),
+        pl.Series("all_comp_matches_last_14d", all_comp_14d_out, dtype=pl.Int32),
+        pl.Series("all_comp_matches_last_28d", all_comp_28d_out, dtype=pl.Int32),
+        pl.Series("cup_extra_time_last_7d", cup_et_7d_out, dtype=pl.Int8),
+    )
+
+
 def build_soccer_team_rolling_features(
     team_match_logs: pl.DataFrame,
     *,
+    all_comp_schedule_df: pl.DataFrame | None = None,
     windows: Sequence[int] = DEFAULT_SOCCER_TEAM_WINDOWS,
     ewma_alpha: float = DEFAULT_SOCCER_EWMA_ALPHA,
     shrinkage_k: float = SOCCER_TEAM_SHRINKAGE_K,
 ) -> pl.DataFrame:
-    """Compute leak-free pre-match EPL team rolling, tactical (PPDA), and regression features."""
-    prepared = _ensure_soccer_team_log_columns(team_match_logs).with_columns(
+    """Compute leak-free pre-match EPL team rolling, tactical (PPDA), and regression features.
+
+    Tactical Isolation Guarantee:
+    If `team_match_logs` contains non-EPL rows (`competition_type != "EPL"`), they are
+    routed into the cross-competition schedule timeline and strictly filtered out before
+    computing rolling `npxGF/90`, `npxGA/90`, `PPDA`, or finishing regression.
+    """
+    extra_sched_rows: pl.DataFrame | None = all_comp_schedule_df
+    working_logs = team_match_logs
+    if "competition_type" in working_logs.columns:
+        non_epl_logs = working_logs.filter(
+            pl.col("competition_type").map_elements(
+                normalize_competition_type, return_dtype=pl.Utf8
+            )
+            != "EPL"
+        )
+        if not non_epl_logs.is_empty():
+            extra_sched_rows = (
+                pl.concat([extra_sched_rows, non_epl_logs], how="diagonal_relaxed")
+                if extra_sched_rows is not None and not extra_sched_rows.is_empty()
+                else non_epl_logs
+            )
+        working_logs = working_logs.filter(
+            pl.col("competition_type").map_elements(
+                normalize_competition_type, return_dtype=pl.Utf8
+            )
+            == "EPL"
+        )
+
+    prepared = _ensure_soccer_team_log_columns(working_logs).with_columns(
         pl.col("team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
         pl.col("opponent").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
     )
     sorted_df = sort_events_chronologically(prepared, extra_tiebreakers=["team"])
     annotated = _annotate_promoted_and_matches_14d(sorted_df)
     with_sched = compute_schedule_features(annotated, entity_col="team", date_col="game_date")
+    with_sched = compute_cross_competition_fatigue_features(
+        with_sched, extra_sched_rows
+    ).with_columns(
+        pl.col("true_all_comp_rest_days").round(0).cast(pl.Int32).alias("rest_days"),
+        pl.col("all_comp_matches_last_14d").cast(pl.Int32).alias("matches_last_14d"),
+    )
 
     is_prom = pl.col("is_promoted_team")
     with_derived = with_sched.with_columns(
@@ -396,12 +620,18 @@ def build_soccer_stage1_match_features(
     team_match_logs: pl.DataFrame,
     outfield_match_logs: pl.DataFrame | None = None,
     gk_match_logs: pl.DataFrame | None = None,
+    *,
+    all_comp_schedule_df: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Assemble the complete Stage 1 pre-match EPL feature matrix (`Home`, `Away`, and `Diff`).
 
     Combines 3-way (`1X2`) Elo with promotion/relegation priors, team rolling `npxG`/`xG`/`PPDA`/
-    deep completions/finishing regression, schedule congestion/travel, starting GK `GSAA/90`,
-    and minutes-weighted squad strength across `FWD`, `MID`, and `DEF`.
+    deep completions/finishing regression, cross-competition schedule congestion/UEFA travel,
+    starting GK `GSAA/90`, and minutes-weighted squad strength across `FWD`, `MID`, and `DEF`.
+
+    Tactical Isolation Guarantee:
+    EPL Elo and rolling `npxG`/`PPDA` features filter exclusively on `competition_type == "EPL"`,
+    while `all_comp_schedule_df` updates cross-competition rest, UEFA travel, and squad fatigue.
     """
     from sports_ml.sports.soccer.features.goalkeeper import (
         PRIOR_GK_CLEAN_SHEET_RATE,
@@ -421,7 +651,15 @@ def build_soccer_stage1_match_features(
         build_soccer_roster_strength_features,
     )
 
-    working_matches = matches_df.with_columns(
+    working_matches = matches_df
+    if "competition_type" in working_matches.columns:
+        working_matches = working_matches.filter(
+            pl.col("competition_type").map_elements(
+                normalize_competition_type, return_dtype=pl.Utf8
+            )
+            == "EPL"
+        )
+    working_matches = working_matches.with_columns(
         pl.col("home_team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
         pl.col("away_team").map_elements(normalize_soccer_club, return_dtype=pl.Utf8),
     )
@@ -442,7 +680,9 @@ def build_soccer_stage1_match_features(
     )
 
     team_feat = _compute_postmatch_team_features(
-        build_soccer_team_rolling_features(team_match_logs)
+        build_soccer_team_rolling_features(
+            team_match_logs, all_comp_schedule_df=all_comp_schedule_df
+        )
     )
     t_ev_col = "match_id" if "match_id" in team_feat.columns else "event_id"
 
@@ -464,8 +704,15 @@ def build_soccer_stage1_match_features(
         "finishing_above_xg_w10",
         "defensive_ga_above_xga_w10",
         "rest_days",
+        "true_all_comp_rest_days",
         "is_midweek_turnaround",
+        "had_midweek_european_match",
+        "had_midweek_away_european_match",
+        "european_travel_km_last_7d",
         "matches_last_14d",
+        "all_comp_matches_last_14d",
+        "all_comp_matches_last_28d",
+        "cup_extra_time_last_7d",
         "travel_km_prev_game",
         "is_promoted_team",
     ]
@@ -569,8 +816,15 @@ def build_soccer_stage1_match_features(
         ("finishing_above_xg_w10", 0.0),
         ("defensive_ga_above_xga_w10", 0.0),
         ("rest_days", 6),
+        ("true_all_comp_rest_days", 7.0),
         ("is_midweek_turnaround", False),
+        ("had_midweek_european_match", 0),
+        ("had_midweek_away_european_match", 0),
+        ("european_travel_km_last_7d", 0.0),
         ("matches_last_14d", 2),
+        ("all_comp_matches_last_14d", 2),
+        ("all_comp_matches_last_28d", 3),
+        ("cup_extra_time_last_7d", 0),
         ("travel_km_prev_game", 0.0),
         ("is_promoted_team", False),
     ]
@@ -631,7 +885,9 @@ def build_soccer_stage1_match_features(
 
     # Join active squad minutes-weighted features
     if outfield_match_logs is not None and not outfield_match_logs.is_empty():
-        roster_df = build_soccer_roster_strength_features(outfield_match_logs)
+        roster_df = build_soccer_roster_strength_features(
+            outfield_match_logs, all_comp_schedule_df=all_comp_schedule_df
+        )
         r_ev_col = "match_id" if "match_id" in roster_df.columns else "event_id"
         r_cols = [
             "fwd_weighted_npxg_per_90",
@@ -641,6 +897,7 @@ def build_soccer_stage1_match_features(
             "mid_weighted_xg_chain_per_90",
             "def_weighted_xg_buildup_per_90",
             "missing_regular_minutes",
+            "active_xi_14d_all_comp_minutes",
         ]
         h_ros = roster_df.select(
             [
@@ -669,6 +926,7 @@ def build_soccer_stage1_match_features(
                 pl.lit(PRIOR_XGCHAIN_PER_90_MID).alias(f"mid_weighted_xg_chain_per_90_{side}"),
                 pl.lit(PRIOR_XGBUILDUP_PER_90_DEF).alias(f"def_weighted_xg_buildup_per_90_{side}"),
                 pl.lit(0.0).alias(f"missing_regular_minutes_{side}"),
+                pl.lit(0.0).alias(f"active_xi_14d_all_comp_minutes_{side}"),
             )
 
     matchup = matchup.with_columns(
@@ -686,7 +944,89 @@ def build_soccer_stage1_match_features(
         pl.col("def_weighted_xg_buildup_per_90_away").fill_null(PRIOR_XGBUILDUP_PER_90_DEF),
         pl.col("missing_regular_minutes_home").fill_null(0.0),
         pl.col("missing_regular_minutes_away").fill_null(0.0),
+        pl.col("active_xi_14d_all_comp_minutes_home").fill_null(0.0),
+        pl.col("active_xi_14d_all_comp_minutes_away").fill_null(0.0),
     )
+
+    # If all_comp_schedule_df is provided, recompute cross-competition fatigue directly on
+    # `working_matches` for both home and away sides so upcoming FUT matches (or minimal
+    # test fixtures) always reflect exact cross-competition rest, UEFA travel, and density.
+    if all_comp_schedule_df is not None and not all_comp_schedule_df.is_empty():
+        h_sched_in = working_matches.select(
+            pl.col(event_col),
+            pl.col("season"),
+            pl.col("match_date")
+            if "match_date" in working_matches.columns
+            else pl.col("start_time_utc").dt.date().alias("match_date"),
+            pl.col("start_time_utc"),
+            pl.col("home_team").alias("team"),
+            pl.col("away_team").alias("opponent"),
+            pl.lit(True).alias("is_home"),
+        )
+        a_sched_in = working_matches.select(
+            pl.col(event_col),
+            pl.col("season"),
+            pl.col("match_date")
+            if "match_date" in working_matches.columns
+            else pl.col("start_time_utc").dt.date().alias("match_date"),
+            pl.col("start_time_utc"),
+            pl.col("away_team").alias("team"),
+            pl.col("home_team").alias("opponent"),
+            pl.lit(False).alias("is_home"),
+        )
+        cc_all = compute_cross_competition_fatigue_features(
+            pl.concat([h_sched_in, a_sched_in], how="vertical"),
+            all_comp_schedule_df,
+        )
+        cc_cols = [
+            "true_all_comp_rest_days",
+            "had_midweek_european_match",
+            "had_midweek_away_european_match",
+            "european_travel_km_last_7d",
+            "all_comp_matches_last_14d",
+            "all_comp_matches_last_28d",
+            "cup_extra_time_last_7d",
+        ]
+        h_cc = cc_all.select(
+            [
+                pl.col(event_col),
+                pl.col("team").alias("home_team"),
+                *[pl.col(c).alias(f"_cc_{c}_home") for c in cc_cols],
+            ]
+        ).unique(subset=[event_col, "home_team"], keep="last")
+        a_cc = cc_all.select(
+            [
+                pl.col(event_col),
+                pl.col("team").alias("away_team"),
+                *[pl.col(c).alias(f"_cc_{c}_away") for c in cc_cols],
+            ]
+        ).unique(subset=[event_col, "away_team"], keep="last")
+        matchup = (
+            matchup.join(h_cc, on=[event_col, "home_team"], how="left")
+            .join(a_cc, on=[event_col, "away_team"], how="left")
+            .with_columns(
+                [
+                    pl.coalesce([pl.col(f"_cc_{c}_{s}"), pl.col(f"{c}_{s}")]).alias(f"{c}_{s}")
+                    for c in cc_cols
+                    for s in ("home", "away")
+                ]
+            )
+            .drop([f"_cc_{c}_{s}" for c in cc_cols for s in ("home", "away")])
+            .with_columns(
+                pl.col("true_all_comp_rest_days_home")
+                .round(0)
+                .cast(pl.Int32)
+                .alias("rest_days_home"),
+                pl.col("true_all_comp_rest_days_away")
+                .round(0)
+                .cast(pl.Int32)
+                .alias("rest_days_away"),
+                (pl.col("true_all_comp_rest_days_home") <= 3.5).alias("is_midweek_turnaround_home"),
+                (pl.col("true_all_comp_rest_days_away") <= 3.5).alias("is_midweek_turnaround_away"),
+                pl.col("all_comp_matches_last_14d_home").alias("matches_last_14d_home"),
+                pl.col("all_comp_matches_last_14d_away").alias("matches_last_14d_away"),
+            )
+        )
 
     # Matchup differentials (Home - Away)
     matchup = matchup.with_columns(

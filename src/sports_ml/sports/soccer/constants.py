@@ -415,3 +415,17 @@ SILVER_GK_MATCH_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "xga_faced": pl.Float64(),
     "gsaa": pl.Float64(),
 }
+
+SILVER_CLUB_ALL_COMPETITIONS_SCHEDULE_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "season": pl.Int32(),
+    "match_date": pl.Date(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+    "competition_type": pl.Utf8(),
+    "is_home": pl.Boolean(),
+    "venue_lat": pl.Float64(),
+    "venue_lon": pl.Float64(),
+    "extra_time_played": pl.Boolean(),
+    "squad_minutes_load": pl.Float64(),
+}

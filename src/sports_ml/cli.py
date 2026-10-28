@@ -53,6 +53,7 @@ from sports_ml.sports.soccer.features.player import build_soccer_stage2_player_f
 from sports_ml.sports.soccer.ingestion import (
     FootballDataClient,
     FPLAPIClient,
+    NonLeagueFixturesIngestor,
     SoccerSilverReconciler,
     UnderstatClient,
     check_soccer_data_sources,
@@ -690,6 +691,15 @@ def _run_soccer_ingestion(
             pl.concat(gk_frames, how="vertical"),
             team_logs_df=team_logs_df,
         )
+
+    nl_ingestor = NonLeagueFixturesIngestor(
+        cache_dir=settings.paths.raw_dir / "non_league_fixtures"
+    )
+    nl_df = nl_ingestor.load_cached_non_league_fixtures()
+    reconciler.reconcile_all_competitions_schedule(
+        nl_df,
+        epl_matches_df=reconciled_matches,
+    )
 
     _ = np
     if reconciler.matches_path.exists():
