@@ -459,6 +459,13 @@ def test_end_to_end_cli_and_predictor_pipeline(
     )
     assert res_pred1.exit_code == 0, res_pred1.stdout
     assert "Stage 1" in res_pred1.stdout
+    assert "Date" in res_pred1.stdout
+    assert "Matchup" in res_pred1.stdout
+    assert "P(Away)" in res_pred1.stdout
+    assert "P(Home)" in res_pred1.stdout
+    assert "Mkt A/H (Edge)" not in res_pred1.stdout
+    assert "E[G] A/H" not in res_pred1.stdout
+    assert "Goalie Status" not in res_pred1.stdout
 
     # 6. sports-ml predict (Stage 1 + Stage 2 with --include-players and --matchup)
     res_pred2 = runner.invoke(

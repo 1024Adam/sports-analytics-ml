@@ -287,6 +287,14 @@ def test_soccer_cli_end_to_end_pipeline(tmp_path: Path, monkeypatch: pytest.Monk
     )
     assert r_pred_s1.exit_code == 0, r_pred_s1.output
     assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in r_pred_s1.output
+    assert "Date" in r_pred_s1.output
+    assert "Matchup" in r_pred_s1.output
+    assert "P(Away)" in r_pred_s1.output
+    assert "P(Draw)" in r_pred_s1.output
+    assert "P(Home)" in r_pred_s1.output
+    assert "Mkt 1X2 (Edge)" not in r_pred_s1.output
+    assert "E[G] A/H" not in r_pred_s1.output
+    assert "Lineup Status" not in r_pred_s1.output
 
     # 6. Predict Stage 1 + Stage 2 (--include-players)
     r_pred_s2 = runner.invoke(

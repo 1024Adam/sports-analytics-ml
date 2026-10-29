@@ -63,7 +63,7 @@ uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --in
 
 ### Step 4: Interpret Output & Confidence Warnings
 Present the results clearly to the user:
-1. **Stage 1 Summary**: Report `P(Home Win)`, `P(Away Win)`, and expected regulation/OT scoring environment (`E[Home Goals]`, `E[Away Goals]`).
+1. **Stage 1 Summary**: Report the Stage 1 table columns: `Date`, `Matchup`, `P(Away)`, `P(Home)` (and `P(Draw)` for soccer).
 2. **Confidence & Lineup Warnings**: Highlight any surfaced warnings:
    - **Starting Goalie Status**: Whether each starter is `CONFIRMED` (`CONFIRMED_NHL_OFFICIAL` / `CONFIRMED_MORNING_SKATE`) or `PROJECTED_HEURISTIC`.
    - **Data Freshness**: Whether MoneyPuck $xG$ data is current or using the NHL API boxscore fallback (`has_moneypuck_xg = False`).

@@ -2,13 +2,21 @@
 
 A modular, leak-free, multi-sport machine learning platform built in **Python 3.11+** using **Polars**, **PyArrow**, **Pydantic**, **LightGBM**, **scikit-learn**, and **Typer/Rich**.
 
-Supports **NHL Hockey (`--sport hockey`)** and **English Premier League (EPL) Soccer (`--sport soccer`)**:
-- **NHL Hockey**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`) and **MoneyPuck**, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
-  1. **Stage 1 — Mandatory Calibrated Game Outcome Model**: Produces calibrated win probabilities $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$, alongside expected team scoring pace $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
-  2. **Stage 2 — Optional Player Matchup Stat Projections**: Conditioned on Stage 1's game environment and opponent strength, predicts skater usage ($\widehat{\text{TOI}}_{\text{ev}}, \widehat{\text{TOI}}_{\text{pp}}$), counting stats ($E[\text{G}], E[\text{A}], E[\text{PTS}], E[\text{SOG}]$), milestone probabilities ($P(\text{G} \ge 1), P(\text{PTS} \ge 1)$), and goalie metrics ($E[\text{SA}], E[\text{SV}], E[\text{GA}], E[\text{SV\%}]$) reconciled via damped proportional scaling ($\gamma = 0.50$).
-- **EPL Soccer**: Ingests fixtures, squad availability/set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**, and executes:
-  1. **Stage 1 — Mandatory Calibrated 3-Way (`1X2`) & Goals Environment Model**: Combines 3-way Elo (with promotion/relegation priors), Dixon-Coles bivariate Poisson low-score correlation ($\rho$), and Multiclass LightGBM to produce calibrated probabilities $P(\text{Home Win}) + P(\text{Draw}) + P(\text{Away Win}) = 1.0$ and expected goals $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$, evaluated via **Ranked Probability Score (RPS)**, 3-class Log Loss, and Brier Score.
-  2. **Stage 2 — Optional Outfield & Goalkeeper Projections**: Projects outfield player minutes ($\in [0, 90]$), goals, assists, goal involvements ($G+A$), shots, SOT, milestone probabilities, and goalkeeper saves, goals against, save %, and clean-sheet probability $P(\text{CS})$.
+## Two-Stage Prediction Architecture
+
+Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on strictly pre-game temporal features:
+
+1. **Stage 1 — Mandatory Calibrated Matchup Outcome Model**:
+   - Predicts calibrated pre-game win/outcome probabilities (`Date`, `Matchup`, `P(Away)`, `P(Home)`, plus `P(Draw)` for 3-way sports) and estimates the underlying scoring environment $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
+   - Evaluated via walk-forward cross-validation against Elo and de-vigged market benchmarks using Log Loss, Brier Score, Expected Calibration Error (ECE), and Ranked Probability Score (RPS).
+2. **Stage 2 — Optional Player Matchup Stat Projections (`--include-players`)**:
+   - Conditioned on Stage 1's projected scoring pace and opponent defensive/goaltending strength, projects individual playing time/usage, counting stats, milestone probabilities, and goalie/goalkeeper metrics.
+   - Reconciles bottom-up individual projections with Stage 1 team totals via damped proportional scaling ($\gamma = 0.50$).
+
+## Supported Sports & League Models
+
+- **NHL Hockey (`--sport hockey`)**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, high-danger chances, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`), **MoneyPuck**, and pre-game starting goalie/lineup feeds.
+- **English Premier League (EPL) Soccer (`--sport soccer`)**: Ingests fixtures, squad availability, set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**.
 
 ---
 
