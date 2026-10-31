@@ -1,8 +1,8 @@
 # Phased Implementation Roadmap
 
-> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [Data & Feature Specification](./data-and-features.md)
+> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [NHL Data & Feature Specification](./hockey-data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [MLB & NPB Baseball Data & Feature Specification](./baseball-data-and-features.md)
 
-This roadmap breaks the `sports-analytics-ml` platform into sequential, testable milestones across two phases (**Phase 1: Core Engine & NHL Hockey**, Milestones 1–6; **Phase 2: English Premier League (EPL) Soccer**, Milestones 7–11) designed for execution by the `sports-ml-developer` agent. Each milestone has explicit file deliverables, acceptance criteria, and mandatory `pytest` anti-leakage gates.
+This roadmap breaks the `sports-analytics-ml` platform into sequential, testable milestones across five phases (**Phase 1: Core Engine & NHL Hockey**, Milestones 1–6; **Phase 2: English Premier League (EPL) Soccer**, Milestones 7–11; **Phase 3: Platform Scalability & Storage Optimization**, Milestone 12; **Phase 4: Market Benchmarking, Cross-Competition Fatigue & Micro-Features**, Milestones 13–15; and **Phase 5: Dual-League MLB & NPB Baseball Plugin**, Milestones 16–21) designed for execution by the `sports-ml-developer` agent. Each milestone has explicit file deliverables, acceptance criteria, and mandatory `pytest` anti-leakage gates.
 
 ---
 
@@ -411,6 +411,202 @@ Instead of keeping 15+ GB of raw per-game JSONs uncompressed on disk, the ingest
   - **Strict Temporal Anti-Leakage Test**: Verify mutating shot coordinates, score states, or shift overlaps at event $\ge t$ leaves all pre-game micro-features at $< t$ bit-for-bit unchanged.
 - [x] Run `sports-ml backtest --sport hockey` and `sports-ml backtest --sport soccer` against the Milestone 13 closing-line benchmark to verify out-of-sample Log Loss / Brier / RPS improvement.
 - [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+# Phase 5: Dual-League MLB & NPB Baseball Plugin (`sports/baseball/`)
+
+Phase 5 extends `sports-analytics-ml` to **Baseball (`--sport baseball --league mlb|npb|all`)**, modeling both **Major League Baseball (MLB, 30 clubs)** and **Nippon Professional Baseball (NPB, 12 Central & Pacific League clubs)** under a unified plugin architecture with league-aware rules:
+1. **Stage 1 — League-Aware Calibrated Game Outcome & Run Environment Model**:
+   - **MLB (`2-Way Binary`)**: Predicts calibrated $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$ (accounting for unlimited extra innings + Manfred runner) alongside expected runs $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
+   - **NPB (`3-Way 12-Inning 1X2`)**: Predicts calibrated $P(\text{Home Win})$, $P(\text{Draw / 12-Inning Tie})$, and $P(\text{Away Win})$ summing strictly to $1.0$, plus conditional 2-way Draw-No-Bet (`DNB`) probabilities and expected runs $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
+2. **Stage 2 — Optional Starting Pitcher & Lineup Batter Matchup Projections (`--include-players`)**:
+   - **Starting Pitchers (`SP`)**: Projects `proj_outs_pitched`, `proj_ip`, `proj_k`, `proj_bb`, `proj_hits_allowed`, `proj_er`, `prob_5plus_k`, `prob_6plus_k`, `prob_7plus_k`, and `prob_quality_start`.
+   - **Lineup Batters (`1..9`)**: Projects `proj_pa`, `proj_hits`, `proj_total_bases`, `proj_hr`, `proj_runs`, `proj_rbi`, `proj_bb`, `proj_k`, `prob_1plus_hit`, `prob_2plus_tb`, and `prob_1plus_hr`, reconciled with Stage 1 team run totals ($\gamma = 0.50$).
+
+---
+
+## Milestone 16: Core Baseball Extensions, Dual-League Registry (30 MLB + 12 NPB Clubs) & Cross-League Translation Engine (`core/` & `sports/baseball/`)
+**Status**: `[ ] Planned`
+
+### Goal
+Establish the baseball plugin foundation (`src/sports_ml/sports/baseball/`), the 30-club MLB + 12-club NPB registries and ballpark coordinate/factor databases (including NPB regional/provincial neutral stadiums and Koshien displacement rules), exact `outs_pitched` (`scale_factor=27.0`) and `pa` exposure helpers, starter-adjusted & ballpark-adjusted Elo hooks, and the **NPB $\leftrightarrow$ MLB Cross-League Player Translation Engine**.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/__init__.py` & `src/sports_ml/sports/baseball/adapter.py`:
+  - `BaseballAdapter` implementing `SportAdapter` (`sport_slug = "baseball"`, `topology = "head_to_head"`), validating canonical `games.parquet`, `team_game_logs.parquet`, `pitcher_game_logs.parquet`, and `batter_game_logs.parquet` schemas across `"MLB"` and `"NPB"`, and enforcing sub-day doubleheader ordering (`event_seq` $\in \{1, 2\}$).
+- [ ] `src/sports_ml/sports/baseball/constants.py`:
+  - **MLB 30-Club Registry (`AL` & `NL`)**: Canonical 3-letter codes (`LAD`, `NYY`, `BOS`, `TOR`, `ATL`, `HOU`, `PHI`, `SDP`, `CHC`, `SEA`, `SFG`, `TEX`, `BAL`, `CLE`, `MIN`, `DET`, `KCR`, `TBR`, `CIN`, `MIL`, `STL`, `PIT`, `ARI`, `COL`, `MIA`, `NYM`, `WSN`, `LAA`, `CHW`, `ATH`), historical franchise/code aliases (`OAK`/`ATH`, `TBD`/`TBR`, `FLA`/`MIA`, `MON`/`WSN`, `ANA`/`LAA`, `CLE`), and 30 MLB ballpark coordinates, timezones, roof types (`fixed_dome`, `retractable`, `outdoor`), and multi-year rolling run/HR/LHB/RHB park factors.
+  - **NPB 12-Club Registry (`CL` Central League & `PL` Pacific League)**:
+    - **Central League (`CL`)**: Yomiuri Giants (`YOM`), Hanshin Tigers (`HAN`), Yokohama DeNA BayStars (`YOK`), Hiroshima Toyo Carp (`HIR`), Tokyo Yakult Swallows (`YAK`), Chunichi Dragons (`CHU`).
+    - **Pacific League (`PL`)**: Fukuoka SoftBank Hawks (`SOF`), Orix Buffaloes (`ORX`), Chiba Lotte Marines (`LOT`), Tohoku Rakuten Golden Eagles (`RAK`), Saitama Seibu Lions (`SEI`), Hokkaido Nippon-Ham Fighters (`FUK` / `NHF`).
+    - **NPB Primary & Regional Stadium Registry**: Coordinates, dome status, and park factors for all 12 primary stadiums (Tokyo Dome, Koshien, Yokohama, Mazda Zoom-Zoom, Meiji Jingu, Vantelin Dome Nagoya, Mizuho PayPay Dome, Kyocera Dome, Hotto Motto Field Kobe, ZOZO Marine, Rakuten Mobile Park, Belluna Dome, Es Con Field Hokkaido) **plus** NPB provincial/regional neutral venues (Matsuyama Botchan, Miyazaki, Toyama, Nagano, Hard Off Eco Stadium Niigata, Kitakyushu, Akita, Koriyama).
+  - **League-Specific Priors & FIP Constants**: Default wOBA linear weights, FIP constant $c_{\text{FIP}}$, HR/FB% priors, and Elo parameters partitioned by `league` $\in \{\text{"MLB"}, \text{"NPB"}\}$ (including NPB 3-way 12-inning draw parameter $\nu_{\text{NPB}} \approx 0.032$).
+- [ ] `src/sports_ml/sports/baseball/features/translation.py`:
+  - **Cross-League Player Translation Priors (`NPB <-> MLB`)**: Transforms prior-season player statistics when a batter or pitcher transitions between `"NPB"` and `"MLB"` (`translate_npb_to_mlb_batter_prior`, `translate_npb_to_mlb_pitcher_prior`, `translate_mlb_to_npb_batter_prior`, `translate_mlb_to_npb_pitcher_prior`) before feeding into `bayesian_shrinkage(...)`, preventing posted NPB stars or foreign NPB signings (`suketto`) from defaulting to generic rookie replacement priors.
+- [ ] `src/sports_ml/sports/baseball/features/elo_hooks.py`:
+  - Implements `StarterModifierHook` ($\Delta E_{\text{SP}} = \kappa_{\text{SP}} \cdot (\mu_{\text{TeamSP, xFIP}} - \text{xFIP}_{\text{SP}})$) and `VenueModifierHook` (ballpark run environment & neutral-venue HFA dampening for NPB regional games and MLB international series).
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_baseball_constants_and_adapter.py`:
+  - Verify all 30 MLB and 12 NPB clubs, historical tricode aliases, and primary + provincial stadiums resolve with valid coordinates, timezones, and finite park factors.
+  - Verify `BaseballAdapter` validates `event_seq = 1, 2` for same-day doubleheaders and rejects duplicate `(game_id, event_seq)` rows.
+  - Verify `outs_pitched` conversion (`6.1 IP -> 19 outs`, `6.2 IP -> 20 outs`) never treats `.1` or `.2` as decimal tenths.
+- [ ] `tests/sports/baseball/test_cross_league_translation.py`:
+  - Verify an NPB ace posting to MLB receives a translated MLB `FIP` / `K%` / `BB%` shrinkage prior strictly stronger than a generic MLB rookie prior, and that current-season MLB batters faced (`BF`) smoothly shrinks the prior weight toward `0` as sample size $n \to \infty$.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 17: Hybrid MLB & NPB Ingestion, Probable Pitchers, Lineups & Silver Lakehouse (`sports/baseball/ingestion/`)
+**Status**: `[ ] Planned`
+
+### Goal
+Build resilient, `.gz`-cached ingestion pipelines for **MLB** (`statsapi.mlb.com` + Statcast/FanGraphs exports) and **NPB** (`npb.jp/bis/eng/`, NPB probable starter announcements `予告先発`, and historical NPB game/player logs), reconciling both leagues into the canonical Silver Parquet tables under `data/silver/baseball/`.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/ingestion/mlb_api.py`:
+  - Cached `httpx` client (`data/raw/baseball/mlb_api/*.json.gz`) for MLB StatsAPI schedules (`hydrate=probablePitcher,lineups,venue,weather`), boxscores, and active 26-man rosters.
+  - Handles split and traditional doubleheaders (`gameNumber` $\rightarrow$ `event_seq` $\in \{1, 2\}$), suspended/resumed games, and postpaid final states (`FINAL` vs. `FUT`).
+- [ ] `src/sports_ml/sports/baseball/ingestion/statcast.py`:
+  - Downloader and Polars parser (`data/raw/baseball/statcast/*.csv.gz`) for MLB team, pitcher, and batter Statcast/FanGraphs game and season-to-date logs (`xwOBA`, `xERA`, `Barrel%`, `HardHit%`, `SwStr%`, `avg_fastball_velo`), with graceful fallback (`has_statcast_metrics = False`) when Statcast lags.
+- [ ] `src/sports_ml/sports/baseball/ingestion/npb_client.py`:
+  - Cached client and parser (`data/raw/baseball/npb/*.json.gz` / `*.csv.gz`) for NPB Central & Pacific League schedules, 12-inning boxscores (explicitly preserving 12-inning Ties `is_tie = 1`), stadium assignments (identifying provincial neutral stadiums and August Koshien road games), and active `ichi-gun` (first-team) roster registrations.
+- [ ] `src/sports_ml/sports/baseball/ingestion/lineups.py`:
+  - **2-Tier Pre-Game Probable Starting Pitcher, 1–9 Batting Order & IL/Roster Resolver**:
+    - **Tier 1 (Official Pre-Game Confirmed Lineup & Starter)**: MLB StatsAPI live pre-game batting order (`1..9`) & confirmed `probablePitcher` + NPB pre-game `スタメン` (starting lineup) & official `予告先発` (announced starter).
+    - **Tier 2 (Daytime / Early Projection Fallback)**: Probable starter rotation resolver + projected 1–9 platoon batting order (using handedness-specific lineup templates vs. `RHP` vs. `LHP`, excluding MLB `10/15/60-day IL` and NPB deactivated farm players).
+- [ ] `src/sports_ml/sports/baseball/ingestion/health.py` & `reconciler.py`:
+  - `check_baseball_data_sources(league: Literal["mlb", "npb", "all"] = "all")`: Upstream reachability and schema contract probes for `sports-ml check-sources --sport baseball`.
+  - `BaseballSilverReconciler`: Normalizes and upserts MLB and NPB records into `zstd`-compressed `data/silver/baseball/games.parquet`, `team_game_logs.parquet`, `pitcher_game_logs.parquet`, and `batter_game_logs.parquet`.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_baseball_ingestion.py`:
+  - Test MLB StatsAPI schedule/boxscore parsing (including a same-day doubleheader with `event_seq = 1` and `event_seq = 2`), Statcast join + fallback, and NPB 12-inning tie game parsing (`home_runs == away_runs`, `innings_played == 12`, `outcome_1x2 == 1`).
+  - Test 2-Tier pre-game resolver for both confirmed 1–9 lineups and daytime platoon-projected lineups (verifying different projected lineups when facing a `LHP` vs. `RHP`).
+  - Verify all raw caches are written as `.json.gz` / `.csv.gz` via `core/cache.py` and Silver tables enforce uniqueness on `(game_id, event_seq)`.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 18: Baseball Pre-Game Feature Engineering: Starting Pitchers, Bullpen Workload, Platoon Lineups & Venue Context (`sports/baseball/features/`)
+**Status**: `[ ] Planned`
+
+### Goal
+Construct the leak-free Gold feature pipelines (`data/gold/baseball/`) capturing starting pitcher skill & pitch-count ceilings, 3-day bullpen fatigue & high-leverage availability, handedness platoon-adjusted 1–9 batting orders, cross-league translation priors, and ballpark/schedule context for both MLB and NPB.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/features/pitcher.py`:
+  - Pre-game starting pitcher feature builder using `.shift(1)` over `(start_time_utc, event_seq, game_id)`:
+  - Rolling 5-start, 10-start, EWMA, and Bayesian-shrunk ($k_{\text{sp}} = 180\text{ BF}$, with `NPB <-> MLB` translation support) `sp_xfip_shrunk`, `sp_fip_shrunk`, `sp_era_shrunk`, `sp_k_minus_bb_pct_shrunk`, `sp_whip_shrunk`, `sp_hr_per_9_shrunk`, `sp_gb_pct_shrunk`, `sp_days_rest`, `sp_rolling_pitches_per_start`, and `sp_expected_outs_ceiling`.
+- [ ] `src/sports_ml/sports/baseball/features/bullpen.py`:
+  - Pre-game relief corps quality (`bp_xfip_shrunk`, `bp_k_minus_bb_pct_shrunk`, `bp_lob_pct_shrunk`) and acute workload fatigue strictly before first pitch (`bp_pitches_last_1d`, `bp_pitches_last_3d`, `bp_outs_last_3d`, and `high_leverage_arms_unavailable_count` for top-3 relievers who pitched back-to-back days or $\ge 28$ pitches yesterday).
+- [ ] `src/sports_ml/sports/baseball/features/lineup.py`:
+  - Active 1–9 batting order aggregator weighting batters by slot Plate Appearance weights ($w_1 > w_2 > \dots > w_9$) and adjusting each batter's shrunk `wOBA`, `ISO`, `K%`, and `BB%` for the opposing starting pitcher's handedness (`opp_sp_hand` $\in \{\text{"L"}, \text{"R"}\}$ with heavy platoon shrinkage $k_{\text{LHB}} = 1000, k_{\text{RHB}} = 2200$).
+  - Computes `lineup_platoon_woba`, `lineup_platoon_iso`, `lineup_platoon_k_pct`, `lineup_same_hand_share`, and `missing_regular_pa_woba`.
+- [ ] `src/sports_ml/sports/baseball/features/team.py` & `player.py`:
+  - Team rolling run-scoring efficiency, Pythagorean / BaseRuns luck regression signal (`actual_win_pct - pythag_win_pct_w30`, `runs_for - baseruns_for_w20`), ballpark run/HR factors (`venue_run_factor`, `venue_hr_factor_matchup`), dome/weather context, travel/timezone shift, doubleheader flags (`is_doubleheader_g1`, `is_doubleheader_g2`), interleague flag (`is_interleague`), and NPB neutral/Koshien road-trip flags.
+  - `player.py`: Stage 2 individual starting pitcher and lineup batter matchup feature matrix builder.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_baseball_features.py`:
+  - **Strict Anti-Leakage Test (Including Same-Day Doubleheader Game 1 $\rightarrow$ Game 2)**: Verify that mutating runs, hits, pitcher strikeouts, or bullpen pitches for events at index $\ge t$ (including Game 2 of a same-day doubleheader at index $t$) produces **bit-for-bit identical** features for Game 1 at index $t-1$.
+  - **Platoon Handedness Sensitivity Test**: Verify that switching an opposing starting pitcher from a right-hander (`RHP`) to a left-hander (`LHP`) updates `lineup_platoon_woba` and `lineup_same_hand_share` deterministically without leaking current-game stats.
+  - **Bullpen 3-Day Fatigue Test**: Verify that a reliever pitching on Day $d-2$ and Day $d-1$ increments `high_leverage_arms_unavailable_count` on Day $d$, and resets cleanly after an off-day on Day $d+1$.
+  - **Cold-Start & Cross-League Transfer Test**: Verify Opening Day (Game 1), debuting rookies, and NPB $\rightarrow$ MLB transferred players produce finite, non-null features with zero `NaN`s.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 19: Stage 1 — League-Aware Calibrated Game Outcome (2-Way MLB & 3-Way 12-Inning NPB) & Run Environment Pipeline (`sports/baseball/models/stage1_game.py`)
+**Status**: `[ ] Planned`
+
+### Goal
+Implement the mandatory Stage 1 baseball game outcome pipeline supporting **2-Way Binary Win Probability for MLB** and **3-Way (`Home Win`, `12-Inning Tie/Draw`, `Away Win`) Probability for NPB**, coupled with Negative-Binomial/Tweedie team-run environment estimators $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$ and walk-forward backtesting.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/models/stage1_game.py`:
+  - **Auxiliary Team-Runs Environment Model**: Negative-Binomial / Tweedie regressors (`objective="tweedie"`, `tweedie_variance_power=1.5`) estimating pre-game expected runs $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$ and dispersion $\alpha_{\text{league}}$, capturing baseball's overdispersed (multi-run home run / big-inning) scoring distribution.
+  - **Bivariate Negative-Binomial / Skellam Run-Distribution Probabilities**:
+    - Computes 9-inning regulation win/tie/loss probabilities and models extra-inning resolution:
+      - **MLB**: Unlimited extra innings (with Manfred runner scoring boost in innings $10+$) $\rightarrow$ strictly binary $(P_{\text{NB}}(\text{Home}), P_{\text{NB}}(\text{Away}))$ summing to $1.0$.
+      - **NPB**: Explicit 3-inning extra cap (innings $10, 11, 12$) $\rightarrow$ structural 3-way $(P_{\text{NB}}(\text{Home}), P_{\text{NB}}(\text{Draw}_{12}), P_{\text{NB}}(\text{Away}))$ summing to $1.0$.
+  - **League-Aware Hybrid GBDT + Calibration Ensemble (`Stage1BaseballGameModel`)**:
+    - Blends Starter-Adjusted Elo, Negative-Binomial run-implied probabilities, and LightGBM classifiers trained on pre-game starting pitcher, bullpen, platoon lineup, and ballpark differentials.
+    - Applies out-of-fold `BinaryProbabilityCalibrator` for MLB (`P(Home) + P(Away) = 1.0`) and `MulticlassProbabilityCalibrator` for NPB (`P(Home) + P(Draw) + P(Away) = 1.0`, plus derived Draw-No-Bet `p_home_dnb = P(Home) / (P(Home) + P(Away))`).
+  - **Walk-Forward Backtesting Harness (`run_baseball_stage1_walk_forward_backtest`)**:
+    - Evaluates MLB via **Log Loss**, **Brier Score**, **ECE**, and Accuracy against coin-flip (`0.50`), empirical MLB home-field baseline (`~0.535`), and Starter-Adjusted Elo.
+    - Evaluates NPB via **Ranked Probability Score (RPS)**, **3-Class Log Loss**, **Multi-Class Brier Score**, **ECE**, and **DNB Log Loss** against empirical NPB `1X2` prior and NPB Elo-1X2 baseline, with `FoldBoundaryAudit` proving zero temporal overlap.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_stage1_model.py`:
+  - Verify MLB predictions satisfy $P(\text{Home Win}) \in (0, 1)$, $P(\text{Away Win}) \in (0, 1)$, `prob_draw == 0.0`, and $P(\text{Home Win}) + P(\text{Away Win}) = 1.0$ (within `1e-9`).
+  - Verify NPB predictions satisfy $P(\text{Home Win}), P(\text{Draw}), P(\text{Away Win}) \in (0, 1)$ and $P(\text{Home Win}) + P(\text{Draw}) + P(\text{Away Win}) = 1.0$ (within `1e-9`), and that $P(\text{Draw})$ increases when $\hat{\lambda}_{\text{home}} \approx \hat{\lambda}_{\text{away}}$ in low-run pitching duels (e.g., $\hat{\lambda} = 2.8$ vs. $\hat{\lambda} = 5.5$).
+  - Verify walk-forward training never fits the GBDT, run regressors, or calibrators on validation/test dates (`gbdt_train_max_time < calibrator_min_time <= calibrator_max_time < val_min_time`).
+  - Verify calibrated models beat the empirical home-win/1X2 baseline on synthetic directional MLB and NPB datasets.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 20: Stage 2 Starting Pitcher & Batter Projections, Unified Baseball Predictor & CLI Integration (`sports/baseball/models/` & `cli.py`)
+**Status**: `[ ] Planned`
+
+### Goal
+Implement the optional Stage 2 Starting Pitcher (`SP`) and Lineup Batter (`1..9`) matchup projection models conditioned on Stage 1, wire `BaseballMatchupPredictor` into the `sports-ml` CLI (`--sport baseball [--league mlb|npb|all]`), and update platform documentation and skills.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/models/stage2_player.py`:
+  - **Starting Pitcher (`SP`) Projection Pipeline**:
+    - Predicts expected outs recorded `proj_outs_pitched` ($\in [0, 27]$), `proj_ip` ($\text{outs}/3$), and `proj_batters_faced` ($\widehat{\text{BF}}$).
+    - LightGBM Poisson/Tweedie regressors conditioned on starter `K%`/`BB%`/`xFIP`, opposing lineup platoon `K%`/`wOBA`, ballpark factor, and Stage 1 $\hat{\lambda}_{\text{opp}}$ predicting `proj_k`, `proj_bb`, `proj_hits_allowed`, `proj_er`, `prob_5plus_k`, `prob_6plus_k`, `prob_7plus_k`, and `prob_quality_start`.
+  - **Lineup Batter (`1..9`) Projection Pipeline**:
+    - **Slot & Home/Away PA Projector**: Estimates `proj_pa` ($\in [0, 6.0]$) conditioned on `batting_order_slot` (`1..9`), `is_home` (accounting for unplayed bottom-9th innings when home team leads), and Stage 1 $\hat{\lambda}_{\text{team}}$.
+    - **Batter Count & Milestone Models**: Predicts `proj_hits`, `proj_total_bases`, `proj_hr`, `proj_runs`, `proj_rbi`, `proj_bb`, `proj_k`, `prob_1plus_hit`, `prob_2plus_tb`, and `prob_1plus_hr` conditioned on opposing `SP` skill/handedness, opposing bullpen `xFIP`, and ballpark HR/run factors.
+  - **Cross-Stage Coherence Reconciler (`reconcile_baseball_stage2_projections`)**:
+    - Soft-scales lineup batter `proj_runs` and `proj_rbi` toward Stage 1's $\hat{\lambda}_{\text{team}}$ ($\gamma = 0.50$) and reconciles starter `proj_er` with Stage 1 opponent scoring pace.
+- [ ] `src/sports_ml/sports/baseball/models/predictor.py`:
+  - `BaseballMatchupPredictor` supporting `predict_matchup(..., league: str | None = None, event_seq: int = 1, include_players: bool = False)`, `predict_date(..., league: str = "all", include_players: bool = False)`, and `predict_team_next_games(team, n_games, include_players=False)` (auto-resolving whether `team` is an MLB or NPB club).
+  - Surfaces pre-game confidence warnings (`CONFIRMED_SP` vs. `PROBABLE_SP` vs. `TBD_ROTATION_PROJECTED`, `CONFIRMED_LINEUP_1_9` vs. `PLATOON_PROJECTED_LINEUP`, `CROSS_LEAGUE_TRANSLATION_PRIOR`, `NPB_NEUTRAL_PROVINCIAL_STADIUM`, `STATCAST_FALLBACK`), and appends to `data/predictions/baseball_predictions.parquet`.
+- [ ] `src/sports_ml/cli.py`:
+  - Register `--sport baseball` and add `--league [mlb|npb|all]` option across `check-sources`, `ingest`, `features build`, `train`, `backtest`, `predict` (including `--matchup AWAY@HOME`, `--game-seq 1|2` for doubleheaders, `--team`, `--games`, `--include-players`, `--offline`), and `score-predictions`.
+  - Rich terminal tables displaying MLB 2-way (`P(Away)`, `P(Home)`) and NPB 3-way (`P(Away)`, `P(Draw)`, `P(Home)`, `P(Home DNB)`), Starting Pitcher matchup cards (`SP Hand`, `Shrunk xFIP`, `K-BB%`, `Proj IP`, `Proj K`, `P(QS)`), and 1–9 Batting Order projection tables.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_stage2_player.py`:
+  - Verify all predicted pitcher/batter counts, `proj_outs_pitched` ($\in [0, 27]$), and `proj_pa` ($\in [0, 6.5]$) are non-negative ($\ge 0$) and milestone probabilities (`prob_6plus_k`, `prob_quality_start`, `prob_1plus_hit`, `prob_1plus_hr`) lie in $[0, 1]$.
+  - Verify **Batting Order Slot Monotonicity**: For two identical batters on the same team, Slot 1 (`leadoff`) receives strictly higher `proj_pa` than Slot 9.
+  - Verify **Stage-Conditioning & Park-Factor Monotonicity**: Increasing Stage 1's $\hat{\lambda}_{\text{team}}$ or moving a game from a pitcher's dome (`venue_run_factor = 0.86`) to Coors Field / Jingu (`venue_run_factor = 1.25`) increases reconciled batter run/TB projections; facing a high-`K%` ace increases opposing batter `proj_k` and starter `prob_6plus_k`.
+- [ ] `tests/sports/baseball/test_baseball_cli_e2e.py`:
+  - End-to-end offline CLI integration test running `ingest` $\rightarrow$ `features build` $\rightarrow$ `train` $\rightarrow$ `backtest` $\rightarrow$ `predict` (Stage 1 & `--include-players`, across both `--league mlb` and `--league npb`, plus `--team` next-$N$-games) $\rightarrow$ `score-predictions`.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+## Milestone 21: MLB Statcast Pitch/Batted-Ball Micro-Features, NPB DIPS/Koshien Context & Closing Odds Firewall (`sports/baseball/`)
+**Status**: `[ ] Planned`
+
+### Goal
+Enrich the baseball plugin with pitch- and batted-ball micro-features (**MLB Statcast `xwOBA`, `Barrel%`, `HardHit%`, `Stuff+` / Arsenal Velocity Delta & Whiff Rate**; **NPB DIPS, Groundball/Flyball & Provincial/Koshien Venue Micro-Features**) and benchmark Stage 1 MLB & NPB predictions against historical closing odds under the strict **`market_*` anti-contamination firewall**.
+
+### Deliverables
+- [ ] `src/sports_ml/sports/baseball/ingestion/statcast_micro.py` & `npb_micro.py`:
+  - Aggregate pitch-level and batted-ball micro-summaries into compact `zstd`-compressed `data/silver/baseball/pitcher_micro_logs.parquet` and `batter_micro_logs.parquet`:
+    - **Pitcher Arsenal & Stuff Micro-Features**: Fastball velocity delta vs. 12-month baseline (`sp_velo_delta_mph`, detecting acute fatigue or injury Decline before ERA spikes!), swinging-strike rate (`sp_swstr_pct`), chase rate (`sp_o_swing_pct`), contact suppression (`sp_xwoba_against`, `sp_barrel_pct_against`), and First-Pitch Strike % (`sp_f_strike_pct`).
+    - **Batter Contact Quality & Discipline Micro-Features**: `batter_xwoba`, `batter_barrel_per_pa`, `batter_hard_hit_pct`, `batter_sweet_spot_pct`, `batter_chase_pct`, and `batter_woba_minus_xwoba_luck` (identifying unsustainable BABIP streaks prior to regression).
+    - **NPB DIPS, Batted-Ball & Koshien/Provincial Micro-Context**: Infield/outfield hit & HR park-interaction scores, sacrificial bunt / small-ball tactical propensity (`sac_bunt_rate`), and neutral provincial stadium travel/surface adjustments.
+- [ ] `src/sports_ml/sports/baseball/ingestion/odds.py`:
+  - `BaseballOddsIngestor`: Imports historical and pre-game evaluation-only closing odds for MLB (2-way moneyline & run total) and NPB (3-way `1X2` and 2-way Draw-No-Bet moneyline) into `games.parquet` (`market_home_decimal_odds`, `market_draw_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_draw`, `market_prob_away`) using power de-vigging from `core/market.py`.
+- [ ] `src/sports_ml/sports/baseball/features/pipeline.py`:
+  - Wire rolling `.shift(1)` micro-features into Stage 1 and Stage 2 (`diff_sp_velo_delta`, `diff_sp_swstr_pct`, `diff_lineup_xwoba`, `diff_woba_minus_xwoba_regression`).
+  - Enforce the **Hard Odds Firewall** prohibiting any `market_*` or `odds` column from entering `STAGE1_FEATURE_COLUMNS` or `STAGE2_FEATURE_COLUMNS`.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/sports/baseball/test_baseball_micro_features.py`:
+  - **Velocity Delta & BABIP Regression Test**: Verify that a `-1.8 mph` drop in a starter's fastball velocity over their last 2 starts is captured in pre-game `sp_velo_delta_mph` at start $t$, and that mutating pitch tracking at start $\ge t$ leaves all features at $< t$ bit-for-bit unchanged.
+- [ ] `tests/sports/baseball/test_baseball_odds_firewall.py`:
+  - **Strict Anti-Contamination Test**: Verify that no column starting with `market_` or containing `odds` is ever present in Baseball Stage 1 or Stage 2 feature lists, and that mutating `market_*` columns in `games.parquet` changes `0.0` of predicted probabilities while updating the backtest `MarketEdgeReport`.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
 
 
 

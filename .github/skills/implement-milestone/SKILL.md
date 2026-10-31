@@ -17,7 +17,7 @@ disable-model-invocation: false
 
 ### Step 1: Load Blueprint & Target Milestone Context
 1. Read `./docs/roadmap.md` to identify the target milestone (either the number specified by the user, or the first milestone marked `[ ] Not Started` / `[~] In Progress`).
-2. Read the corresponding sections of `./docs/architecture.md` and `./docs/data-and-features.md` to confirm exact file paths, function signatures, Polars schemas, and mathematical formulas.
+2. Read the corresponding sections of `./docs/architecture.md` and `./docs/hockey-data-and-features.md` to confirm exact file paths, function signatures, Polars schemas, and mathematical formulas.
 3. Register the milestone's deliverables and test tasks in `#tool:todo`.
 
 ### Step 2: Implement Deliverables Incrementally

@@ -19,7 +19,7 @@ disable-model-invocation: false
 1. Analyze the feature description provided in the user's prompt to determine:
    - Target scope (`core/` sport-agnostic engine vs. `sports/hockey/`, `sports/soccer/`, or CLI/tooling).
    - Affected pipeline layer(s) (ingestion, Silver reconciliation, Gold feature engineering, Stage 1/Stage 2 models, evaluation/backtesting, or CLI).
-2. Read the corresponding sections of `./docs/architecture.md`, `./docs/data-and-features.md`, or `./docs/soccer-data-and-features.md` and inspect existing modules to confirm schemas, contracts, and integration points.
+2. Read the corresponding sections of `./docs/architecture.md`, `./docs/hockey-data-and-features.md`, or `./docs/soccer-data-and-features.md` and inspect existing modules to confirm schemas, contracts, and integration points.
 3. Register the feature's implementation deliverables and test tasks in `#tool:todo`.
 
 ### Step 2: Implement Deliverables Incrementally
@@ -44,5 +44,5 @@ uv run pytest --cov=sports_ml
 ```
 
 ### Step 5: Update Documentation & Summarize
-1. Once all four checks in Step 4 exit with code `0`, update any directly affected documentation (such as `./README.md`, `./docs/architecture.md`, `./docs/data-and-features.md`, or `./docs/soccer-data-and-features.md`) if CLI options, schemas, or feature definitions changed.
+1. Once all four checks in Step 4 exit with code `0`, update any directly affected documentation (such as `./README.md`, `./docs/architecture.md`, `./docs/hockey-data-and-features.md`, or `./docs/soccer-data-and-features.md`) if CLI options, schemas, or feature definitions changed.
 2. Report a concise summary of created/updated files, how the prompt's feature requirements were satisfied, and test/verification results.

@@ -1,6 +1,6 @@
 # EPL Soccer Data Contracts & Feature Engineering Specification
 
-> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [Hockey Data & Feature Specification](./data-and-features.md) | [Implementation Roadmap](./roadmap.md)
+> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [Hockey Data & Feature Specification](./hockey-data-and-features.md) | [Implementation Roadmap](./roadmap.md)
 
 ## 1. Hybrid EPL Data Source Strategy
 

@@ -75,7 +75,7 @@ class Settings(BaseModel):
     random_seed: int = RANDOM_SEED
     paths: DataLakePaths = Field(default_factory=DataLakePaths)
 
-    # Default temporal & shrinkage parameters (see docs/data-and-features.md)
+    # Default temporal & shrinkage parameters (see docs/hockey-data-and-features.md)
     rolling_windows: tuple[int, ...] = (5, 10, 25)
     ewma_alpha: float = 0.12
     prior_season_weight: float = 0.65
