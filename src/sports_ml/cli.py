@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import polars as pl
 import typer
@@ -27,6 +27,30 @@ from sports_ml.core.evaluation import (
 )
 from sports_ml.core.market import MarketEdgeReport
 from sports_ml.core.registry import ModelRegistry
+from sports_ml.sports.baseball.ingestion import (
+    BaseballSilverReconciler,
+    MLBStatsAPIClient,
+    NPBClient,
+    StatcastClient,
+    check_baseball_data_sources,
+    derive_active_baseball_season,
+    parse_mlb_boxscore_payload,
+    parse_mlb_schedule_payload,
+    parse_npb_boxscore_payload,
+    parse_npb_schedule_payload,
+    parse_statcast_batter_metrics_csv,
+    parse_statcast_pitcher_metrics_csv,
+    parse_statcast_team_metrics_csv,
+)
+from sports_ml.sports.baseball.models import (
+    BaseballMatchupPrediction,
+    BaseballMatchupPredictor,
+    Stage1BaseballGameModel,
+    Stage2BaseballPlayerModel,
+    build_and_persist_baseball_gold_features,
+    run_baseball_stage1_walk_forward_backtest,
+    score_baseball_prediction_ledger,
+)
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
 from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
 from sports_ml.sports.hockey.ingestion.moneypuck import MoneyPuckClient
@@ -95,11 +119,20 @@ console = Console()
 
 def _ensure_supported_sport(sport: str) -> str:
     slug = sport.strip().lower()
-    if slug not in {"hockey", "soccer"}:
+    if slug not in {"hockey", "soccer", "baseball"}:
         raise typer.BadParameter(
-            f"Unsupported sport '{sport}'. Active plugins: 'hockey', 'soccer'."
+            f"Unsupported sport '{sport}'. Active plugins: 'hockey', 'soccer', 'baseball'."
         )
     return slug
+
+
+def _ensure_baseball_league(league: str) -> str:
+    lg = league.strip().lower()
+    if lg not in {"mlb", "npb", "all"}:
+        raise typer.BadParameter(
+            f"Unsupported baseball league '{league}'. Expected 'mlb', 'npb', or 'all'."
+        )
+    return lg
 
 
 def _parse_start_year_token(token: str) -> int:
@@ -721,11 +754,236 @@ def _run_soccer_ingestion(
     return pl.DataFrame()
 
 
+def _run_baseball_ingestion(
+    settings: Settings,
+    *,
+    league: str = "all",
+    seasons: str | None = None,
+    from_year: int | str | None = None,
+    current_season: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    offline: bool = False,
+) -> pl.DataFrame:
+    """Execute hybrid MLB StatsAPI + Statcast + NPB ingestion and reconcile into Silver tables."""
+    settings.paths.ensure_dirs(sport="baseball")
+    raw_mlb_dir = settings.paths.raw_dir / "baseball" / "mlb_api"
+    raw_sc_dir = settings.paths.raw_dir / "baseball" / "statcast"
+    raw_npb_dir = settings.paths.raw_dir / "baseball" / "npb"
+    silver_dir = settings.paths.silver_dir / "baseball"
+
+    reconciler = BaseballSilverReconciler(silver_dir=silver_dir)
+    mlb_client = MLBStatsAPIClient(cache_dir=raw_mlb_dir)
+    sc_client = StatcastClient(cache_dir=raw_sc_dir)
+    npb_client = NPBClient(cache_dir=raw_npb_dir)
+
+    lg_mode = _ensure_baseball_league(league)
+    active_yr = derive_active_baseball_season()
+    target_years: set[int] = set()
+    if from_year is not None:
+        s_yr = _parse_start_year_token(str(from_year))
+        for y in range(s_yr, active_yr + 1):
+            target_years.add(y)
+    if seasons:
+        for tok in seasons.split(","):
+            t = tok.strip()
+            if t:
+                target_years.add(_parse_start_year_token(t[:4]))
+    if current_season or not target_years:
+        target_years.add(active_yr)
+
+    game_frames: list[pl.DataFrame] = []
+    team_frames: list[pl.DataFrame] = []
+    pitcher_frames: list[pl.DataFrame] = []
+    batter_frames: list[pl.DataFrame] = []
+    sc_team_frames: list[pl.DataFrame] = []
+    sc_pitcher_frames: list[pl.DataFrame] = []
+    sc_batter_frames: list[pl.DataFrame] = []
+
+    # 1. Process pre-cached MLB schedules, boxscores, and Statcast CSVs
+    if lg_mode in {"mlb", "all"}:
+        mlb_sched_dir = raw_mlb_dir / "schedules"
+        mlb_box_dir = raw_mlb_dir / "boxscores"
+        if mlb_sched_dir.exists():
+            for sf in list_cached_files(mlb_sched_dir, "*.json"):
+                payload = read_cached_json(sf)
+                if isinstance(payload, dict):
+                    g_df = parse_mlb_schedule_payload(payload)
+                    if not g_df.is_empty():
+                        game_frames.append(g_df)
+
+        if not offline and (start_date and end_date):
+            s_dt = date.fromisoformat(start_date)
+            e_dt = date.fromisoformat(end_date)
+            with contextlib.suppress(Exception):
+                payload = mlb_client.fetch_schedule(s_dt, e_dt)
+                g_df = parse_mlb_schedule_payload(payload, season=s_dt.year)
+                if not g_df.is_empty():
+                    game_frames.append(g_df)
+
+        all_mlb_games = (
+            pl.concat(game_frames, how="vertical").unique(
+                subset=["game_id", "event_seq"], keep="last"
+            )
+            if game_frames
+            else pl.DataFrame()
+        )
+        mlb_meta_by_id: dict[int, tuple[int, date, datetime, int]] = {}
+        if not all_mlb_games.is_empty():
+            for r in all_mlb_games.iter_rows(named=True):
+                mlb_meta_by_id[int(r["game_id"])] = (
+                    int(r.get("event_seq") or 1),
+                    r["game_date"],
+                    r["start_time_utc"],
+                    int(r["season"]),
+                )
+
+        if mlb_box_dir.exists():
+            for bf in list_cached_files(mlb_box_dir, "*.json"):
+                stem = cache_stem(bf)
+                if not stem.isdigit():
+                    continue
+                gid = int(stem)
+                payload = read_cached_json(bf)
+                if isinstance(payload, dict):
+                    seq, gdate, gutc, s_yr = mlb_meta_by_id.get(
+                        gid,
+                        (
+                            1,
+                            date(active_yr, 5, 1),
+                            datetime(active_yr, 5, 1, 20, 0, tzinfo=UTC),
+                            active_yr,
+                        ),
+                    )
+                    t_df, p_df, b_df = parse_mlb_boxscore_payload(
+                        payload,
+                        game_id=gid,
+                        event_seq=seq,
+                        game_date=gdate,
+                        start_time_utc=gutc,
+                        season=s_yr,
+                    )
+                    if not t_df.is_empty():
+                        team_frames.append(t_df)
+                    if not p_df.is_empty():
+                        pitcher_frames.append(p_df)
+                    if not b_df.is_empty():
+                        batter_frames.append(b_df)
+
+        if raw_sc_dir.exists():
+            for sc_f in list_cached_files(raw_sc_dir, "statcast_teams_*.csv"):
+                sc_team_frames.append(parse_statcast_team_metrics_csv(sc_f))
+            for sc_f in list_cached_files(raw_sc_dir, "statcast_pitchers_*.csv"):
+                sc_pitcher_frames.append(parse_statcast_pitcher_metrics_csv(sc_f))
+            for sc_f in list_cached_files(raw_sc_dir, "statcast_batters_*.csv"):
+                sc_batter_frames.append(parse_statcast_batter_metrics_csv(sc_f))
+
+    # 2. Process pre-cached NPB schedules and boxscores
+    if lg_mode in {"npb", "all"}:
+        npb_sched_dir = raw_npb_dir / "schedules"
+        npb_box_dir = raw_npb_dir / "boxscores"
+        npb_game_frames: list[pl.DataFrame] = []
+        if npb_sched_dir.exists():
+            for sf in list_cached_files(npb_sched_dir, "*.json"):
+                payload = read_cached_json(sf)
+                if isinstance(payload, (dict, list)):
+                    g_df = parse_npb_schedule_payload(payload)
+                    if not g_df.is_empty():
+                        npb_game_frames.append(g_df)
+                        game_frames.append(g_df)
+
+        if not offline:
+            for yr in sorted(target_years):
+                with contextlib.suppress(Exception):
+                    payload = npb_client.fetch_season_schedule(yr)
+                    g_df = parse_npb_schedule_payload(payload, season=yr)
+                    if not g_df.is_empty():
+                        npb_game_frames.append(g_df)
+                        game_frames.append(g_df)
+
+        all_npb_games = (
+            pl.concat(npb_game_frames, how="vertical").unique(
+                subset=["game_id", "event_seq"], keep="last"
+            )
+            if npb_game_frames
+            else pl.DataFrame()
+        )
+        npb_meta_by_id: dict[int, tuple[int, date, datetime, int]] = {}
+        if not all_npb_games.is_empty():
+            for r in all_npb_games.iter_rows(named=True):
+                npb_meta_by_id[int(r["game_id"])] = (
+                    int(r.get("event_seq") or 1),
+                    r["game_date"],
+                    r["start_time_utc"],
+                    int(r["season"]),
+                )
+
+        if npb_box_dir.exists():
+            for bf in list_cached_files(npb_box_dir, "*.json"):
+                stem = cache_stem(bf)
+                if not stem.isdigit():
+                    continue
+                gid = int(stem)
+                payload = read_cached_json(bf)
+                if isinstance(payload, dict):
+                    seq, gdate, gutc, s_yr = npb_meta_by_id.get(
+                        gid,
+                        (
+                            1,
+                            date(active_yr, 6, 1),
+                            datetime(active_yr, 6, 1, 9, 0, tzinfo=UTC),
+                            active_yr,
+                        ),
+                    )
+                    t_df, p_df, b_df = parse_npb_boxscore_payload(
+                        payload,
+                        game_id=gid,
+                        event_seq=seq,
+                        game_date=gdate,
+                        start_time_utc=gutc,
+                        season=s_yr,
+                    )
+                    if not t_df.is_empty():
+                        team_frames.append(t_df)
+                    if not p_df.is_empty():
+                        pitcher_frames.append(p_df)
+                    if not b_df.is_empty():
+                        batter_frames.append(b_df)
+
+    _ = sc_client
+    sc_teams_all = pl.concat(sc_team_frames, how="vertical") if sc_team_frames else None
+    sc_pitchers_all = pl.concat(sc_pitcher_frames, how="vertical") if sc_pitcher_frames else None
+    sc_batters_all = pl.concat(sc_batter_frames, how="vertical") if sc_batter_frames else None
+
+    if game_frames:
+        reconciler.reconcile_games(pl.concat(game_frames, how="vertical"))
+    if team_frames:
+        reconciler.reconcile_team_logs(
+            pl.concat(team_frames, how="vertical"), statcast_team_df=sc_teams_all
+        )
+    if pitcher_frames:
+        reconciler.reconcile_pitcher_logs(
+            pl.concat(pitcher_frames, how="vertical"), statcast_pitcher_df=sc_pitchers_all
+        )
+    if batter_frames:
+        reconciler.reconcile_batter_logs(
+            pl.concat(batter_frames, how="vertical"), statcast_batter_df=sc_batters_all
+        )
+
+    if reconciler.games_path.exists():
+        return pl.read_parquet(reconciler.games_path)
+    return pl.DataFrame()
+
+
 @app.command("ingest")
 def ingest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
     seasons: Annotated[
         str | None,
         typer.Option(
@@ -765,6 +1023,26 @@ def ingest_command(
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     try:
+        if slug == "baseball":
+            lg_mode = _ensure_baseball_league(league)
+            active_yr = derive_active_baseball_season()
+            b_games_df = _run_baseball_ingestion(
+                settings,
+                league=lg_mode,
+                seasons=seasons,
+                from_year=from_year,
+                current_season=current_season,
+                start_date=start_date,
+                end_date=end_date,
+                offline=offline,
+            )
+            console.print(
+                f"[bold green]Ingestion complete[/bold green] for sport='baseball' "
+                f"(league='{lg_mode}', active_season={active_yr}, "
+                f"silver_games={b_games_df.height})."
+            )
+            return
+
         if slug == "soccer":
             active_season = derive_active_epl_season()
             resolved_seasons = expand_target_seasons(
@@ -821,13 +1099,20 @@ def ingest_command(
 @features_app.command("build")
 def features_build_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
 ) -> None:
     """Recompute leak-free pre-game Gold feature tables from local Silver Parquet data."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
-    if slug == "soccer":
+    if slug == "baseball":
+        lg_mode = _ensure_baseball_league(league)
+        s1_df, s2_df, _ = build_and_persist_baseball_gold_features(settings, league=lg_mode)
+    elif slug == "soccer":
         s1_df, s2_df, _, _ = build_and_persist_soccer_gold_features(settings)
     else:
         s1_df, s2_df, _, _ = build_and_persist_gold_features(settings)
@@ -878,8 +1163,12 @@ def _render_market_disagreement_table(edge_report: MarketEdgeReport | None, spor
 @app.command("backtest")
 def backtest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
     stage: Annotated[
         str,
         typer.Option("--stage", help="Pipeline stage to evaluate ('1', '2', or 'all')."),
@@ -892,6 +1181,106 @@ def backtest_command(
     """Run walk-forward time-series backtesting across historical seasons."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+    if slug == "baseball":
+        lg_mode = _ensure_baseball_league(league)
+        s1_df, s2_bat_df, s2_pit_df = build_and_persist_baseball_gold_features(
+            settings, league=lg_mode
+        )
+        completed_s1 = s1_df.filter(pl.col("outcome_1x2").is_not_null())
+        n_unique_ts = completed_s1["start_time_utc"].n_unique()
+        eff_splits = min(n_splits, max(1, n_unique_ts // 3))
+        val_reserve_groups = max(eff_splits, int(n_unique_ts * 0.3))
+        eff_min_train = max(2, n_unique_ts - val_reserve_groups)
+
+        bt_b = run_baseball_stage1_walk_forward_backtest(
+            completed_s1,
+            n_splits=eff_splits,
+            min_train_groups=eff_min_train,
+        )
+        if bt_b.mlb_benchmark_report is not None:
+            rep_m = bt_b.mlb_benchmark_report
+            t_mlb = Table(title=f"Walk-Forward Backtest (BASEBALL MLB 2-Way — Stage {stage})")
+            t_mlb.add_column("Benchmark / Model", style="cyan")
+            t_mlb.add_column("Log Loss", justify="right")
+            t_mlb.add_column("Brier Score", justify="right", style="bold green")
+            t_mlb.add_column("ECE", justify="right")
+            t_mlb.add_column("Accuracy", justify="right")
+            t_mlb.add_row(
+                "Stage 1 Calibrated MLB Model",
+                f"{rep_m.model.log_loss:.4f}",
+                f"{rep_m.model.brier_score:.4f}",
+                f"{rep_m.model.ece:.4f}",
+                f"{rep_m.model.accuracy:.3f}",
+            )
+            if rep_m.elo_baseline is not None:
+                t_mlb.add_row(
+                    "Starter-Adjusted Elo Baseline",
+                    f"{rep_m.elo_baseline.log_loss:.4f}",
+                    f"{rep_m.elo_baseline.brier_score:.4f}",
+                    f"{rep_m.elo_baseline.ece:.4f}",
+                    f"{rep_m.elo_baseline.accuracy:.3f}",
+                )
+            t_mlb.add_row(
+                "Home Win-Rate Baseline",
+                f"{rep_m.home_win_rate_baseline.log_loss:.4f}",
+                f"{rep_m.home_win_rate_baseline.brier_score:.4f}",
+                f"{rep_m.home_win_rate_baseline.ece:.4f}",
+                f"{rep_m.home_win_rate_baseline.accuracy:.3f}",
+            )
+            console.print(t_mlb)
+            _render_market_disagreement_table(rep_m.market_edge_report, "baseball-mlb")
+
+        if bt_b.npb_benchmark_report is not None:
+            rep_n = bt_b.npb_benchmark_report
+            t_npb = Table(
+                title=f"Walk-Forward Backtest (BASEBALL NPB 3-Way 12-Inning — Stage {stage})"
+            )
+            t_npb.add_column("Benchmark / Model", style="cyan")
+            t_npb.add_column("RPS", justify="right", style="bold green")
+            t_npb.add_column("3-Way Log Loss", justify="right")
+            t_npb.add_column("Brier Score", justify="right")
+            t_npb.add_column("ECE", justify="right")
+            t_npb.add_column("Accuracy", justify="right")
+            t_npb.add_row(
+                "Stage 1 Calibrated NPB 1X2 Model",
+                f"{rep_n.model.rps:.4f}",
+                f"{rep_n.model.log_loss:.4f}",
+                f"{rep_n.model.brier_score:.4f}",
+                f"{rep_n.model.ece:.4f}",
+                f"{rep_n.model.accuracy:.3f}",
+            )
+            if rep_n.elo_baseline is not None:
+                t_npb.add_row(
+                    "NPB 3-Way Elo Baseline",
+                    f"{rep_n.elo_baseline.rps:.4f}",
+                    f"{rep_n.elo_baseline.log_loss:.4f}",
+                    f"{rep_n.elo_baseline.brier_score:.4f}",
+                    f"{rep_n.elo_baseline.ece:.4f}",
+                    f"{rep_n.elo_baseline.accuracy:.3f}",
+                )
+            t_npb.add_row(
+                "Empirical NPB 1X2 Prior",
+                f"{rep_n.empirical_prior_baseline.rps:.4f}",
+                f"{rep_n.empirical_prior_baseline.log_loss:.4f}",
+                f"{rep_n.empirical_prior_baseline.brier_score:.4f}",
+                f"{rep_n.empirical_prior_baseline.ece:.4f}",
+                f"{rep_n.empirical_prior_baseline.accuracy:.3f}",
+            )
+            console.print(t_npb)
+
+        if stage in {"2", "all"} and not s2_bat_df.is_empty():
+            s2_b_model = Stage2BaseballPlayerModel(random_seed=RANDOM_SEED)
+            s2_b_model.fit(s2_bat_df, s2_pit_df if not s2_pit_df.is_empty() else None)
+            s2_b_preds = s2_b_model.predict_batters(s2_bat_df)
+            err_tb = (
+                (s2_b_preds["proj_total_bases"] - s2_b_preds["total_bases"].cast(pl.Float64))
+                .abs()
+                .to_numpy()
+            )
+            mae_tb = float(err_tb.mean()) if err_tb.size > 0 else 0.0
+            console.print(f"[bold cyan]Stage 2 Batter Total Bases MAE[/bold cyan]: {mae_tb:.4f}")
+        return
+
     if slug == "soccer":
         s1_df, s2_df, _, _ = build_and_persist_soccer_gold_features(settings)
         completed_s1 = s1_df.filter(pl.col("outcome_1x2").is_not_null())
@@ -1047,8 +1436,12 @@ def backtest_command(
 @app.command("train")
 def train_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
     include_stage2: Annotated[
         bool,
         typer.Option(
@@ -1064,6 +1457,91 @@ def train_command(
     """Build/refresh Gold features and fit production model artifacts."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+
+    if slug == "baseball":
+        import numpy as np
+
+        lg_mode = _ensure_baseball_league(league)
+        silver_dir_b = settings.paths.silver_dir / "baseball"
+        if (
+            not (silver_dir_b / "games.parquet").exists()
+            or not (silver_dir_b / "team_game_logs.parquet").exists()
+        ):
+            console.print(
+                "[yellow]Baseball Silver tables incomplete — running ingestion first...[/yellow]"
+            )
+            _run_baseball_ingestion(settings, league=lg_mode, current_season=True)
+
+        s1_df, s2_bat_df, s2_pit_df = build_and_persist_baseball_gold_features(
+            settings, league="all"
+        )
+        completed_s1 = s1_df.filter(pl.col("outcome_1x2").is_not_null())
+        if completed_s1.is_empty():
+            raise typer.BadParameter(
+                "No completed FINAL baseball games found in Silver/Gold tables to train on."
+            )
+
+        s1_b_model = Stage1BaseballGameModel(random_seed=RANDOM_SEED)
+        s1_b_model.fit(completed_s1)
+        s1_b_preds = s1_b_model.predict(completed_s1)
+
+        val_metrics: dict[str, float] = {}
+        mlb_preds = s1_b_preds.filter(pl.col("league") == "MLB")
+        if not mlb_preds.is_empty():
+            m_eval = evaluate_probabilities(
+                mlb_preds["home_win_prob"].to_numpy(),
+                mlb_preds["home_win"].cast(pl.Int64).to_numpy(),
+            )
+            val_metrics["log_loss"] = m_eval.log_loss
+            val_metrics["brier_score"] = m_eval.brier_score
+            val_metrics["ece"] = m_eval.ece
+            val_metrics["accuracy"] = m_eval.accuracy
+
+        npb_preds = s1_b_preds.filter(pl.col("league") == "NPB")
+        if not npb_preds.is_empty():
+            n_mat = np.column_stack(
+                [
+                    npb_preds["home_win_prob"].to_numpy(),
+                    npb_preds["draw_prob"].to_numpy(),
+                    npb_preds["away_win_prob"].to_numpy(),
+                ]
+            )
+            n_eval = evaluate_multiclass_probabilities(
+                n_mat,
+                npb_preds["outcome_1x2"].cast(pl.Int64).to_numpy(),
+            )
+            val_metrics["npb_rps"] = n_eval.rps
+            if "log_loss" not in val_metrics:
+                val_metrics["log_loss"] = n_eval.log_loss
+                val_metrics["brier_score"] = n_eval.brier_score
+
+        s2_b_model: Stage2BaseballPlayerModel | None = None
+        s2_b_train_df: pl.DataFrame | None = None
+        s2_b_cols: list[str] | None = None
+        if include_stage2 and not s2_bat_df.is_empty():
+            s2_b_model = Stage2BaseballPlayerModel(random_seed=RANDOM_SEED)
+            s2_b_model.fit(s2_bat_df, s2_pit_df if not s2_pit_df.is_empty() else None)
+            s2_b_train_df = s2_bat_df
+            s2_b_cols = s2_b_model.feature_columns
+
+        registry = ModelRegistry(artifacts_dir=settings.paths.artifacts_dir)
+        bundle_dir = registry.save_bundle(
+            sport=slug,
+            model_version=version,
+            stage1_model=s1_b_model,
+            stage1_train_df=completed_s1,
+            stage1_feature_columns=s1_b_model.feature_columns,
+            validation_metrics=val_metrics,
+            stage2_model=s2_b_model,
+            stage2_train_df=s2_b_train_df,
+            stage2_feature_columns=s2_b_cols,
+            update_latest=True,
+        )
+        console.print(
+            f"[bold green]Trained & saved baseball model bundle[/bold green] at '{bundle_dir}' "
+            f"(include_stage2={include_stage2}, log_loss={val_metrics.get('log_loss', 0.0):.4f})."
+        )
+        return
 
     if slug == "soccer":
         import numpy as np
@@ -1412,25 +1890,138 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
                 console.print(gk_table)
 
 
+def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -> None:
+    """Render MLB (2-Way) & NPB (3-Way + DNB) Stage 1 & Stage 2 projections as Rich tables."""
+    game_table = Table(
+        title="Stage 1 — Calibrated Baseball Game Probabilities (MLB 2-Way & NPB 3-Way 12-Inning)"
+    )
+    game_table.add_column("Date", style="cyan", no_wrap=True)
+    game_table.add_column("League", style="magenta", no_wrap=True)
+    game_table.add_column("Matchup", style="bold", no_wrap=True)
+    game_table.add_column("P(Away)", justify="right", style="yellow")
+    game_table.add_column("P(Draw)", justify="right", style="magenta")
+    game_table.add_column("P(Home)", justify="right", style="green")
+    game_table.add_column("P(Home DNB)", justify="right")
+    game_table.add_column("E[Runs A-H]", justify="right")
+
+    for pred in predictions:
+        seq_tag = f" (G{pred.event_seq})" if pred.event_seq > 1 else ""
+        draw_str = f"{pred.draw_prob:.1%}" if pred.league == "NPB" else "—"
+        game_table.add_row(
+            pred.game_date.isoformat(),
+            pred.league,
+            f"{pred.away_team} @ {pred.home_team}{seq_tag}",
+            f"{pred.away_win_prob:.1%}",
+            draw_str,
+            f"{pred.home_win_prob:.1%}",
+            f"{pred.home_dnb_prob:.1%}",
+            f"{pred.expected_away_runs:.2f} - {pred.expected_home_runs:.2f}",
+        )
+    console.print(game_table)
+
+    for pred in predictions:
+        for warning in pred.warnings:
+            console.print(
+                f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
+            )
+
+        if pred.player_projections is not None:
+            proj = pred.player_projections
+            console.print(
+                f"\n[bold cyan]Stage 2 — Baseball Player Projections "
+                f"({pred.away_team} @ {pred.home_team}, {pred.league})[/bold cyan]"
+            )
+            if not proj.starting_pitchers.is_empty():
+                sp_table = Table(title="Starting Pitchers (SP)")
+                sp_table.add_column("Pitcher", no_wrap=True)
+                sp_table.add_column("Team", style="cyan")
+                sp_table.add_column("Hand")
+                sp_table.add_column("E[IP]", justify="right")
+                sp_table.add_column("E[K]", justify="right", style="bold green")
+                sp_table.add_column("E[BB]", justify="right")
+                sp_table.add_column("E[ER]", justify="right")
+                sp_table.add_column("P(6+ K)", justify="right")
+                sp_table.add_column("P(QS)", justify="right")
+
+                for p_row in proj.starting_pitchers.iter_rows(named=True):
+                    sp_table.add_row(
+                        str(p_row.get("player_name") or f"SP {p_row['player_id']}"),
+                        str(p_row["team"]),
+                        str(p_row.get("pitch_hand") or "R"),
+                        f"{float(p_row['proj_ip']):.2f}",
+                        f"{float(p_row['proj_k']):.2f}",
+                        f"{float(p_row['proj_bb']):.2f}",
+                        f"{float(p_row['proj_er']):.2f}",
+                        f"{float(p_row['prob_6plus_k']):.1%}",
+                        f"{float(p_row['prob_quality_start']):.1%}",
+                    )
+                console.print(sp_table)
+
+            for t_code, bat_df, l_status in (
+                (pred.away_team, proj.away_batters, pred.away_lineup_status),
+                (pred.home_team, proj.home_batters, pred.home_lineup_status),
+            ):
+                if bat_df.is_empty():
+                    continue
+                b_table = Table(title=f"{t_code} — 1-9 Batting Order ({l_status})")
+                b_table.add_column("Slot", justify="right", style="cyan")
+                b_table.add_column("Batter", no_wrap=True)
+                b_table.add_column("Bat")
+                b_table.add_column("E[PA]", justify="right")
+                b_table.add_column("E[H]", justify="right")
+                b_table.add_column("E[TB]", justify="right", style="bold green")
+                b_table.add_column("E[HR]", justify="right")
+                b_table.add_column("E[R]", justify="right")
+                b_table.add_column("E[RBI]", justify="right")
+                b_table.add_column("P(1+ H)", justify="right")
+                b_table.add_column("P(1+ HR)", justify="right")
+
+                for b_row in bat_df.iter_rows(named=True):
+                    b_table.add_row(
+                        str(b_row.get("batting_order_slot") or "-"),
+                        str(b_row.get("player_name") or f"Batter {b_row['player_id']}"),
+                        str(b_row.get("bat_side") or "R"),
+                        f"{float(b_row['proj_pa']):.2f}",
+                        f"{float(b_row['proj_hits']):.2f}",
+                        f"{float(b_row['proj_total_bases']):.2f}",
+                        f"{float(b_row['proj_hr']):.3f}",
+                        f"{float(b_row['proj_runs']):.2f}",
+                        f"{float(b_row['proj_rbi']):.2f}",
+                        f"{float(b_row['prob_1plus_hit']):.1%}",
+                        f"{float(b_row['prob_1plus_hr']):.1%}",
+                    )
+                console.print(b_table)
+
+
 @app.command("predict")
 def predict_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
     game_date: Annotated[
         str | None,
         typer.Option("--date", help="Target prediction date (YYYY-MM-DD)."),
     ] = None,
     matchup: Annotated[
         str | None,
-        typer.Option("--matchup", help="Optional matchup filter (e.g., TOR@BOS or MCI@ARS)."),
+        typer.Option(
+            "--matchup", help="Optional matchup filter (e.g., TOR@BOS, MCI@ARS, SDP@LAD, YOM@HAN)."
+        ),
+    ] = None,
+    game_seq: Annotated[
+        int | None,
+        typer.Option("--game-seq", help="Doubleheader game sequence (1 or 2)."),
     ] = None,
     team: Annotated[
         str | None,
         typer.Option(
             "--team",
             "-t",
-            help="Predict the next scheduled game(s) for a specific team (e.g., COL, BOS, ARS).",
+            help="Predict the next scheduled game(s) for a specific team (e.g., COL, LAD, HAN).",
         ),
     ] = None,
     n_games: Annotated[
@@ -1465,6 +2056,33 @@ def predict_command(
     parsed_date = date.fromisoformat(game_date) if game_date is not None else None
     target_date = parsed_date if parsed_date is not None else datetime.now(tz=UTC).date()
     artifact_dir = settings.paths.artifacts_dir / slug / "latest"
+
+    if slug == "baseball":
+        lg_mode = _ensure_baseball_league(league)
+        if not offline:
+            _run_baseball_ingestion(settings, league=lg_mode, current_season=True, offline=False)
+        b_predictor = BaseballMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
+        if team:
+            b_predictions = b_predictor.predict_team_next_games(
+                team,
+                n_games=n_games if n_games is not None else 1,
+                from_date=parsed_date,
+                include_players=include_players,
+                offline=offline,
+                persist_ledger=True,
+            )
+        else:
+            b_predictions = b_predictor.predict_date(
+                target_date,
+                league=lg_mode,
+                include_players=include_players,
+                matchup_filter=matchup,
+                event_seq=game_seq,
+                offline=offline,
+                persist_ledger=True,
+            )
+        _render_baseball_predictions(b_predictions)
+        return
 
     if slug == "soccer":
         if not offline:
@@ -1517,12 +2135,66 @@ def predict_command(
 @app.command("score-predictions")
 def score_predictions_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
 ) -> None:
     """Score the live append-only prediction ledger against completed Silver games."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
+
+    if slug == "baseball":
+        mlb_rep, npb_rep = score_baseball_prediction_ledger(settings)
+        if mlb_rep is not None:
+            t_m = Table(title="Live Prediction Ledger Accuracy (BASEBALL — MLB 2-Way)")
+            t_m.add_column("Metric", style="cyan")
+            t_m.add_column("Live Predictions", justify="right", style="bold green")
+            t_m.add_column("Home Win-Rate Baseline", justify="right")
+            t_m.add_column("Coin-Flip Baseline", justify="right")
+            t_m.add_row(
+                "Log Loss",
+                f"{mlb_rep.model.log_loss:.4f}",
+                f"{mlb_rep.home_win_rate_baseline.log_loss:.4f}",
+                f"{mlb_rep.coin_flip_baseline.log_loss:.4f}",
+            )
+            t_m.add_row(
+                "Brier Score",
+                f"{mlb_rep.model.brier_score:.4f}",
+                f"{mlb_rep.home_win_rate_baseline.brier_score:.4f}",
+                f"{mlb_rep.coin_flip_baseline.brier_score:.4f}",
+            )
+            t_m.add_row(
+                "Accuracy",
+                f"{mlb_rep.model.accuracy:.3f}",
+                f"{mlb_rep.home_win_rate_baseline.accuracy:.3f}",
+                f"{mlb_rep.coin_flip_baseline.accuracy:.3f}",
+            )
+            console.print(t_m)
+        if npb_rep is not None:
+            t_n = Table(title="Live Prediction Ledger Accuracy (BASEBALL — NPB 3-Way 1X2)")
+            t_n.add_column("Metric", style="cyan")
+            t_n.add_column("Live Predictions", justify="right", style="bold green")
+            t_n.add_column("Empirical NPB Prior", justify="right")
+            t_n.add_column("Uniform 1/3 Baseline", justify="right")
+            t_n.add_row(
+                "Ranked Probability Score (RPS)",
+                f"{npb_rep.model.rps:.4f}",
+                f"{npb_rep.empirical_prior_baseline.rps:.4f}",
+                f"{npb_rep.uniform_baseline.rps:.4f}",
+            )
+            t_n.add_row(
+                "3-Class Log Loss",
+                f"{npb_rep.model.log_loss:.4f}",
+                f"{npb_rep.empirical_prior_baseline.log_loss:.4f}",
+                f"{npb_rep.uniform_baseline.log_loss:.4f}",
+            )
+            t_n.add_row(
+                "Multi-Class Brier Score",
+                f"{npb_rep.model.brier_score:.4f}",
+                f"{npb_rep.empirical_prior_baseline.brier_score:.4f}",
+                f"{npb_rep.uniform_baseline.brier_score:.4f}",
+            )
+            console.print(t_n)
+        return
 
     if slug == "soccer":
         rep_s = score_soccer_prediction_ledger(settings)
@@ -1652,8 +2324,12 @@ def score_predictions_command(
 @app.command("check-sources")
 def check_sources_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey' or 'soccer').")
+        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
     ] = "hockey",
+    league: Annotated[
+        str,
+        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+    ] = "all",
     team: Annotated[
         str,
         typer.Option("--team", help="Sample NHL team tricode for roster and MoneyPuck probes."),
@@ -1662,7 +2338,11 @@ def check_sources_command(
     """Verify live connectivity and schema contracts across all external data feeds."""
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
-    if slug == "soccer":
+    if slug == "baseball":
+        lg_mode = _ensure_baseball_league(league)
+        b_lg: Any = lg_mode
+        results = check_baseball_data_sources(settings.paths.raw_dir, league=b_lg)
+    elif slug == "soccer":
         results = check_soccer_data_sources(settings.paths.raw_dir)
     else:
         results = check_hockey_data_sources(

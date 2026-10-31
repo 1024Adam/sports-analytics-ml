@@ -17,7 +17,7 @@ Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on
 
 - **NHL Hockey (`--sport hockey`)**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, high-danger chances, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`), **MoneyPuck**, and pre-game starting goalie/lineup feeds.
 - **English Premier League (EPL) Soccer (`--sport soccer`)**: Ingests fixtures, squad availability, set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**.
-- **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all` — Planned in Phase 5, Milestones 16–21)**: Unified dual-league baseball plugin covering **Major League Baseball (30 MLB clubs, 2-way binary outcome)** and **Nippon Professional Baseball (12 Central & Pacific League clubs, 3-way 12-inning tie-aware `1X2` outcome)** with starting pitcher `xFIP`/`K-BB%`/`Stuff+`, 3-day bullpen workload, handedness platoon lineups, ballpark factors, and cross-league (`NPB ↔ MLB`) player translation priors.
+- **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`)**: Unified dual-league baseball plugin covering **Major League Baseball (30 MLB clubs, 2-way binary outcome)** and **Nippon Professional Baseball (12 Central & Pacific League clubs, 3-way 12-inning tie-aware `1X2` outcome)** with starting pitcher `xFIP`/`K-BB%`/velocity delta (`sp_velo_delta_mph`), 3-day bullpen workload, handedness platoon lineups, ballpark factors, and cross-league (`NPB ↔ MLB`) player translation priors.
 
 ---
 
