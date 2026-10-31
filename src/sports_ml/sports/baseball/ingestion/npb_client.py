@@ -8,6 +8,7 @@ probable starter announcements (`予告先発`), and active `ichi-gun` (first-te
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -303,7 +304,10 @@ def parse_npb_schedule_payload(
 
     if not rows:
         return pl.DataFrame(schema=SILVER_BASEBALL_GAMES_SCHEMA)
-    return _cast_to_schema(pl.DataFrame(rows), SILVER_BASEBALL_GAMES_SCHEMA)
+    return _cast_to_schema(
+        pl.DataFrame(rows, schema=SILVER_BASEBALL_GAMES_SCHEMA),
+        SILVER_BASEBALL_GAMES_SCHEMA,
+    )
 
 
 def parse_npb_boxscore_payload(
@@ -616,9 +620,18 @@ def parse_npb_boxscore_payload(
         )
 
     return (
-        _cast_to_schema(pl.DataFrame(team_rows), SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
-        _cast_to_schema(pl.DataFrame(pitcher_rows), SILVER_BASEBALL_PITCHER_LOGS_SCHEMA),
-        _cast_to_schema(pl.DataFrame(batter_rows), SILVER_BASEBALL_BATTER_LOGS_SCHEMA),
+        _cast_to_schema(
+            pl.DataFrame(team_rows, schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
+            SILVER_BASEBALL_TEAM_LOGS_SCHEMA,
+        ),
+        _cast_to_schema(
+            pl.DataFrame(pitcher_rows, schema=SILVER_BASEBALL_PITCHER_LOGS_SCHEMA),
+            SILVER_BASEBALL_PITCHER_LOGS_SCHEMA,
+        ),
+        _cast_to_schema(
+            pl.DataFrame(batter_rows, schema=SILVER_BASEBALL_BATTER_LOGS_SCHEMA),
+            SILVER_BASEBALL_BATTER_LOGS_SCHEMA,
+        ),
     )
 
 
@@ -678,6 +691,159 @@ def parse_npb_roster_payload(
     return pl.DataFrame(rows)
 
 
+_NPB_CALENDAR_GAME_RE: Final[re.Pattern[str]] = re.compile(
+    r'href=["\']/bis/(?:eng/)?(?P<yr>\d{4})/games/s(?P<ymd>\d{8})(?P<seq>\d+)\.html["\']>\s*'
+    r"(?P<home>[A-Za-z\u3040-\u9fff]+)\s*(?:(?P<h_runs>\d+)\s*-\s*(?P<a_runs>\d+)|-)\s*"
+    r"(?P<away>[A-Za-z\u3040-\u9fff]+)\s*</a>"
+)
+
+
+def parse_npb_calendar_html(html_text: str, *, season: int) -> list[dict[str, Any]]:
+    """Parse game links from an `npb.jp/bis/.../calendar/index_MM.html` page."""
+    records: list[dict[str, Any]] = []
+    seen_pairs: dict[tuple[str, str, str], int] = {}
+
+    for m in _NPB_CALENDAR_GAME_RE.finditer(html_text):
+        ymd = m.group("ymd")
+        raw_seq = m.group("seq")
+        home_raw = m.group("home")
+        away_raw = m.group("away")
+        h_runs_str = m.group("h_runs")
+        a_runs_str = m.group("a_runs")
+
+        home_code = normalize_baseball_team(home_raw)
+        away_code = normalize_baseball_team(away_raw)
+        if (
+            get_baseball_club_metadata(home_code) is None
+            or get_baseball_club_metadata(away_code) is None
+        ):
+            continue
+
+        date_iso = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+        pair_key = (date_iso, home_code, away_code)
+        seen_pairs[pair_key] = seen_pairs.get(pair_key, 0) + 1
+        ev_seq = 2 if seen_pairs[pair_key] >= 2 else 1
+
+        is_final = h_runs_str is not None and a_runs_str is not None
+        h_runs = int(h_runs_str) if h_runs_str is not None else None
+        a_runs = int(a_runs_str) if a_runs_str is not None else None
+
+        records.append(
+            {
+                "game_id": int(f"{ymd}{raw_seq[-2:]}"),
+                "event_seq": ev_seq,
+                "season": int(season),
+                "game_date": date_iso,
+                "start_time_utc": f"{date_iso}T09:00:00Z",
+                "home_team": home_code,
+                "away_team": away_code,
+                "game_state": "FINAL" if is_final else "FUT",
+                "innings_played": 12
+                if (is_final and h_runs == a_runs)
+                else (9 if is_final else None),
+                "home_runs": h_runs,
+                "away_runs": a_runs,
+            }
+        )
+    return records
+
+
+def build_npb_team_logs_from_games(games_df: pl.DataFrame) -> pl.DataFrame:
+    """Synthesize `SILVER_BASEBALL_TEAM_LOGS_SCHEMA` rows for completed NPB games."""
+    if games_df.is_empty():
+        return pl.DataFrame(schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA)
+
+    completed = games_df.filter(
+        (pl.col("league") == "NPB")
+        & (pl.col("game_state") == "FINAL")
+        & pl.col("home_runs").is_not_null()
+        & pl.col("away_runs").is_not_null()
+    )
+    if completed.is_empty():
+        return pl.DataFrame(schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA)
+
+    priors = NPB_SABERMETRIC_PRIORS
+    rows: list[dict[str, Any]] = []
+    for g in completed.iter_rows(named=True):
+        gid = int(g["game_id"])
+        seq = int(g.get("event_seq") or 1)
+        gdate: date = g["game_date"]
+        gutc: datetime = g["start_time_utc"]
+        s_yr = int(g["season"])
+        home_team = str(g["home_team"])
+        away_team = str(g["away_team"])
+        hr_val = int(g["home_runs"])
+        ar_val = int(g["away_runs"])
+        inn = int(g.get("innings_played") or 9)
+        outs_p = max(15, inn * 3)
+
+        for is_home, t_code, o_code, rf, ra in (
+            (True, home_team, away_team, hr_val, ar_val),
+            (False, away_team, home_team, ar_val, hr_val),
+        ):
+            hf = max(rf, 5 + rf)
+            ha = max(ra, 5 + ra)
+            hr_f = min(hf, max(0, rf // 3))
+            hr_a = min(ha, max(0, ra // 3))
+            bb_f = max(1, (rf + 5) // 3)
+            bb_a = max(1, (ra + 5) // 3)
+            woba_f = float(
+                min(
+                    max(priors.lg_woba + 0.015 * (rf - priors.lg_runs_per_team_game), 0.180),
+                    0.500,
+                )
+            )
+            woba_a = float(
+                min(
+                    max(priors.lg_woba + 0.015 * (ra - priors.lg_runs_per_team_game), 0.180),
+                    0.500,
+                )
+            )
+            rows.append(
+                {
+                    "game_id": gid,
+                    "event_seq": seq,
+                    "game_date": gdate,
+                    "start_time_utc": gutc,
+                    "season": s_yr,
+                    "league": "NPB",
+                    "team": t_code,
+                    "opponent": o_code,
+                    "is_home": is_home,
+                    "runs_for": rf,
+                    "runs_against": ra,
+                    "hits_for": hf,
+                    "hits_against": ha,
+                    "doubles_for": max(0, hf // 5),
+                    "triples_for": 0,
+                    "hr_for": hr_f,
+                    "hr_against": hr_a,
+                    "bb_for": bb_f,
+                    "bb_against": bb_a,
+                    "k_for": 7,
+                    "k_against": 7,
+                    "hbp_for": 0,
+                    "sf_for": 0,
+                    "pa_for": outs_p + hf + bb_f,
+                    "outs_pitched": outs_p,
+                    "lob_for": 6,
+                    "errors_committed": 0,
+                    "bullpen_outs_pitched": max(6, outs_p - 18),
+                    "bullpen_pitches": 38,
+                    "bullpen_er": max(0, ra // 3),
+                    "team_woba": woba_f,
+                    "opp_woba": woba_a,
+                    "team_xwoba": None,
+                    "opp_xwoba": None,
+                    "has_statcast_metrics": False,
+                }
+            )
+    return _cast_to_schema(
+        pl.DataFrame(rows, schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
+        SILVER_BASEBALL_TEAM_LOGS_SCHEMA,
+    )
+
+
 class NPBClient:
     """Cached HTTP client for NPB schedules, 12-inning boxscores, and `ichi-gun` rosters."""
 
@@ -710,20 +876,55 @@ class NPBClient:
             data = resp.json()
             return dict(data) if isinstance(data, Mapping) else {"games": data}
 
+    def _scrape_npb_season_calendars(self, season: int) -> dict[str, Any]:
+        """Scrape monthly NPB BIS calendar pages (`03`..`11`) for `season`."""
+        games: list[dict[str, Any]] = []
+        seen_ids: set[tuple[int, int]] = set()
+        # Use English BIS for >= 2008 and Japanese BIS for earlier seasons (2005-2007)
+        prefix = "https://npb.jp/bis/eng" if int(season) >= 2008 else "https://npb.jp/bis"
+        with httpx.Client(
+            timeout=self.timeout_seconds,
+            transport=self._transport,
+            follow_redirects=True,
+        ) as client:
+            for month in range(3, 12):
+                url = f"{prefix}/{int(season)}/calendar/index_{month:02d}.html"
+                try:
+                    resp = client.get(url)
+                    if resp.status_code != 200:
+                        continue
+                    parsed = parse_npb_calendar_html(resp.text, season=int(season))
+                    for g in parsed:
+                        key = (int(g["game_id"]), int(g["event_seq"]))
+                        if key not in seen_ids:
+                            seen_ids.add(key)
+                            games.append(g)
+                except Exception:
+                    continue
+        return {"games": games}
+
     def fetch_season_schedule(
         self,
         season: int,
         *,
+        is_active_season: bool = False,
         ttl_seconds: float | None = 3600.0,
     ) -> dict[str, Any]:
         """Fetch and `.json.gz`-cache NPB season schedule."""
         cache_path = self.cache_dir / "schedules" / f"npb_schedule_{int(season)}.json.gz"
-        cached = read_cached_json(cache_path, ttl_seconds=ttl_seconds)
-        if isinstance(cached, dict):
+        eff_ttl = ttl_seconds if is_active_season else None
+        cached = read_cached_json(cache_path, ttl_seconds=eff_ttl)
+        if isinstance(cached, dict) and cached.get("games"):
             return cached
 
-        payload = self._get_json(f"{int(season)}/games/schedule.json")
-        write_cached_json(cache_path, payload)
+        if self._transport is not None:
+            payload = self._get_json(f"{int(season)}/games/schedule.json")
+            write_cached_json(cache_path, payload)
+            return payload
+
+        payload = self._scrape_npb_season_calendars(int(season))
+        if payload.get("games"):
+            write_cached_json(cache_path, payload)
         return payload
 
     def fetch_boxscore(

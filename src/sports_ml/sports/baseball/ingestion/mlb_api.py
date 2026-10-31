@@ -284,7 +284,156 @@ def parse_mlb_schedule_payload(
 
     if not rows:
         return pl.DataFrame(schema=SILVER_BASEBALL_GAMES_SCHEMA)
-    return _cast_to_schema(pl.DataFrame(rows), SILVER_BASEBALL_GAMES_SCHEMA)
+    return _cast_to_schema(
+        pl.DataFrame(rows, schema=SILVER_BASEBALL_GAMES_SCHEMA),
+        SILVER_BASEBALL_GAMES_SCHEMA,
+    )
+
+
+def parse_mlb_schedule_team_logs(
+    payload: Mapping[str, Any],
+    *,
+    season: int | None = None,
+) -> pl.DataFrame:
+    """Extract `SILVER_BASEBALL_TEAM_LOGS_SCHEMA` rows from a linescore-hydrated MLB schedule."""
+    rows: list[dict[str, Any]] = []
+    dates_list = payload.get("dates") or []
+    priors = MLB_SABERMETRIC_PRIORS
+
+    for date_entry in dates_list:
+        if not isinstance(date_entry, Mapping):
+            continue
+        date_str = str(date_entry.get("date") or "")
+        for g in date_entry.get("games") or []:
+            if not isinstance(g, Mapping):
+                continue
+            game_type = str(g.get("gameType") or "R").upper()
+            if game_type not in {"R", "F", "D", "L", "W"}:
+                continue
+            raw_pk = g.get("gamePk") or g.get("game_id")
+            if raw_pk is None:
+                continue
+            status_node = g.get("status") or {}
+            abstract_state = (
+                str(
+                    status_node.get("abstractGameState")
+                    or status_node.get("codedGameState")
+                    or g.get("game_state")
+                    or "Preview"
+                )
+                .strip()
+                .upper()
+            )
+            if abstract_state not in {"FINAL", "F", "O", "COMPLETED"}:
+                continue
+
+            teams_node = g.get("teams") or {}
+            home_node = (teams_node.get("home") or {}) if isinstance(teams_node, Mapping) else {}
+            away_node = (teams_node.get("away") or {}) if isinstance(teams_node, Mapping) else {}
+            h_score_raw = home_node.get("score")
+            a_score_raw = away_node.get("score")
+            if h_score_raw is None or a_score_raw is None:
+                continue
+
+            game_id = int(raw_pk)
+            raw_seq = int(g.get("gameNumber") or g.get("event_seq") or 1)
+            event_seq = 2 if raw_seq >= 2 else 1
+            g_date_str = str(g.get("officialDate") or date_str or "2025-04-01")
+            game_date = date.fromisoformat(g_date_str[:10])
+            season_val = int(season or g.get("season") or game_date.year)
+            start_utc = _parse_utc_timestamp(g.get("gameDate"), game_date)
+
+            home_team = _extract_team_code(home_node.get("team") or home_node)
+            away_team = _extract_team_code(away_node.get("team") or away_node)
+            h_runs = int(h_score_raw)
+            a_runs = int(a_score_raw)
+
+            linescore = g.get("linescore") or {}
+            ls_teams = (linescore.get("teams") or {}) if isinstance(linescore, Mapping) else {}
+            ls_home = (ls_teams.get("home") or {}) if isinstance(ls_teams, Mapping) else {}
+            ls_away = (ls_teams.get("away") or {}) if isinstance(ls_teams, Mapping) else {}
+            innings = int(
+                (linescore.get("currentInning") if isinstance(linescore, Mapping) else None) or 9
+            )
+            outs_pitched = max(15, innings * 3)
+
+            raw_h_hits = ls_home.get("hits")
+            raw_a_hits = ls_away.get("hits")
+            h_hits = int(raw_h_hits) if raw_h_hits is not None else max(h_runs, 5 + h_runs)
+            a_hits = int(raw_a_hits) if raw_a_hits is not None else max(a_runs, 5 + a_runs)
+            h_err = int(ls_home.get("errors") or 0)
+            a_err = int(ls_away.get("errors") or 0)
+            h_lob = int(ls_home.get("leftOnBase") or 6)
+            a_lob = int(ls_away.get("leftOnBase") or 6)
+
+            for is_home, team_code, opp_code, rf, ra, hf, ha, lob, err in (
+                (True, home_team, away_team, h_runs, a_runs, h_hits, a_hits, h_lob, h_err),
+                (False, away_team, home_team, a_runs, h_runs, a_hits, h_hits, a_lob, a_err),
+            ):
+                hr_f = min(hf, max(0, rf // 3))
+                hr_a = min(ha, max(0, ra // 3))
+                doubles_f = min(max(0, hf - hr_f), max(0, hf // 4))
+                bb_f = max(1, (rf + lob) // 3)
+                bb_a = max(1, (ra + 6) // 3)
+                pa_f = max(27, outs_pitched + hf + bb_f)
+                woba_f = float(
+                    min(
+                        max(priors.lg_woba + 0.014 * (rf - priors.lg_runs_per_team_game), 0.180),
+                        0.520,
+                    )
+                )
+                woba_a = float(
+                    min(
+                        max(priors.lg_woba + 0.014 * (ra - priors.lg_runs_per_team_game), 0.180),
+                        0.520,
+                    )
+                )
+                rows.append(
+                    {
+                        "game_id": game_id,
+                        "event_seq": event_seq,
+                        "game_date": game_date,
+                        "start_time_utc": start_utc,
+                        "season": season_val,
+                        "league": "MLB",
+                        "team": team_code,
+                        "opponent": opp_code,
+                        "is_home": is_home,
+                        "runs_for": rf,
+                        "runs_against": ra,
+                        "hits_for": hf,
+                        "hits_against": ha,
+                        "doubles_for": doubles_f,
+                        "triples_for": 0,
+                        "hr_for": hr_f,
+                        "hr_against": hr_a,
+                        "bb_for": bb_f,
+                        "bb_against": bb_a,
+                        "k_for": 8,
+                        "k_against": 8,
+                        "hbp_for": 0,
+                        "sf_for": 0,
+                        "pa_for": pa_f,
+                        "outs_pitched": outs_pitched,
+                        "lob_for": lob,
+                        "errors_committed": err,
+                        "bullpen_outs_pitched": 9,
+                        "bullpen_pitches": 42,
+                        "bullpen_er": max(0, ra // 3),
+                        "team_woba": woba_f,
+                        "opp_woba": woba_a,
+                        "team_xwoba": None,
+                        "opp_xwoba": None,
+                        "has_statcast_metrics": False,
+                    }
+                )
+
+    if not rows:
+        return pl.DataFrame(schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA)
+    return _cast_to_schema(
+        pl.DataFrame(rows, schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
+        SILVER_BASEBALL_TEAM_LOGS_SCHEMA,
+    )
 
 
 def _compute_woba_numerator(
@@ -660,9 +809,18 @@ def parse_mlb_boxscore_payload(
         )
 
     return (
-        _cast_to_schema(pl.DataFrame(team_rows), SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
-        _cast_to_schema(pl.DataFrame(pitcher_rows), SILVER_BASEBALL_PITCHER_LOGS_SCHEMA),
-        _cast_to_schema(pl.DataFrame(batter_rows), SILVER_BASEBALL_BATTER_LOGS_SCHEMA),
+        _cast_to_schema(
+            pl.DataFrame(team_rows, schema=SILVER_BASEBALL_TEAM_LOGS_SCHEMA),
+            SILVER_BASEBALL_TEAM_LOGS_SCHEMA,
+        ),
+        _cast_to_schema(
+            pl.DataFrame(pitcher_rows, schema=SILVER_BASEBALL_PITCHER_LOGS_SCHEMA),
+            SILVER_BASEBALL_PITCHER_LOGS_SCHEMA,
+        ),
+        _cast_to_schema(
+            pl.DataFrame(batter_rows, schema=SILVER_BASEBALL_BATTER_LOGS_SCHEMA),
+            SILVER_BASEBALL_BATTER_LOGS_SCHEMA,
+        ),
     )
 
 
@@ -801,6 +959,33 @@ class MLBStatsAPIClient:
             },
         )
         write_cached_json(cache_path, payload)
+        return payload
+
+    def fetch_season_schedule(
+        self,
+        season: int,
+        *,
+        is_active_season: bool = False,
+        ttl_seconds: float | None = 3600.0,
+    ) -> dict[str, Any]:
+        """Fetch an entire MLB season schedule (with linescore & probablePitcher hydration)."""
+        cache_path = self.cache_dir / "schedules" / f"mlb_season_{int(season)}.json.gz"
+        eff_ttl = ttl_seconds if is_active_season else None
+        cached = read_cached_json(cache_path, ttl_seconds=eff_ttl)
+        if isinstance(cached, dict) and cached.get("dates"):
+            return cached
+
+        payload = self._get_json(
+            "schedule",
+            params={
+                "sportId": 1,
+                "season": int(season),
+                "gameType": "R",
+                "hydrate": "probablePitcher,team,venue,linescore",
+            },
+        )
+        if payload.get("dates"):
+            write_cached_json(cache_path, payload)
         return payload
 
     def fetch_boxscore(

@@ -32,10 +32,12 @@ from sports_ml.sports.baseball.ingestion import (
     MLBStatsAPIClient,
     NPBClient,
     StatcastClient,
+    build_npb_team_logs_from_games,
     check_baseball_data_sources,
     derive_active_baseball_season,
     parse_mlb_boxscore_payload,
     parse_mlb_schedule_payload,
+    parse_mlb_schedule_team_logs,
     parse_npb_boxscore_payload,
     parse_npb_schedule_payload,
     parse_statcast_batter_metrics_csv,
@@ -800,10 +802,21 @@ def _run_baseball_ingestion(
     sc_pitcher_frames: list[pl.DataFrame] = []
     sc_batter_frames: list[pl.DataFrame] = []
 
-    # 1. Process pre-cached MLB schedules, boxscores, and Statcast CSVs
+    # 1. Process pre-cached and live MLB schedules, boxscores, and Statcast CSVs
     if lg_mode in {"mlb", "all"}:
         mlb_sched_dir = raw_mlb_dir / "schedules"
         mlb_box_dir = raw_mlb_dir / "boxscores"
+
+        if not offline:
+            if start_date and end_date:
+                s_dt = date.fromisoformat(start_date)
+                e_dt = date.fromisoformat(end_date)
+                with contextlib.suppress(Exception):
+                    mlb_client.fetch_schedule(s_dt, e_dt)
+            for yr in sorted(target_years):
+                with contextlib.suppress(Exception):
+                    mlb_client.fetch_season_schedule(yr, is_active_season=(yr >= active_yr))
+
         if mlb_sched_dir.exists():
             for sf in list_cached_files(mlb_sched_dir, "*.json"):
                 payload = read_cached_json(sf)
@@ -811,15 +824,9 @@ def _run_baseball_ingestion(
                     g_df = parse_mlb_schedule_payload(payload)
                     if not g_df.is_empty():
                         game_frames.append(g_df)
-
-        if not offline and (start_date and end_date):
-            s_dt = date.fromisoformat(start_date)
-            e_dt = date.fromisoformat(end_date)
-            with contextlib.suppress(Exception):
-                payload = mlb_client.fetch_schedule(s_dt, e_dt)
-                g_df = parse_mlb_schedule_payload(payload, season=s_dt.year)
-                if not g_df.is_empty():
-                    game_frames.append(g_df)
+                    sched_t_df = parse_mlb_schedule_team_logs(payload)
+                    if not sched_t_df.is_empty():
+                        team_frames.append(sched_t_df)
 
         all_mlb_games = (
             pl.concat(game_frames, how="vertical").unique(
@@ -878,11 +885,17 @@ def _run_baseball_ingestion(
             for sc_f in list_cached_files(raw_sc_dir, "statcast_batters_*.csv"):
                 sc_batter_frames.append(parse_statcast_batter_metrics_csv(sc_f))
 
-    # 2. Process pre-cached NPB schedules and boxscores
+    # 2. Process pre-cached and live NPB schedules and boxscores
     if lg_mode in {"npb", "all"}:
         npb_sched_dir = raw_npb_dir / "schedules"
         npb_box_dir = raw_npb_dir / "boxscores"
         npb_game_frames: list[pl.DataFrame] = []
+
+        if not offline:
+            for yr in sorted(target_years):
+                with contextlib.suppress(Exception):
+                    npb_client.fetch_season_schedule(yr, is_active_season=(yr >= active_yr))
+
         if npb_sched_dir.exists():
             for sf in list_cached_files(npb_sched_dir, "*.json"):
                 payload = read_cached_json(sf)
@@ -891,15 +904,9 @@ def _run_baseball_ingestion(
                     if not g_df.is_empty():
                         npb_game_frames.append(g_df)
                         game_frames.append(g_df)
-
-        if not offline:
-            for yr in sorted(target_years):
-                with contextlib.suppress(Exception):
-                    payload = npb_client.fetch_season_schedule(yr)
-                    g_df = parse_npb_schedule_payload(payload, season=yr)
-                    if not g_df.is_empty():
-                        npb_game_frames.append(g_df)
-                        game_frames.append(g_df)
+                        npb_sched_t = build_npb_team_logs_from_games(g_df)
+                        if not npb_sched_t.is_empty():
+                            team_frames.append(npb_sched_t)
 
         all_npb_games = (
             pl.concat(npb_game_frames, how="vertical").unique(
