@@ -1,6 +1,6 @@
 # Stage 2 Model Training & Feature Importance
 
-> **Related Documents**: [Stage 1 Model Training & Feature Importance](./stage1-model-training.md) | [System Architecture Blueprint](./architecture.md) | [Data & Feature Specification](./data-and-features.md) | [Phased Implementation Roadmap](./roadmap.md)
+> **Related Documents**: [Stage 1 Model Training & Feature Importance](./stage1-model-training.md) | [System Architecture Blueprint](./architecture.md) | [Data & Feature Specification](./hockey-data-and-features.md) | [Phased Implementation Roadmap](./roadmap.md)
 
 This document explains **how the Stage 2 Player Matchup Projection pipeline is actually trained** (`src/sports_ml/sports/hockey/models/stage2_player.py`), and reports **which input variables currently drive each skater projection the most**, as a reference for prioritizing future feature engineering work.
 
@@ -122,7 +122,7 @@ PP time is driven more by offensive production rate than raw usage — consisten
 
 ## 3. Full Candidate Feature List
 
-All 22 candidates are defined in `STAGE2_SKATER_FEATURE_COLS` ([stage2_player.py](../src/sports_ml/sports/hockey/models/stage2_player.py#L21-L43)) and documented in detail in [§5.1 of data-and-features.md](./data-and-features.md). They fall into 4 families: **individual rolling usage** (TOI, shifts, vacated-teammate TOI), **individual rolling per-60 production** (SOG, ixG, goals, assists, points, shrunk career shooting%), **opponent/goalie matchup context** (opponent xGA/SA/PK rates, opponent GSAx), and **Stage 1 macro conditioning** (team win probability, expected team goals, home/rest/B2B context).
+All 22 candidates are defined in `STAGE2_SKATER_FEATURE_COLS` ([stage2_player.py](../src/sports_ml/sports/hockey/models/stage2_player.py#L21-L43)) and documented in detail in [§5.1 of hockey-data-and-features.md](./hockey-data-and-features.md). They fall into 4 families: **individual rolling usage** (TOI, shifts, vacated-teammate TOI), **individual rolling per-60 production** (SOG, ixG, goals, assists, points, shrunk career shooting%), **opponent/goalie matchup context** (opponent xGA/SA/PK rates, opponent GSAx), and **Stage 1 macro conditioning** (team win probability, expected team goals, home/rest/B2B context).
 
 ## 4. Monotone Constraints
 

@@ -1,6 +1,6 @@
 # Stage 1 Model Training & Feature Importance
 
-> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [Data & Feature Specification](./data-and-features.md) | [Phased Implementation Roadmap](./roadmap.md)
+> **Related Documents**: [System Architecture Blueprint](./architecture.md) | [Data & Feature Specification](./hockey-data-and-features.md) | [Phased Implementation Roadmap](./roadmap.md)
 
 This document explains **how the Stage 1 Game Outcome Model is actually trained** (`src/sports_ml/sports/hockey/models/stage1_game.py`), and reports **which input variables currently drive its win-probability predictions the most**, as a reference for prioritizing future feature engineering work.
 
@@ -79,7 +79,7 @@ Extracted from the live `artifacts/hockey/latest/stage1_model.pkl` LightGBM boos
 
 ## 3. Full Candidate Feature List
 
-All 51 candidates considered are defined in `STAGE1_CANDIDATE_FEATURE_COLS` ([stage1_game.py](../src/sports_ml/sports/hockey/models/stage1_game.py#L24-L74)) and documented in detail in [§4 of data-and-features.md](./data-and-features.md). They fall into 6 families: **Elo ratings**, **5v5 process/shot-quality** (xGF%, Corsi, Fenwick, High-Danger xGF%, PDO), **special teams** (PP/PK xG rates, net edge), **rest/schedule**, **goalie form** (shrunk GSAx, save %, rest), and **active-roster strength** (lineup-weighted forward/defense ixG, missing TOI).
+All 51 candidates considered are defined in `STAGE1_CANDIDATE_FEATURE_COLS` ([stage1_game.py](../src/sports_ml/sports/hockey/models/stage1_game.py#L24-L74)) and documented in detail in [§4 of hockey-data-and-features.md](./hockey-data-and-features.md). They fall into 6 families: **Elo ratings**, **5v5 process/shot-quality** (xGF%, Corsi, Fenwick, High-Danger xGF%, PDO), **special teams** (PP/PK xG rates, net edge), **rest/schedule**, **goalie form** (shrunk GSAx, save %, rest), and **active-roster strength** (lineup-weighted forward/defense ixG, missing TOI).
 
 ## 4. Monotone Constraints
 

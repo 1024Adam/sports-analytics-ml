@@ -45,7 +45,7 @@ Design for a clean Python 3.11+ ecosystem:
 2. **Clarify & Advise**: Challenge assumptions constructively, highlight sports-analytics pitfalls (sample size, variance, leakage), and clarify scope with the user.
 3. **Document the Blueprint**: Write or update structured specifications in `docs/` so context is persisted across sessions:
    - `docs/architecture.md` — System components, directory layout, data flow, and extension interfaces.
-   - `docs/data-and-features.md` — Data sources, storage schemas, and exact mathematical definitions of features.
+   - `docs/hockey-data-and-features.md` — Data sources, storage schemas, and exact mathematical definitions of features.
    - `docs/roadmap.md` — Phased, bite-sized milestones with explicit acceptance and test criteria.
 4. **Hand Off**: Summarize the design, confirm user approval, and direct them to use the **Implement Plan with Developer** handoff to execute the current milestone.
 

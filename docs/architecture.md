@@ -1,10 +1,10 @@
 # System Architecture Blueprint
 
-> **Related Documents**: [NHL Data & Feature Specification](./data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [Implementation Roadmap](./roadmap.md)
+> **Related Documents**: [NHL Data & Feature Specification](./hockey-data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [MLB & NPB Baseball Data & Feature Specification](./baseball-data-and-features.md) | [Implementation Roadmap](./roadmap.md)
 
 ## 1. Executive Summary & Design Goals
 
-`sports-analytics-ml` is a modular, leak-free machine learning platform built in **Python 3.11+** using **Polars** and **PyArrow**. Supporting **NHL Hockey (`--sport hockey`)** and **EPL Soccer (`--sport soccer`)**, the system ingests historical and daily schedule, roster, play-by-play/shot-quality, and goaltending/goalkeeping data, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
+`sports-analytics-ml` is a modular, leak-free machine learning platform built in **Python 3.11+** using **Polars** and **PyArrow**. Supporting **NHL Hockey (`--sport hockey`)**, **EPL Soccer (`--sport soccer`)**, and **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`, Phase 5 Roadmap)**, the system ingests historical and daily schedule, roster, play-by-play/shot-quality/pitch-tracking, and specialist (goaltending/goalkeeping/starting pitching) data, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
 
 1. **Stage 1 — Game Outcome Model (Mandatory)**: Produces calibrated win probabilities $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$, alongside expected team scoring pace context, evaluated via walk-forward time-series backtesting (**Log Loss**, **Brier Score**, and Expected Calibration Error).
 2. **Stage 2 — Player Matchup Stat Projections (Optional)**: On-demand per-player predictions for both teams' active rosters in a matchup (Skaters: expected goals, assists, points, shots on goal, TOI, and point/goal probabilities; Goalies: expected shots against, saves, goals against, save %), conditioned on Stage 1 game environment and opponent strength.
