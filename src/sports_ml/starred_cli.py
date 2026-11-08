@@ -199,6 +199,12 @@ def build_starred_adapters(
     def football_locate(pred: Any) -> GameSlot:
         return GameSlot(pred.start_time_utc, str(pred.game_state).upper() == "FINAL")
 
+    def check(sport: str) -> Callable[[], None]:
+        def run() -> None:
+            _artifact_dir(settings, sport)
+
+        return run
+
     return {
         "hockey": StarredSportAdapter(
             "hockey",
@@ -212,6 +218,7 @@ def build_starred_adapters(
                 date_attr="game_date",
                 date_col="game_date",
             ),
+            check("hockey"),
         ),
         "soccer": StarredSportAdapter(
             "soccer",
@@ -225,6 +232,7 @@ def build_starred_adapters(
                 date_attr="match_date",
                 date_col="match_date",
             ),
+            check("soccer"),
         ),
         "baseball": StarredSportAdapter(
             "baseball",
@@ -239,9 +247,15 @@ def build_starred_adapters(
                 date_col="game_date",
                 event_seq=True,
             ),
+            check("baseball"),
         ),
         "football": StarredSportAdapter(
-            "football", hook("football"), football_load, football_predict, football_locate
+            "football",
+            hook("football"),
+            football_load,
+            football_predict,
+            football_locate,
+            check("football"),
         ),
     }
 
@@ -290,7 +304,12 @@ def run_starred_command(
     adapters = build_starred_adapters(
         settings, include_players=include_players, offline=offline, sync=sync
     )
-    result = run_starred_predictions(config.teams, adapters, n_games=n_games)
+    result = run_starred_predictions(
+        config.teams,
+        adapters,
+        n_games=n_games,
+        on_event=lambda message: console.print(f"[dim]{message}[/dim]"),
+    )
     render_starred_overview(console, result)
     for sport, group in result.by_sport().items():
         console.print(f"\n[bold]{sport.upper()}[/bold]")

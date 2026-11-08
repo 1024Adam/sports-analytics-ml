@@ -183,6 +183,7 @@ def _run_football_ingestion(
     client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse", offline=offline)
     reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
     ingestor = NflverseIngestor(client, reconciler)
+    console.print("[dim]Syncing nflverse data (cached assets are reused)...[/dim]")
     report = ingestor.ingest(
         from_year=from_year,
         current_season=current_season,
@@ -204,6 +205,10 @@ def _sync_football_forecasts(settings: Settings, games: pl.DataFrame) -> None:
     )
 
     client = OpenMeteoForecastClient(settings.paths.raw_dir / "football" / "weather")
+    console.print(
+        "[dim]Syncing forecast weather (the first run downloads ~150 venue-seasons; "
+        "later runs reuse the cache)...[/dim]"
+    )
     sync = sync_football_forecasts(games, client)
     console.print(
         f"Forecast weather: {sync.windows_requested} venue windows "
@@ -303,6 +308,7 @@ def _run_football_predict(
             settings, from_year=None, current_season=True, start_date=None, end_date=None
         )
     artifact_dir = settings.paths.artifacts_dir / "football" / "latest"
+    console.print("[dim]Rebuilding features and predicting (about 15-30 s)...[/dim]")
     try:
         predictor = FootballMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
         if team:

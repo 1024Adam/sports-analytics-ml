@@ -114,7 +114,18 @@ class FootballStartingQBResolver:
         games: pl.DataFrame,
         confirmed_starters: pl.DataFrame | None = None,
     ) -> None:
-        self._availability = availability
+        # Index once by (game_id, team): resolving a slate would otherwise rescan every snapshot.
+        # Depth-chart rows only matter for QBs, which drops most of the table.
+        relevant = availability.filter(
+            (pl.col("source") != SOURCE_DEPTH_CHART) | (pl.col("position") == "QB")
+        )
+        self._by_team_game: dict[tuple[int, str], pl.DataFrame] = {
+            (int(key[0]), str(key[1])): frame
+            for key, frame in relevant.partition_by(
+                ["game_id", "team"], as_dict=True, maintain_order=True
+            ).items()
+        }
+        self._empty = availability.head(0)
         self._kickoff: dict[int, datetime] = {
             int(row["game_id"]): _utc(row["start_time_utc"])
             for row in games.select("game_id", "start_time_utc").iter_rows(named=True)
@@ -134,11 +145,9 @@ class FootballStartingQBResolver:
     def _as_of_rows(
         self, game_id: int, team: str, sources: tuple[str, ...], as_of: datetime
     ) -> pl.DataFrame:
-        return self._availability.filter(
-            (pl.col("game_id") == game_id)
-            & (pl.col("team") == team)
-            & pl.col("source").is_in(list(sources))
-            & (pl.col("as_of_time_utc") <= as_of)
+        frame = self._by_team_game.get((game_id, team), self._empty)
+        return frame.filter(
+            pl.col("source").is_in(list(sources)) & (pl.col("as_of_time_utc") <= as_of)
         )
 
     def _depth_qbs(self, rows: pl.DataFrame) -> list[int]:

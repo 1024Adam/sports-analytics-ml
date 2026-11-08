@@ -318,3 +318,32 @@ def test_orchestrator_normalizes_naive_kickoffs_to_utc() -> None:
     adapter = _adapter("hockey", {"COL": [_Pred("col", datetime(2026, 1, 1, 12, 0))]}, [])
     result = run_starred_predictions(_entries(("hockey", "COL")), {"hockey": adapter})
     assert result.predictions[0].kickoff_utc == datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def test_preflight_skips_before_sync_and_events_report_progress() -> None:
+    log: list[str] = []
+    events: list[str] = []
+
+    def no_model() -> None:
+        raise ArtifactsMissingError("no bundle")
+
+    guarded = _adapter("soccer", {"ARS": [_Pred("ars", T0)]}, log)
+    guarded = StarredSportAdapter(
+        guarded.sport,
+        guarded.sync,
+        guarded.load_predictor,
+        guarded.predict,
+        guarded.locate,
+        no_model,
+    )
+    hockey = _adapter("hockey", {"COL": [_Pred("col", T0)]}, log)
+    result = run_starred_predictions(
+        _entries(("soccer", "ARS"), ("hockey", "COL")),
+        {"soccer": guarded, "hockey": hockey},
+        on_event=events.append,
+    )
+    assert "sync:soccer" not in log and "load:soccer" not in log  # nothing touched
+    assert result.skips[0].reason is StarredSkipReason.NO_TRAINED_ARTIFACTS
+    assert events[0] == "soccer: skipped (NO_TRAINED_ARTIFACTS)"
+    assert any(e.startswith("hockey: sync done") for e in events)
+    assert any(e.startswith("hockey COL: predicted in") for e in events)

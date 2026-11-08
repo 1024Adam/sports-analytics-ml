@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -244,6 +245,8 @@ class StarredSportAdapter:
     load_predictor: Callable[[], Any]
     predict: Callable[[Any, StarredTeam, int], Sequence[Any]]
     locate: Callable[[Any], GameSlot]
+    # Cheap check run before `sync` so a missing model skips the sport without downloading data.
+    preflight: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -287,14 +290,21 @@ def run_starred_predictions(
     adapters: Mapping[str, StarredSportAdapter],
     *,
     n_games: int = 1,
+    on_event: Callable[[str], None] | None = None,
 ) -> StarredRunResult:
     """Predict each starred team's next `n_games`, never aborting on a per-team failure.
 
     Entries are grouped by sport: each sport is synced once and gets one predictor. A sync error
     is recorded as a warning and the cached Silver tables are used. Per-team failures become
     `StarredSkip` rows; finished games are not "upcoming" and are dropped. Predictions are
-    returned sorted by kickoff time.
+    returned sorted by kickoff time. `on_event` receives a progress line as each step starts or
+    finishes (sync, predictor load, per-team result).
     """
+
+    def say(message: str) -> None:
+        if on_event is not None:
+            on_event(message)
+
     result = StarredRunResult()
     by_sport: dict[str, list[StarredTeam]] = {}
     for entry in entries:
@@ -308,27 +318,46 @@ def run_starred_predictions(
                 for t in teams
             )
             continue
+        if adapter.preflight is not None:
+            try:
+                adapter.preflight()
+            except (ArtifactsMissingError, FileNotFoundError) as exc:
+                say(f"{sport}: skipped (NO_TRAINED_ARTIFACTS)")
+                result.skips.extend(
+                    StarredSkip(t, StarredSkipReason.NO_TRAINED_ARTIFACTS, str(exc)) for t in teams
+                )
+                continue
+        say(f"{sport}: syncing live data...")
+        started = time.perf_counter()
         try:
             adapter.sync()
         except Exception as exc:
             result.warnings.append(f"{sport}: live sync failed ({exc}); using cached data.")
+            say(f"{sport}: live sync failed; using cached data")
+        else:
+            say(f"{sport}: sync done in {time.perf_counter() - started:.0f}s")
         try:
             predictor = adapter.load_predictor()
         except (ArtifactsMissingError, FileNotFoundError) as exc:
+            say(f"{sport}: skipped (NO_TRAINED_ARTIFACTS)")
             result.skips.extend(
                 StarredSkip(t, StarredSkipReason.NO_TRAINED_ARTIFACTS, str(exc)) for t in teams
             )
             continue
         except Exception as exc:
+            say(f"{sport}: skipped (SOURCE_UNAVAILABLE)")
             result.skips.extend(
                 StarredSkip(t, StarredSkipReason.SOURCE_UNAVAILABLE, str(exc)) for t in teams
             )
             continue
 
         for entry in teams:
+            say(f"{sport}: predicting {entry.team}...")
+            started = time.perf_counter()
             try:
                 predictions = list(adapter.predict(predictor, entry, n_games))
             except Exception as exc:
+                say(f"{sport} {entry.team}: skipped (SOURCE_UNAVAILABLE)")
                 result.skips.append(
                     StarredSkip(entry, StarredSkipReason.SOURCE_UNAVAILABLE, str(exc))
                 )
@@ -339,11 +368,13 @@ def run_starred_predictions(
                 if not slot.is_final:
                     upcoming.append(StarredPrediction(entry, pred, _as_utc(slot.kickoff_utc)))
             if not upcoming:
+                say(f"{sport} {entry.team}: skipped (NO_UPCOMING_GAME)")
                 result.skips.append(
                     StarredSkip(entry, StarredSkipReason.NO_UPCOMING_GAME, "no scheduled game")
                 )
                 continue
             result.predictions.extend(upcoming)
+            say(f"{sport} {entry.team}: predicted in {time.perf_counter() - started:.0f}s")
 
     result.predictions.sort(key=lambda p: (p.kickoff_utc, p.entry.sport, p.entry.team))
     return result

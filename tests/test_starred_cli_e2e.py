@@ -323,3 +323,23 @@ def test_games_option_and_alias_and_exclusive_options(world: Path, starred_file:
     assert runner.invoke(app, ["predict", "stared"]).exit_code != 0
     # without --starred nothing changes: `--sport` still defaults to hockey
     assert "61.2%" in _invoke("predict", "--team", "COL", "--offline")
+
+
+def test_missing_artifacts_skip_before_any_download_and_progress_is_streamed(
+    world: Path, starred_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    syncs: list[str] = []
+    monkeypatch.setattr(cli, "_run_football_ingestion", lambda *a, **k: syncs.append("football"))
+    monkeypatch.setattr(cli, "_run_hockey_ingestion", lambda *a, **k: syncs.append("hockey"))
+    _star(("football", "KC"), ("hockey", "COL"))
+    artifacts = world / "artifacts" / "football" / "latest"
+    parked = artifacts.with_name("latest_parked")
+    shutil.move(artifacts, parked)
+    try:
+        out = _invoke("predict", "--starred")
+    finally:
+        shutil.move(parked, artifacts)
+    assert syncs == ["hockey"]  # football has no model, so nothing is downloaded for it
+    assert "football: skipped (NO_TRAINED_ARTIFACTS)" in out
+    assert "hockey: syncing live data..." in out and "hockey COL: predicted in" in out
+    assert out.index("hockey COL: predicted in") < out.index("SKIPPED")  # streamed, not deferred

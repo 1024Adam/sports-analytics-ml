@@ -24,8 +24,11 @@ from __future__ import annotations
 import io
 import time
 from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Final
 
@@ -53,6 +56,7 @@ UPCOMING_TTL_SECONDS: Final[float] = 3 * 3600.0
 HISTORICAL_LAG: Final[timedelta] = timedelta(days=2)
 GAME_WINDOW_HOURS: Final[int] = 4
 MIN_FORECAST_COVERAGE: Final[float] = 0.9
+SYNC_MAX_WORKERS: Final[int] = 8
 
 INDOOR_TEMP_F: Final[float] = 70.0
 INDOOR_WIND_MPH: Final[float] = 0.0
@@ -318,6 +322,7 @@ def sync_football_forecasts(
     *,
     now: datetime | None = None,
     first_season: int = FORECAST_FIRST_SEASON,
+    max_workers: int = SYNC_MAX_WORKERS,
 ) -> ForecastSyncReport:
     """Fetch or load cached forecasts per outdoor venue-season; API errors are recorded."""
     now = now or datetime.now(tz=UTC)
@@ -337,31 +342,57 @@ def sync_football_forecasts(
         elif kickoff <= now + timedelta(days=UPCOMING_HORIZON_DAYS):
             upcoming[venue.venue_id].append(kickoff.date())
 
-    def record(label: str, call: Any) -> None:
-        report.windows_requested += 1
-        try:
-            _frame, cached = call()
-            report.windows_from_cache += int(cached)
-        except (httpx.HTTPError, ForecastUnavailableError, ValueError) as exc:
-            report.windows_failed += 1
-            report.failures.append(f"{label}: {exc}")
-
+    jobs: list[tuple[str, Callable[[], tuple[pl.DataFrame, bool]]]] = []
     for (venue_id, season), days in sorted(historical.items()):
         v = venues[venue_id]
-        record(
-            f"{venue_id}/{season}",
-            lambda v=v, season=season, days=days: client.fetch_historical(
-                v.venue_id, v.latitude, v.longitude, season, min(days), max(days)
-            ),
+        jobs.append(
+            (
+                f"{venue_id}/{season}",
+                partial(
+                    client.fetch_historical,
+                    v.venue_id,
+                    v.latitude,
+                    v.longitude,
+                    season,
+                    min(days),
+                    max(days),
+                ),
+            )
         )
     for venue_id, days in sorted(upcoming.items()):
         v = venues[venue_id]
-        record(
-            f"{venue_id}/upcoming",
-            lambda v=v, days=days: client.fetch_upcoming(
-                v.venue_id, v.latitude, v.longitude, min(days), max(days), now=now
-            ),
+        jobs.append(
+            (
+                f"{venue_id}/upcoming",
+                partial(
+                    client.fetch_upcoming,
+                    v.venue_id,
+                    v.latitude,
+                    v.longitude,
+                    min(days),
+                    max(days),
+                    now=now,
+                ),
+            )
         )
+
+    def run(job: tuple[str, Callable[[], tuple[pl.DataFrame, bool]]]) -> tuple[str, bool, str]:
+        label, call = job
+        try:
+            _frame, cached = call()
+        except (httpx.HTTPError, ForecastUnavailableError, ValueError) as exc:
+            return label, False, str(exc)
+        return label, cached, ""
+
+    # Each job reads/writes its own cache file, so cold syncs can run concurrently.
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        for label, cached, error in pool.map(run, jobs):
+            report.windows_requested += 1
+            if error:
+                report.windows_failed += 1
+                report.failures.append(f"{label}: {error}")
+            else:
+                report.windows_from_cache += int(cached)
     return report
 
 
