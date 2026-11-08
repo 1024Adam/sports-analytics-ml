@@ -208,8 +208,12 @@ sports-analytics-ml/
 │           │   ├── constants.py     # 32 teams, stadium registry, Elo/prior parameters, Silver schemas
 │           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor
 │           │   └── features/
-│           │       ├── elo_hooks.py       # MOV Elo driver, starting-QB & venue Elo hooks
-│           │       └── schedule_hooks.py  # Weekly cadence, Thursday/Monday, body-clock & international travel
+│           │       ├── elo_hooks.py        # MOV Elo driver, starting-QB & venue Elo hooks
+│           │       ├── schedule_hooks.py   # Weekly cadence, Thursday/Monday, body-clock & international travel
+│           │       ├── team.py             # Rolling/EWMA EPA, ridge SoS, luck signals, cold-start shrinkage
+│           │       ├── qb.py               # Starting-QB features, draft priors, qb_value for the Elo hook
+│           │       ├── schedule_context.py # Per-game rest/travel/round context + Elo & QB-adjusted Elo
+│           │       └── pipeline.py         # Gold stage1_features.parquet + odds/observed-outcome firewall
 │           └── hockey/              # NHL HOCKEY PLUGIN
 │               ├── __init__.py
 │               ├── adapter.py       # HockeyAdapter implementing SportAdapter
@@ -290,9 +294,10 @@ Used when experimenting with new features, auditing data, or measuring out-of-sa
 # Verify live connectivity and schema contracts across all external feeds
 sports-ml check-sources --sport hockey
 
-# NFL Football: ingest/check-sources are live (Milestone 23); train/predict CLI wiring lands in Milestone 26
+# NFL Football: ingest/check-sources/features build are live (Milestones 23-24); train/predict CLI wiring lands in Milestone 26
 sports-ml check-sources --sport football --league nfl
 sports-ml ingest --sport football --league nfl --from-year 2018
+sports-ml features build --sport football --league nfl
 
 # Sync only the current season to date (or a specific date window)
 sports-ml ingest --sport hockey --current-season

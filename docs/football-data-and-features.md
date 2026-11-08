@@ -148,3 +148,34 @@ Computed per `(team, season)` from the **previous** kickoff only:
 2. Pre-game state only: ratings are recorded before post-game updates; cadence features use the prior appearance and the scheduled kickoff of the current game.
 3. Mutating the score, overtime flag, or kickoff of any game at index `≥ t` leaves features for games `< t` bit-for-bit unchanged (covered by `tests/sports/football/test_football_schedule_and_elo.py`).
 4. Odds, observed weather, and post-game availability are quarantined from feature tables (Milestones 23, 24, 27, 29).
+
+---
+
+## 7. Gold Features (`sports/football/features/`, Milestone 24)
+
+`build_football_stage1_features` (and `sports-ml features build --sport football --league nfl`) writes `data/gold/football/stage1_features.parquet`: one row per game (completed **and** upcoming), identifiers, labels (`home_score`, `away_score`, `home_win`, `is_tie`; ties are excluded from classifier targets in Milestone 25), and `STAGE1_FEATURE_COLUMNS` (home-minus-away `diff_*` plus selected `home_*`/`away_*` columns). Boolean features are cast to `Int8`; there are **zero `NaN`/null** feature values.
+
+### 7.1 Play-level filters (Silver `team_game_logs`)
+`f_off_*` columns aggregate only scrimmage `pass`/`run` plays with offense win probability in `[0.05, 0.95]` (garbage time removed; unknown WP excluded) and exclude QB kneels and spikes, so neither enters an EPA/play or success-rate denominator. Early downs = downs 1-2; explosive = pass >= 20 yd or run >= 10 yd. Points per drive counts drives whose first scrimmage play is inside the band (TD = 7, FG = 3, else 0). Raw red-zone drives/TD drives and fumbles are unfiltered. Defensive metrics are the opponent's offensive numerators/denominators in the same game.
+
+### 7.2 Team rolling features and cold start (`team.py`)
+Metrics (`epa_per_play`, `pass_epa_per_dropback`, `rush_epa_per_rush`, `success_rate`, `early_down_success_rate`, `explosive_play_rate`, `sack_rate`, `turnover_rate`, `points_per_drive`, and offense-only `penalty_yards_per_game`) exist for offense (`off_*`) and defense (`def_*`) with four variants: season-to-date (`_std`), rolling 4/8 games (`_roll4`, `_roll8`, `pregame_exposure_rate`), and EWMA (`_ewma`, alpha 0.30). All use `shift(1)` inside `[team, season]`.
+
+$$\hat r = \frac{n\,r_{\text{curr}} + k\,\pi}{n + k},\quad k = 8\ \text{games},\quad \pi = w\,r_{\text{team, prev season}} + (1-w)\,r_{\text{league, prev season}}$$
+
+* `n` = games played before `t` (windows use `min(n, window)`), so the current-season weight `n/(n+k)` increases monotonically with games played and tends to 1; there is **no hard-coded week cutoff**.
+* A franchise without a prior season (expansion/relocation key) or a first season in the data falls back to the previous league mean, then to a per-metric league default.
+* **Roster continuity** `c` = share of the team's prior-season offensive usage (snaps, else attempts + carries + targets) held by players on the latest depth-chart snapshot at or before `kickoff - 90 min` (default `0.60`, flagged `continuity_is_imputed`). `w = 0.35 + 0.50 c`, multiplied by `0.85` after a head-coach change (optional `head_coach_changed` input).
+* **Opponent adjustment**: a ridge regression `EPA/play = mu + off[team] + def[opp]` (weights = plays) fit on the season's games from *earlier weeks* only, shrunk (lambda = 8) toward `w x` the prior-season ratings (`adj_off_epa`, `adj_def_epa`, `adj_epa_net`).
+* **Luck/regression**: `turnover_diff_pg` and `turnover_regression_signal` (shrunk minus raw, pseudo-count 16 games), `fumble_luck_pg` (`0.5 x fumbles - fumbles lost` per game), `close_game_win_pct` (one-score games, shrunk to 0.5), `pythag_win_pct` (exponent 2.37, prior-season blend), `pythag_luck` (win% minus Pythagorean, shrunk), and `rz_td_rate` (red-zone TD%, 20-drive pseudo-count toward 0.57).
+* Upcoming games reuse the last completed state; games beyond the next are projections from it.
+
+### 7.3 Starting QB (`qb.py`)
+Player-level, team-agnostic history: decayed (`0.96`/game) career sums from games before `t`, shrunk toward a replacement prior (`k = 250` dropbacks): `qb_epa_per_dropback`, `qb_cpoe`, `qb_sack_rate`, `qb_air_yards_per_attempt`, `qb_rush_epa`, `qb_games_with_team`, `qb_career_games`, `qb_is_rookie_or_debut`, `qb_is_backup` (starter is not the team's most-dropback QB over its last 17 games), and `qb_value = EPA/dropback + 0.01 CPOE`. Debut/rookie priors use draft capital: `prior_EPA = -0.10 + 0.15 e^{-(pick-1)/40}` and `prior_CPOE = -2.0 + 3.0 e^{-(pick-1)/40}` (`draft_picks`). `team_qb_baseline_value` is an EWMA (alpha 0.15) of the team's previous starters' values; `qb_value_over_baseline` and the `(game, team) -> value` maps feed `FootballQBEloHook`. Unknown starters of unplayed games project the incumbent (`qb_is_imputed`).
+
+### 7.4 Schedule context and Elo (`schedule_context.py`)
+Home/away `days_rest`, `is_short_week`, `is_post_bye`, `is_post_mini_bye`, `prior_game_was_overtime`, `travel_km`, `timezone_shift`, `consecutive_road_games`, `kickoff_body_clock_hour`; game-level `rest_diff`, `is_thursday_game`, `is_monday_game`, `is_international`, `is_neutral_site`, `is_division_game`, `is_conference_game`, `is_playoff`, `playoff_round` (REG 0, WC 1, DIV 2, CON 3, SB 4). A missing rest (season opener) is imputed to 7 days with `*_days_rest_is_imputed`. `elo_home_pre`, `elo_away_pre`, `diff_elo_pre`, `elo_home_win_prob` come from the plain Elo; `qb_elo_diff_pre` / `qb_elo_home_win_prob` add the starting-QB hook and the venue hook (altitude, dome, rest differential).
+
+### 7.5 Hard odds & observed-outcome firewall (`pipeline.py`)
+`is_forbidden_feature_column` rejects names starting with `market_` or `obs_weather_` or containing `odds`, `spread`, or `closing`. `STAGE1_FEATURE_COLUMNS` / `STAGE2_FEATURE_COLUMNS` are filtered and asserted at import time, and the builder strips such columns from its inputs before any feature code runs, so mutating `market_*` / `obs_weather_*` Silver columns changes `0.0` of the output (`tests/sports/football/test_football_odds_firewall.py`).
+

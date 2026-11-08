@@ -875,6 +875,14 @@ ALTITUDE_THRESHOLD_M: Final[float] = 1000.0
 ALTITUDE_ELO_PER_KM: Final[float] = 12.0
 DOME_HOME_ELO_EDGE: Final[float] = 2.0
 
+# Play-level filters for pre-game efficiency features (garbage-time WP band, early downs).
+WP_BAND_MIN: Final[float] = 0.05
+WP_BAND_MAX: Final[float] = 0.95
+EARLY_DOWNS: Final[tuple[int, ...]] = (1, 2)
+EXPLOSIVE_PASS_YARDS: Final[float] = 20.0
+EXPLOSIVE_RUSH_YARDS: Final[float] = 10.0
+RED_ZONE_YARDLINE_100: Final[float] = 20.0
+
 # Cadence thresholds (days between kickoffs).
 SHORT_WEEK_MAX_DAYS: Final[float] = 5.0
 MINI_BYE_MIN_DAYS: Final[float] = 9.0
@@ -971,6 +979,22 @@ SILVER_FOOTBALL_TEAM_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "off_yards": pl.Float64(),
     "off_turnovers": pl.Int8(),
     "off_sacks_taken": pl.Int8(),
+    "off_fumbles": pl.Int8(),
+    "off_fumbles_lost": pl.Int8(),
+    "off_rz_drives": pl.Int8(),
+    "off_rz_td_drives": pl.Int8(),
+    "f_off_plays": pl.Int16(),
+    "f_off_epa": pl.Float64(),
+    "f_off_dropbacks": pl.Int16(),
+    "f_off_pass_epa": pl.Float64(),
+    "f_off_rushes": pl.Int16(),
+    "f_off_rush_epa": pl.Float64(),
+    "f_off_success": pl.Int16(),
+    "f_off_early_plays": pl.Int16(),
+    "f_off_early_success": pl.Int16(),
+    "f_off_explosive": pl.Int16(),
+    "f_off_drives": pl.Int8(),
+    "f_off_drive_points": pl.Float64(),
     "def_plays": pl.Int16(),
     "def_epa_total": pl.Float64(),
     "def_success_plays": pl.Int16(),
@@ -1031,6 +1055,8 @@ SILVER_FOOTBALL_QB_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "sacks": pl.Int8(),
     "air_yards_total": pl.Float64(),
     "scrambles": pl.Int8(),
+    "rush_attempts": pl.Int8(),
+    "rush_epa_total": pl.Float64(),
 }
 
 # As-of availability snapshots (injury report, depth chart, official inactives). A row is

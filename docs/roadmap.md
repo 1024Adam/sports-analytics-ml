@@ -688,36 +688,36 @@ Build resilient `.gz`-cached ingestion for the nflverse releases and reconcile t
 ---
 
 ## Milestone 24: NFL Pre-Game Feature Engineering: Team EPA, Starting QB, Rest/Schedule & Cross-Season Shrinkage (`sports/football/features/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Construct leak-free Gold features (`data/gold/football/`) capturing opponent-adjusted team efficiency, starting-QB quality, schedule/rest context, and a principled **cold-start policy** for a 17-game season.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/features/team.py`:
+- [x] `src/sports_ml/sports/football/features/team.py`:
   - Strict `.shift(1)` rolling over `(start_time_utc, event_seq, game_id)` (rolling 4/8-game windows + EWMA + season-to-date), exposure-normalized via `pregame_exposure_rate` (per play / per dropback):
     - Offense & defense `epa_per_play`, `pass_epa_per_dropback`, `rush_epa_per_rush`, `success_rate`, `early_down_success_rate`, `explosive_play_rate`, `sack_rate`, `turnover_rate`, `penalty_yards_per_game`, `points_per_drive` (garbage-time filtered with a win-probability band, e.g., $0.05 \le WP \le 0.95$ and exclusion of kneel/spike plays).
   - **Opponent adjustment**: ridge-regularized strength-of-schedule adjustment of EPA ratings computed only from games $< t$.
   - **Luck/regression signals**: turnover differential vs. expected, fumble-recovery luck, close-game record (one-score games), Pythagorean expectation (`exponent ≈ 2.37`), and red-zone TD% regression.
   - **Cold-start / season-boundary policy**: Weeks 1–4 blend prior-season (and multi-year) team ratings with current-season rolling values using Bayesian shrinkage in *games played* ($k_{\text{team}} \approx 8$ games), with offseason regression toward the mean, roster-continuity weighting (returning snap share, QB change, head-coach change), and **no hard-coded week cutoff**.
-- [ ] `src/sports_ml/sports/football/features/qb.py`:
+- [x] `src/sports_ml/sports/football/features/qb.py`:
   - Starting-QB features from the Tier 1/Tier 2 resolver: shrunk rolling `qb_epa_per_dropback`, `qb_cpoe`, `qb_sack_rate`, `qb_air_yards_per_attempt`, `qb_rush_epa`, `qb_games_with_team`, `qb_is_rookie_or_debut`, `qb_is_backup`, and `qb_value` (composite feeding the M22 Elo hook).
   - **Player-level prior follows the QB across teams**; debut/rookie QBs use a draft-capital prior (`draft_round`, `draft_pick` from nflverse `draft_picks`) shrunk toward the league replacement-level QB.
-- [ ] `src/sports_ml/sports/football/features/schedule_context.py`:
+- [x] `src/sports_ml/sports/football/features/schedule_context.py`:
   - `days_rest`, `rest_diff`, `is_short_week`, `is_post_bye`, `is_thursday_game`, `is_monday_game`, `is_international`, `is_neutral_site`, `is_division_game`, `is_conference_game`, `is_playoff`, `playoff_round`, `travel_km`, `timezone_shift`, `consecutive_road_games`, plus Elo ratings & QB-adjusted Elo differentials.
-- [ ] `src/sports_ml/sports/football/features/pipeline.py`:
+- [x] `src/sports_ml/sports/football/features/pipeline.py`:
   - Builds `data/gold/football/stage1_features.parquet` with home-minus-away `diff_*` columns, defines `STAGE1_FEATURE_COLUMNS`/`STAGE2_FEATURE_COLUMNS`, and enforces the **Hard Odds & Observed-Outcome Firewall** (rejecting any column starting with `market_` / `obs_weather_` / containing `odds`, `spread`, or `closing`).
   - Missingness is explicit (`*_is_imputed` flags) with **zero `NaN`s** for Week 1, debut QBs, and relocated franchises.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_features.py`:
+- [x] `tests/sports/football/test_football_features.py`:
   - **Strict Anti-Leakage Test**: Mutating plays, scores, EPA, or player stats for games at index $\ge t$ yields **bit-for-bit identical** features for games $< t$ (covering Thursday $\rightarrow$ Sunday $\rightarrow$ Monday ordering within a week).
   - **Bye-Week Test**: A team on bye has no row that week; next-game `days_rest` $\ge 13$ and rolling windows skip the bye without introducing gaps or double-counting.
   - **Cold-Start Test**: Week 1, expansion-style new-QB, and relocated-franchise cases produce finite, non-null features; the weight on current-season data increases monotonically with games played and tends to `1` as $n \to \infty$.
   - **QB-Swap Test**: Replacing the starter with a backup deterministically changes `qb_*` and `qb_value` features while leaving all team rolling features unchanged.
   - **Garbage-Time Filter Test**: Plays outside the WP band are excluded from `epa_per_play` and kneels/spikes never enter success-rate denominators.
-- [ ] `tests/sports/football/test_football_odds_firewall.py`: no `market_*`, `obs_weather_*`, or odds-like column ever appears in either feature list, and mutating those Silver columns changes `0.0` of downstream features.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `tests/sports/football/test_football_odds_firewall.py`: no `market_*`, `obs_weather_*`, or odds-like column ever appears in either feature list, and mutating those Silver columns changes `0.0` of downstream features.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

@@ -67,6 +67,13 @@ NFLVERSE_REQUIRED_COLUMNS: Final[dict[str, tuple[str | tuple[str, ...], ...]]] =
         "air_yards",
         "qb_scramble",
         "pass_attempt",
+        "wp",
+        "down",
+        "qb_kneel",
+        "qb_spike",
+        "yardline_100",
+        "fixed_drive_result",
+        "fumble",
     ),
     "player_stats": (
         "player_id",

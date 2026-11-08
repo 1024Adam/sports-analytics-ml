@@ -44,6 +44,7 @@ from sports_ml.sports.football.ingestion.lineups import (
     TIER1_CUTOFF_MINUTES,
     derive_starting_qbs_from_pbp,
 )
+from sports_ml.sports.football.ingestion.pbp_aggregates import aggregate_filtered_offense
 
 _EASTERN = ZoneInfo("America/New_York")
 DEFAULT_KICKOFF_ET: Final[str] = "13:00"
@@ -325,8 +326,10 @@ def build_team_game_logs(pbp_df: pl.DataFrame, games_df: pl.DataFrame) -> pl.Dat
         .group_by("_gid", "posteam")
         .agg(pl.col("_secs").sum().alias("time_of_possession_s"))
     )
+    filtered = aggregate_filtered_offense(pbp)
     stats = (
-        offense.join(penalties, on=["_gid", "posteam"], how="left")
+        offense.join(filtered, on=["_gid", "posteam"], how="left")
+        .join(penalties, on=["_gid", "posteam"], how="left")
         .join(drive_seconds, on=["_gid", "posteam"], how="left")
         .rename({"_gid": "game_id", "posteam": "team"})
     )
@@ -380,6 +383,22 @@ def build_qb_game_logs(pbp_df: pl.DataFrame, games_df: pl.DataFrame) -> pl.DataF
         (pl.col("sack") == 1).sum().alias("sacks"),
         pl.col("air_yards").sum().alias("air_yards_total"),
         (pl.col("qb_scramble") == 1).sum().alias("scrambles"),
+    )
+    qb_rushes = (
+        pbp.filter(
+            (pl.col("play_type") == "run")
+            & (pl.col("qb_dropback").fill_null(0) != 1)
+            & pl.col("posteam").is_not_null()
+            & pl.col("id").is_not_null()
+        )
+        .group_by("_gid", "posteam", "id")
+        .agg(
+            pl.len().alias("rush_attempts"),
+            pl.col("epa").sum().alias("rush_epa_total"),
+        )
+    )
+    qb = qb.join(qb_rushes, on=["_gid", "posteam", "id"], how="left").with_columns(
+        pl.col("rush_attempts").fill_null(0), pl.col("rush_epa_total").fill_null(0.0)
     )
     starter_ids = _with_canonical_game_id(starters).select(
         pl.col("_gid").alias("game_id"), "team", "starter_gsis"

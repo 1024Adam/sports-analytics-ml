@@ -184,8 +184,19 @@ def _play(
     cpoe: float | None = None,
     air_yards: float | None = None,
     pass_attempt: int = 0,
+    wp: float | None = 0.5,
+    down: int | None = 1,
+    drive_result: str | None = "Punt",
+    yardline_100: float | None = 60.0,
 ) -> dict[str, object]:
     return {
+        "wp": wp,
+        "down": down,
+        "qb_kneel": 0,
+        "qb_spike": 0,
+        "yardline_100": yardline_100,
+        "fixed_drive_result": drive_result,
+        "fumble": 0,
         "game_id": game_id,
         "play_id": play_id,
         "posteam": team,
@@ -512,6 +523,10 @@ def test_team_qb_logs_from_pbp_and_starter_precedence(tmp_path: Path) -> None:
     team = rec.reconcile_team_game_logs(pbp)
     kc = team.filter(pl.col("team") == "KC").row(0, named=True)
     assert kc["off_plays"] == 4
+    assert kc["f_off_plays"] == 4  # every fixture play sits inside the win-probability band
+    assert kc["f_off_drives"] == 2
+    assert kc["f_off_drive_points"] == pytest.approx(0.0)
+    assert kc["off_fumbles"] == 0
     assert kc["off_dropbacks"] == 3
     assert kc["off_rushes"] == 1
     assert kc["off_epa_total"] == pytest.approx(-0.7)

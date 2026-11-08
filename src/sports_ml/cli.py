@@ -53,6 +53,7 @@ from sports_ml.sports.baseball.models import (
     run_baseball_stage1_walk_forward_backtest,
     score_baseball_prediction_ledger,
 )
+from sports_ml.sports.football.features import build_and_persist_football_gold_features
 from sports_ml.sports.football.ingestion import (
     FootballSilverReconciler,
     NflverseClient,
@@ -1181,14 +1182,30 @@ def ingest_command(
 @features_app.command("build")
 def features_build_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
 ) -> None:
     """Recompute leak-free pre-game Gold feature tables from local Silver Parquet data."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        try:
+            f_df = build_and_persist_football_gold_features(get_settings())
+        except FileNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(
+            f"[bold green]Gold features built[/bold green] for sport='football': "
+            f"Stage 1 rows={f_df.height}, Stage 2 rows=0 (player projections: Milestone 26)."
+        )
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     if slug == "baseball":
