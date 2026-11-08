@@ -1,0 +1,27 @@
+# Copy to config/starred_teams.toml (git-ignored), or manage it with:
+#   sports-ml starred add --sport hockey --team COL
+#   sports-ml starred add --sport baseball --team LAD     # league auto-resolved (MLB vs NPB)
+#   sports-ml starred list
+# Override the location with SPORTS_ML_STARRED_TEAMS_FILE (default: <root>/config/starred_teams.toml).
+# Teams are keyed by (sport, league, team): the same tricode may be starred in several sports.
+
+[[starred]]
+sport = "hockey"
+league = "nhl"
+team = "COL"
+label = "Avalanche"
+
+[[starred]]
+sport = "soccer"
+league = "epl"
+team = "ARS"
+
+[[starred]]
+sport = "baseball"
+league = "mlb"
+team = "LAD"
+
+[[starred]]
+sport = "football"
+league = "nfl"
+team = "KC"

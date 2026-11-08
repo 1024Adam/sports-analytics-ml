@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,6 +28,12 @@ from sports_ml.core.evaluation import (
 )
 from sports_ml.core.market import MarketEdgeReport
 from sports_ml.core.registry import ModelRegistry
+from sports_ml.core.starred import (
+    StarredConfigError,
+    StarredTeamsConfig,
+    resolve_team,
+    starred_teams_path,
+)
 from sports_ml.sports.baseball.ingestion import (
     BaseballSilverReconciler,
     MLBStatsAPIClient,
@@ -126,6 +133,12 @@ features_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(features_app, name="features")
+starred_app = typer.Typer(
+    name="starred",
+    help="Manage your starred teams (used by `sports-ml predict --starred`).",
+    no_args_is_help=True,
+)
+app.add_typer(starred_app, name="starred")
 
 console = Console()
 
@@ -2267,14 +2280,146 @@ def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -
                 console.print(b_table)
 
 
+def _load_starred() -> tuple[Path, StarredTeamsConfig]:
+    from sports_ml.sports.starred import register_default_team_resolvers
+
+    register_default_team_resolvers()
+    path = starred_teams_path()
+    try:
+        return path, StarredTeamsConfig.load(path)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@starred_app.command("add")
+def starred_add_command(
+    sport: Annotated[
+        str, typer.Option("--sport", help="'hockey', 'soccer', 'baseball', or 'football'.")
+    ],
+    team: Annotated[str, typer.Option("--team", "-t", help="Team code or name (e.g. COL, ARS).")],
+    league: Annotated[
+        str | None,
+        typer.Option("--league", help="'nhl', 'epl', 'mlb'/'npb', or 'nfl' (auto-resolved)."),
+    ] = None,
+    label: Annotated[str | None, typer.Option("--label", help="Optional display label.")] = None,
+) -> None:
+    """Star a team (keyed by sport, league and team)."""
+    path, config = _load_starred()
+    try:
+        updated, entry, added = config.add(sport, team, league, label)
+        full_name = resolve_team(entry.sport, entry.team, entry.league).full_name
+        if added:
+            updated.save(path)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    verb = "Starred" if added else "Already starred"
+    console.print(f"{verb}: {entry.sport} / {entry.league} / {entry.team} ({full_name})")
+
+
+@starred_app.command("remove")
+def starred_remove_command(
+    sport: Annotated[str, typer.Option("--sport", help="Sport slug.")],
+    team: Annotated[str, typer.Option("--team", "-t", help="Team code or name.")],
+    league: Annotated[str | None, typer.Option("--league", help="League filter.")] = None,
+) -> None:
+    """Remove a starred team."""
+    path, config = _load_starred()
+    try:
+        updated, removed = config.remove(sport, team, league)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not removed:
+        console.print(f"[yellow]Not starred:[/yellow] {sport} {team}")
+        raise typer.Exit(code=1)
+    updated.save(path)
+    for entry in removed:
+        console.print(f"Removed: {entry.sport} / {entry.league} / {entry.team}")
+
+
+@starred_app.command("list")
+def starred_list_command() -> None:
+    """List starred teams."""
+    from sports_ml.starred_cli import EMPTY_HINT
+
+    path, config = _load_starred()
+    if not config.teams:
+        console.print(EMPTY_HINT)
+        return
+    table = Table(title=f"Starred Teams ({path})")
+    for col in ("Sport", "League", "Team", "Name", "Label"):
+        table.add_column(col)
+    for t in config.teams:
+        table.add_row(
+            t.sport,
+            t.league,
+            t.team,
+            resolve_team(t.sport, t.team, t.league).full_name,
+            t.label or "",
+        )
+    console.print(table)
+
+
+def _run_starred_predict(*, n_games: int, include_players: bool, offline: bool) -> None:
+    from sports_ml.starred_cli import run_starred_command
+
+    settings = get_settings()
+    _path, config = _load_starred()
+
+    def sync_hockey() -> None:
+        _run_hockey_ingestion(settings, current_season=True, offline=False, team=None)
+
+    def sync_soccer() -> None:
+        _run_soccer_ingestion(settings, current_season=True, offline=False)
+
+    def sync_baseball() -> None:
+        _run_baseball_ingestion(settings, league="all", current_season=True, offline=False)
+
+    def sync_football() -> None:
+        _run_football_ingestion(
+            settings, from_year=None, current_season=True, start_date=None, end_date=None
+        )
+
+    sync: dict[str, Callable[[], None]] = {
+        "hockey": sync_hockey,
+        "soccer": sync_soccer,
+        "baseball": sync_baseball,
+        "football": sync_football,
+    }
+    from sports_ml.sports.football.reporting import render_football_predictions
+
+    renderers: dict[str, Callable[[list[Any]], None]] = {
+        "hockey": _render_predictions,
+        "soccer": _render_soccer_predictions,
+        "baseball": _render_baseball_predictions,
+        "football": lambda preds: render_football_predictions(console, preds),
+    }
+    code = run_starred_command(
+        console,
+        settings,
+        config,
+        n_games=n_games,
+        include_players=include_players,
+        offline=offline,
+        sync=sync,
+        renderers=renderers,
+    )
+    if code != 0:
+        raise typer.Exit(code=code)
+
+
 @app.command("predict")
 def predict_command(
+    target: Annotated[
+        str | None,
+        typer.Argument(help="Optional: 'starred' (alias of --starred)."),
+    ] = None,
     sport: Annotated[
-        str,
+        str | None,
         typer.Option(
-            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+            "--sport",
+            help="Sport slug: 'hockey' (default), 'soccer', 'baseball', or 'football'.",
         ),
-    ] = "hockey",
+    ] = None,
     league: Annotated[
         str,
         typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
@@ -2329,8 +2474,41 @@ def predict_command(
         int | None,
         typer.Option("--week", min=1, help="Football week (defaults to the upcoming slate)."),
     ] = None,
+    starred: Annotated[
+        bool,
+        typer.Option(
+            "--starred",
+            help="Predict the next game(s) of every starred team across sports "
+            "(see `sports-ml starred`). Exclusive with --sport/--team/--matchup/--date.",
+        ),
+    ] = False,
 ) -> None:
     """Generate Stage 1 game win probabilities and optional Stage 2 player projections."""
+    if target is not None and target.strip().lower() != "starred":
+        raise typer.BadParameter(f"Unknown predict target '{target}'. Did you mean 'starred'?")
+    if starred or target is not None:
+        conflicts = [
+            flag
+            for flag, value in (
+                ("--sport", sport),
+                ("--team", team),
+                ("--matchup", matchup),
+                ("--date", game_date),
+            )
+            if value is not None
+        ]
+        if conflicts:
+            raise typer.BadParameter(
+                f"--starred cannot be combined with {', '.join(conflicts)}; "
+                "it predicts every starred team's next game across all sports."
+            )
+        _run_starred_predict(
+            n_games=n_games if n_games is not None else 1,
+            include_players=include_players,
+            offline=offline,
+        )
+        return
+    sport = sport or "hockey"
     if sport.strip().lower() == "football":
         if team and matchup:
             raise typer.BadParameter("Specify either --team or --matchup, not both.")

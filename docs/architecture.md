@@ -201,7 +201,9 @@ sports-analytics-ml/
 │       │   ├── validation.py        # Walk-forward expanding & sliding window time-series splitters
 │       │   ├── calibration.py       # Out-of-fold Platt / Isotonic probability calibration
 │       │   ├── evaluation.py        # Log Loss, Brier Score, ECE, ROI & player MAE/Poisson metrics
-│       │   └── registry.py          # Artifact serialization, metadata & model registry
+│       │   ├── registry.py          # Artifact serialization, metadata & model registry
+│       │   └── starred.py           # Starred-teams store (TOML, atomic), TeamResolver registry, orchestrator
+│       ├── starred_cli.py       # Starred-teams adapters over the existing predictors + rendering
 │       └── sports/
 │           ├── football/            # NFL FOOTBALL PLUGIN (Phase 6)
 │           │   ├── adapter.py       # FootballAdapter implementing SportAdapter
@@ -312,6 +314,11 @@ sports-ml train --sport football --include-stage2
 sports-ml backtest --sport football --stage all --splits 2
 sports-ml predict --sport football --season 2026 --week 9 --matchup KC@BUF --include-players
 sports-ml score-predictions --sport football
+
+# Starred teams (Milestone 30): a thin orchestration layer over each plugin's predict_team_next_games
+sports-ml starred add --sport hockey --team COL
+sports-ml starred list
+sports-ml predict --starred --games 1 --offline
 
 # Sync only the current season to date (or a specific date window)
 sports-ml ingest --sport hockey --current-season

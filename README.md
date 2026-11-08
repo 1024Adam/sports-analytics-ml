@@ -87,6 +87,22 @@ uv run sports-ml predict --sport football --team KC --games 3
 uv run sports-ml score-predictions --sport football
 ```
 
+### Starred Teams (cross-sport)
+```bash
+# Keep a personal watch list, keyed by (sport, league, team): PHI in hockey and PHI in baseball coexist
+uv run sports-ml starred add --sport hockey --team COL
+uv run sports-ml starred add --sport baseball --team OAK      # stored as ATH; league (MLB/NPB) auto-resolved
+uv run sports-ml starred add --sport soccer --team ARS
+uv run sports-ml starred add --sport football --team KC
+uv run sports-ml starred list
+uv run sports-ml starred remove --sport hockey --team COL
+
+# One command: the next game of every starred team, merged chronologically (local time)
+uv run sports-ml predict --starred                  # alias: uv run sports-ml predict starred
+uv run sports-ml predict --starred --games 3 --include-players --offline
+```
+The list lives in `config/starred_teams.toml` (git-ignored; see `config/starred_teams.example.toml`; override with `SPORTS_ML_STARRED_TEAMS_FILE`). Each sport is synced once, a team that cannot be predicted prints a `SKIPPED` line (`NO_UPCOMING_GAME`, `NO_TRAINED_ARTIFACTS`, `SOURCE_UNAVAILABLE`) without stopping the others, and the exit code is non-zero only if every team failed. `--starred` cannot be combined with `--sport`, `--team`, `--matchup`, or `--date`.
+
 ### 3. Developer & Audit Commands
 ```bash
 # Verify live connectivity and schema contracts across NHL API, MoneyPuck & DailyFaceoff

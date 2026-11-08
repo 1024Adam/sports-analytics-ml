@@ -1,6 +1,6 @@
 ---
 name: predict-matchup
-description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win (`hockey`/`football`) or 3-way 1X2 (`soccer`) probabilities, projecting Stage 2 player stats (`--include-players`), predicting tonight's NHL/EPL slate, a specific matchup (`--matchup AWAY@HOME`), or a team's next N games (`--team` / `--games`), or interpreting pre-prediction confidence warnings."
+description: "Use when: running pre-game matchup predictions (`sports-ml predict`), generating Stage 1 calibrated win (`hockey`/`football`) or 3-way 1X2 (`soccer`) probabilities, projecting Stage 2 player stats (`--include-players`), predicting tonight's NHL/EPL slate, a specific matchup (`--matchup AWAY@HOME`), or a team's next N games (`--team` / `--games`), interpreting pre-prediction confidence warnings, or predicting every starred team's next game across sports (`predict --starred`)."
 argument-hint: "Optional --sport (hockey|soccer), --team (e.g., COL or ARS), --games N, --date (YYYY-MM-DD), --matchup (e.g., TOR@BOS), --include-players..."
 user-invocable: true
 disable-model-invocation: false
@@ -82,3 +82,16 @@ uv run sports-ml predict --sport football --date 2026-11-08                     
 - Output: `P(Away)` / `P(Home)`, projected score and margin/total, a QB matchup card (starter, `P(starts)`, status) and, with `--include-players`, QB / RB / WR / TE projection tables with `P(Anytime TD)` (reconciled to the Stage 1 expected score, opportunity-conserving).
 - Warnings to relay: `CONFIRMED_QB`, `PROBABLE_QB`, `QB_UNCERTAIN`, `BACKUP_QB`, `EARLY_SEASON_SHRINKAGE`, `DEBUT_OR_NEW_QB_PRIOR`, `NEUTRAL_OR_INTERNATIONAL_SITE`, `KEY_OFFENSIVE_PLAYER_OUT`, `STAGE1_ONLY_NO_PLAYER_DATA`.
 - Starters come from the 2-tier resolver (confirmed / depth chart minus inactives, else depth chart + injury report); predictions append to `data/predictions/football_predictions.parquet` (and `football_player_predictions.parquet` with `--include-players`).
+
+## Starred Teams (`predict --starred`)
+Use this when the user wants "my teams" across sports instead of naming a sport:
+```bash
+uv run sports-ml starred add --sport hockey --team COL        # also: soccer ARS, baseball LAD/OAK (-> ATH), football KC
+uv run sports-ml starred list
+uv run sports-ml predict --starred                           # alias: predict starred
+uv run sports-ml predict --starred --games 3 --include-players --offline
+```
+- Entries are keyed by `(sport, league, team)` and stored in `config/starred_teams.toml` (git-ignored; `SPORTS_ML_STARRED_TEAMS_FILE` overrides the path). An empty list prints a hint and exits 0.
+- `--starred` cannot be combined with `--sport`, `--team`, `--matchup`, or `--date`; `--games N` (default 1), `--include-players`, and `--offline` apply to every sport.
+- Output: one chronological overview (kickoff in the local timezone, sport/league per row), then each sport's usual Stage 1 / Stage 2 tables. Predictions are produced by the same `predict_team_next_games` calls and ledger appends as `predict --sport X --team Y --games N`.
+- Relay `SKIPPED` rows to the user: `NO_UPCOMING_GAME`, `NO_TRAINED_ARTIFACTS` (run `/train-models` for that sport), or `SOURCE_UNAVAILABLE` (run `/ingest-data`). The exit code is non-zero only when every starred team failed.
