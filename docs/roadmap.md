@@ -625,65 +625,65 @@ Phase 6 extends `sports-analytics-ml` to **Football (`--sport football --league 
 ---
 
 ## Milestone 22: Football Plugin Foundation, NFL 32-Team Registry, Stadium Database & QB-Adjusted Elo (`core/` & `sports/football/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Establish the football plugin skeleton (league-aware, NFL first), canonical Silver schemas, 32-team/stadium registry, weekly-cadence schedule primitives, and a margin-of-victory, QB-adjusted Elo hook—without rewriting existing `core/` abstractions (only additive extensions).
 
 ### Deliverables
-- [ ] `docs/football-data-and-features.md`: Data-source map (nflverse release assets consumed directly as parquet/csv.gz, optionally via `nflreadpy`; do **not** depend on the deprecated `nfl_data_py`), Silver/Gold schemas, exact feature math, per-source availability windows (play-by-play 1999+, injuries ~2009+, snap counts 2012+, Next Gen Stats 2016+), temporal boundary rules, and the pre-game availability tiers defined in Milestone 23. Also update `docs/architecture.md` (§4 abstraction table, directory tree, CLI section) and `README.md` (supported sports, CLI examples) to include NFL.
-- [ ] `src/sports_ml/sports/football/__init__.py` & `adapter.py`:
+- [x] `docs/football-data-and-features.md`: Data-source map (nflverse release assets consumed directly as parquet/csv.gz, optionally via `nflreadpy`; do **not** depend on the deprecated `nfl_data_py`), Silver/Gold schemas, exact feature math, per-source availability windows (play-by-play 1999+, injuries ~2009+, snap counts 2012+, Next Gen Stats 2016+), temporal boundary rules, and the pre-game availability tiers defined in Milestone 23. Also update `docs/architecture.md` (§4 abstraction table, directory tree, CLI section) and `README.md` (supported sports, CLI examples) to include NFL.
+- [x] `src/sports_ml/sports/football/__init__.py` & `adapter.py`:
   - `FootballAdapter` implementing `SportAdapter` (`sport_slug = "football"`, `topology = "head_to_head"`), validating a `league` column (`"NFL"`; `"NCAAF"` reserved/unimplemented) and canonical `games.parquet`, `team_game_logs.parquet`, and `player_game_logs.parquet` schemas, enforcing `event_seq == 1`, one game per team per `(season, week)`, and valid `season_type` $\in \{\text{"REG"}, \text{"WC"}, \text{"DIV"}, \text{"CON"}, \text{"SB"}\}$ (and `"PRE"` rejected from model tables).
-- [ ] `src/sports_ml/sports/football/constants.py` (NFL registries and parameters partitioned by `league`):
+- [x] `src/sports_ml/sports/football/constants.py` (NFL registries and parameters partitioned by `league`):
   - **32-Team Registry (`AFC`/`NFC` × `East`/`North`/`South`/`West`)** with canonical nflverse tricodes and historical aliases (`OAK`→`LV`, `SD`→`LAC`, `STL`→`LA`/`LAR`, `WSH`/`WAS`, `JAC`/`JAX`, `ARZ`/`ARI`, `BLT`/`BAL`, `CLV`/`CLE`, `HST`/`HOU`, `SL`/`LA`), with franchise-continuity mapping so relocated clubs keep their rating history.
   - **Stadium Registry**: coordinates, timezone, `roof` $\in \{\text{"dome"}, \text{"closed\_retractable"}, \text{"open\_retractable"}, \text{"outdoors"}\}$, `surface` $\in \{\text{"grass"}, \text{"turf"}\}$, altitude (Denver), plus **neutral-site/international venues** (London, Munich, Frankfurt, Mexico City, São Paulo, Madrid, Super Bowl hosts) with `is_neutral_site` and `is_international` flags.
   - **Elo & Prior Parameters**: initial rating 1500, $K \approx 20$, home-field advantage $\approx 48$ Elo (neutral-site $= 0$), season-to-season regression toward the mean ($\approx 1/3$), playoff $K$ multiplier, and league-average points/EPA priors per season (passing-era drift handled by per-season league means).
-- [ ] `src/sports_ml/core/schedule.py` (additive) & `src/sports_ml/sports/football/features/schedule_hooks.py`:
+- [x] `src/sports_ml/core/schedule.py` (additive) & `src/sports_ml/sports/football/features/schedule_hooks.py`:
   - Weekly-cadence helpers: `days_rest` (exact kickoff-to-kickoff hours), `is_short_week` ($\le 5$ days), `is_post_bye` ($\ge 13$ days), `is_post_mini_bye`, `prior_game_was_overtime`, plus cross-timezone travel/body-clock kickoff (`kickoff_local_hour_vs_body_clock`) and `is_international_travel`. Core stays sport-agnostic; NFL-specific rules (e.g., Thursday Night Football) live in the hook.
-- [ ] `src/sports_ml/sports/football/features/elo_hooks.py`:
+- [x] `src/sports_ml/sports/football/features/elo_hooks.py`:
   - **Margin-of-Victory Elo** (FiveThirtyEight-style multiplier $\ln(|\Delta_{\text{pts}}| + 1) \cdot \frac{2.2}{0.001\,|\Delta_{\text{Elo}}| + 2.2}$ to damp autocorrelation) with ties updating at `0.5`.
   - `StarterModifierHook` implementation for the **starting QB**: $\Delta E_{\text{QB}} = \kappa_{\text{QB}} \cdot (\text{QBValue}_{\text{starter}} - \text{QBValue}_{\text{team baseline}})$ where `QBValue` is a shrunk rolling EPA+CPOE composite supplied by Milestone 24 (hook accepts any callable returning a finite value, so M22 is testable with a stub).
   - `VenueModifierHook`: HFA scaling for neutral/international sites, dome/altitude, and rest differential adjustments.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_constants_and_adapter.py`:
+- [x] `tests/sports/football/test_football_constants_and_adapter.py`:
   - Verify all 32 teams, 8 divisions, historical aliases, and every stadium (incl. international/neutral sites) resolve with valid coordinates, timezones, roof/surface enums, and finite altitude.
   - Verify `FootballAdapter` rejects an unknown `league`, `event_seq != 1`, duplicate `(game_id)`, two games for one team in one `(season, week)`, and `PRE` season rows.
-- [ ] `tests/sports/football/test_football_schedule_and_elo.py`:
+- [x] `tests/sports/football/test_football_schedule_and_elo.py`:
   - Verify short-week / post-bye / mini-bye flags on a fixture schedule (Thursday after Sunday $=$ 4 days; bye $\ge 13$ days).
   - Verify Elo conservation (zero-sum updates), tie $=$ `0.5` update, neutral-site HFA $= 0$, offseason regression toward 1500, and that a QB downgrade (starter → backup) lowers the team's pre-game rating by exactly $\kappa_{\text{QB}} \cdot \Delta\text{QBValue}$.
   - **Anti-Leakage**: mutating the score of any game at index $\ge t$ leaves pre-game ratings for games $< t$ bit-for-bit unchanged.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 
 ## Milestone 23: nflverse Ingestion, Starting-QB / Inactives Resolver & Silver Lakehouse (`sports/football/ingestion/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Build resilient `.gz`-cached ingestion for the nflverse releases and reconcile them into canonical Silver Parquet tables under `data/silver/football/`, with an explicit **as-of timestamp policy** so every pre-game signal is only what was knowable before kickoff.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/ingestion/nflverse_client.py`:
+- [x] `src/sports_ml/sports/football/ingestion/nflverse_client.py`:
   - Cached `httpx` client (`data/raw/football/nflverse/*.parquet|*.csv.gz` via `core/cache.py`) for nflverse release assets: `schedules/games`, `pbp_{YYYY}`, `player_stats_{YYYY}` (weekly), `rosters` & `rosters_weekly`, `injuries_{YYYY}`, `depth_charts_{YYYY}`, `snap_counts_{YYYY}`, `nextgen_stats` (passing/rushing/receiving), `draft_picks`, and `players` (ID crosswalk: `gsis_id` canonical, with `pfr_id`/`espn_id` mappings).
   - Supports `--from-year`, `--current-season`, and date-window sync; handles in-season weekly refreshes (late stat corrections) via idempotent upserts; degrades gracefully when a source lags (`has_snap_counts`, `has_ngs`, `has_injury_report` flags).
-- [ ] `src/sports_ml/sports/football/ingestion/lineups.py`:
+- [x] `src/sports_ml/sports/football/ingestion/lineups.py`:
   - **2-Tier Pre-Game Availability & Starting-QB Resolver**:
     - **Tier 1 (Official, $\approx 90$ min pre-kickoff)**: Official inactives list + confirmed starting QB (first offensive snap QB from play-by-play for historical games; the as-of snapshot in live mode).
     - **Tier 2 (Early-Week Projection)**: Latest depth chart + Wed–Fri practice report designations (`DNP`/`LP`/`FP`) and game status (`Out`/`Doubtful`/`Questionable`) → probabilistic starting-QB and key-player availability (`p_starts`), **never** using post-game inactives for a Tier 2 prediction.
   - Every snapshot row carries `as_of_time_utc`; historical backfill must reconstruct features using only snapshots with `as_of_time_utc < kickoff_utc` (kickoff $-$ 90 min for Tier 1).
-- [ ] `src/sports_ml/sports/football/ingestion/health.py` & `reconciler.py`:
+- [x] `src/sports_ml/sports/football/ingestion/health.py` & `reconciler.py`:
   - `check_football_data_sources(league: Literal["nfl"] = "nfl")` for `sports-ml check-sources --sport football --league nfl` (reachability + schema-contract probes on each release asset).
   - `FootballSilverReconciler`: Normalizes franchise aliases, builds `games.parquet` (one row per game; labels `home_score`, `away_score`, `is_tie`, `overtime`), `team_game_logs.parquet` (aggregated from play-by-play: plays, dropbacks, EPA, success, yards, turnovers, penalties, time of possession, points), `player_game_logs.parquet` (weekly player stats + snap share, targets, carries), `team_week_availability.parquet` (as-of injury/inactive snapshots), and `qb_game_logs.parquet`, all `zstd` Parquet.
   - **Leakage Quarantine**: schedule-embedded `spread_line`, `total_line`, `home_moneyline`, `away_moneyline`, `temp`, `wind`, and `roof` observation columns are split out at reconcile time (odds → `market_*` namespace; observed weather → `obs_weather_*`), so no downstream feature builder can read them by accident.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_ingestion.py` (offline fixtures, trimmed nflverse samples):
+- [x] `tests/sports/football/test_football_ingestion.py` (offline fixtures, trimmed nflverse samples):
   - Test schedule/PBP/player-stat parsing, overtime and tie games (`home_score == away_score`, `is_tie == 1`), neutral-site and international games, playoff round mapping, relocated-franchise alias normalization, and `gsis_id` crosswalk joins.
   - Verify raw caches are written compressed through `core/cache.py`, Silver tables enforce uniqueness on `game_id` / `(game_id, team)` / `(game_id, gsis_id)`, and re-ingesting a corrected week is idempotent.
   - **As-Of Test**: a Tier 2 resolver call at `as_of_time_utc = Friday 17:00` never reads the Sunday inactives list; the Tier 1 resolver never reads data stamped after kickoff $-$ 90 min.
   - **Quarantine Test**: assert Silver `games.parquet` exposes odds only as `market_*` and observed weather only as `obs_weather_*`.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

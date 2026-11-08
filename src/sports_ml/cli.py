@@ -53,6 +53,12 @@ from sports_ml.sports.baseball.models import (
     run_baseball_stage1_walk_forward_backtest,
     score_baseball_prediction_ledger,
 )
+from sports_ml.sports.football.ingestion import (
+    FootballSilverReconciler,
+    NflverseClient,
+    NflverseIngestor,
+    check_football_data_sources,
+)
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
 from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
 from sports_ml.sports.hockey.ingestion.moneypuck import MoneyPuckClient
@@ -126,6 +132,44 @@ def _ensure_supported_sport(sport: str) -> str:
             f"Unsupported sport '{sport}'. Active plugins: 'hockey', 'soccer', 'baseball'."
         )
     return slug
+
+
+def _ensure_football_league(league: str) -> str:
+    lg = league.strip().lower()
+    if lg not in {"nfl", "all"}:
+        raise typer.BadParameter(
+            f"Unsupported football league '{league}'. Only 'nfl' is implemented."
+        )
+    return "nfl"
+
+
+def _parse_iso_date(raw: str | None, option: str) -> date | None:
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{option} must be YYYY-MM-DD, got '{raw}'.") from exc
+
+
+def _run_football_ingestion(
+    settings: Settings,
+    *,
+    from_year: int | None,
+    current_season: bool,
+    start_date: str | None,
+    end_date: str | None,
+) -> Any:
+    settings.paths.ensure_dirs(sport="football")
+    client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse")
+    reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
+    ingestor = NflverseIngestor(client, reconciler)
+    return ingestor.ingest(
+        from_year=from_year,
+        current_season=current_season,
+        start_date=_parse_iso_date(start_date, "--start-date"),
+        end_date=_parse_iso_date(end_date, "--end-date"),
+    )
 
 
 def _ensure_baseball_league(league: str) -> str:
@@ -985,11 +1029,16 @@ def _run_baseball_ingestion(
 @app.command("ingest")
 def ingest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
     seasons: Annotated[
         str | None,
@@ -1027,6 +1076,32 @@ def ingest_command(
     ] = False,
 ) -> None:
     """Download, cache, and reconcile raw sport feeds into Silver Parquet tables."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        if offline or seasons is not None:
+            raise typer.BadParameter(
+                "Football ingestion supports --from-year, --current-season, and "
+                "--start-date/--end-date (not --seasons or --offline)."
+            )
+        try:
+            report = _run_football_ingestion(
+                get_settings(),
+                from_year=from_year,
+                current_season=current_season,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(
+            f"[bold green]Ingestion complete[/bold green] for sport='football' "
+            f"(league='nfl', seasons={','.join(str(s) for s in report.seasons)}, "
+            f"silver_games={report.games_rows}, team_logs={report.team_log_rows}, "
+            f"player_logs={report.player_log_rows}, availability={report.availability_rows}, "
+            f"missing_assets={list(report.missing_assets)})."
+        )
+        return
+
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     try:
@@ -2331,11 +2406,16 @@ def score_predictions_command(
 @app.command("check-sources")
 def check_sources_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
     team: Annotated[
         str,
@@ -2343,7 +2423,17 @@ def check_sources_command(
     ] = "BOS",
 ) -> None:
     """Verify live connectivity and schema contracts across all external data feeds."""
-    slug = _ensure_supported_sport(sport)
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        slug = "football"
+        results = check_football_data_sources(get_settings().paths.raw_dir)
+    else:
+        slug = _ensure_supported_sport(sport)
+        results = _run_non_football_source_checks(slug, league, team)
+    _render_source_health(slug, results)
+
+
+def _run_non_football_source_checks(slug: str, league: str, team: str) -> list[Any]:
     settings = get_settings()
     if slug == "baseball":
         lg_mode = _ensure_baseball_league(league)
@@ -2356,7 +2446,10 @@ def check_sources_command(
             settings.paths.raw_dir,
             team_code=team,
         )
+    return list(results)
 
+
+def _render_source_health(slug: str, results: list[Any]) -> None:
     table = Table(title=f"Upstream Data Source Health ({slug.upper()})")
     table.add_column("Source", style="cyan", no_wrap=True)
     table.add_column("Status", justify="center")

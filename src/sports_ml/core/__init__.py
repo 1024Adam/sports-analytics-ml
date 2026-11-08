@@ -69,6 +69,7 @@ from sports_ml.core.ratings import (
     compute_elo_1x2_probabilities,
     compute_elo_win_probability,
     compute_mov_multiplier,
+    compute_winner_perspective_mov_multiplier,
 )
 from sports_ml.core.registry import (
     LoadedModelBundle,
@@ -80,7 +81,9 @@ from sports_ml.core.registry import (
 )
 from sports_ml.core.schedule import (
     compute_schedule_features,
+    compute_weekly_cadence_features,
     haversine_distance_km,
+    kickoff_local_hour_vs_body_clock,
     timezone_shift_hours,
 )
 from sports_ml.core.shrinkage import (
@@ -143,6 +146,8 @@ __all__ = [
     "compute_regressed_prior",
     "compute_schedule_features",
     "compute_schema_fingerprint",
+    "compute_weekly_cadence_features",
+    "compute_winner_perspective_mov_multiplier",
     "decimal_to_raw_prob",
     "devig_probabilities",
     "evaluate_market_edge",
@@ -152,6 +157,7 @@ __all__ = [
     "extract_schema_signature",
     "haversine_distance_km",
     "is_forbidden_market_column",
+    "kickoff_local_hour_vs_body_clock",
     "list_cached_files",
     "multiclass_brier_score",
     "multiclass_expected_calibration_error",

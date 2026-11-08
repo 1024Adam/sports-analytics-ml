@@ -9,7 +9,9 @@ import pytest
 
 from sports_ml.core.schedule import (
     compute_schedule_features,
+    compute_weekly_cadence_features,
     haversine_distance_km,
+    kickoff_local_hour_vs_body_clock,
     timezone_shift_hours,
 )
 
@@ -93,3 +95,37 @@ def test_b2b_3in4_month_year_boundaries_and_doubleheaders() -> None:
     assert feat["is_same_day_doubleheader"][5] is True
     assert feat["turnaround_hours"][5] == pytest.approx(4.5)
     assert feat["travel_km_prev_game"][5] == pytest.approx(0.0)
+
+
+def test_weekly_cadence_flags_reset_each_season_and_use_prior_overtime() -> None:
+    starts = [
+        datetime(2023, 9, 10, 17, 0, tzinfo=UTC),
+        datetime(2023, 9, 14, 21, 0, tzinfo=UTC),
+        datetime(2023, 9, 24, 17, 0, tzinfo=UTC),
+        datetime(2023, 10, 8, 17, 0, tzinfo=UTC),
+        datetime(2024, 9, 8, 17, 0, tzinfo=UTC),
+    ]
+    df = pl.DataFrame(
+        {
+            "event_id": [1, 2, 3, 4, 5],
+            "season": [2023, 2023, 2023, 2023, 2024],
+            "team": ["A"] * 5,
+            "start_time_utc": starts,
+            "went_to_overtime": [True, False, True, False, False],
+        }
+    )
+    out = compute_weekly_cadence_features(df).sort("event_id")
+
+    assert out["days_rest"].to_list()[0] is None
+    assert out["days_rest"].to_list()[4] is None
+    assert out["rest_hours"][1] == pytest.approx(4 * 24 + 4.0)
+    assert out["is_short_week"].to_list() == [False, True, False, False, False]
+    assert out["is_post_mini_bye"].to_list() == [False, False, True, False, False]
+    assert out["is_post_bye"].to_list() == [False, False, False, True, False]
+    assert out["prior_game_was_overtime"].to_list() == [False, True, False, True, False]
+
+
+def test_kickoff_local_hour_vs_body_clock() -> None:
+    kickoff = datetime(2023, 9, 10, 17, 0, tzinfo=UTC)
+    assert kickoff_local_hour_vs_body_clock(kickoff, "America/New_York") == pytest.approx(13.0)
+    assert kickoff_local_hour_vs_body_clock(kickoff, "America/Los_Angeles") == pytest.approx(10.0)
