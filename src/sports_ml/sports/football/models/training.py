@@ -147,17 +147,18 @@ def evaluate_football_stage2_holdout(
 ) -> dict[str, float]:
     """Fit Stage 1 + Stage 2 on earlier seasons, then score the newest `n_holdout_seasons`.
 
-    Stage 2 trains against in-sample Stage 1 scores but is evaluated against the out-of-sample
-    Stage 1 scores of the held-out seasons (MAE vs. a position-mean baseline).
+    The holdout is the newest `n_holdout_seasons` that have completed player rows. Stage 2 trains
+    against in-sample Stage 1 scores but is evaluated against the out-of-sample Stage 1 scores
+    of the held-out seasons (MAE vs. a position-mean baseline).
     """
     completed = _completed_games(features_df)
-    seasons = sorted(completed["season"].unique().to_list())
+    done = stage2_df.filter(pl.col("actual_targets").is_not_null())
+    seasons = sorted(done["season"].unique().to_list())
     if len(seasons) <= n_holdout_seasons:
-        raise ValueError("Need more completed seasons than held-out seasons for Stage 2 backtest.")
+        raise ValueError("Need more seasons with player rows than held-out seasons for Stage 2.")
     cutoff = seasons[-n_holdout_seasons]
     train_games = completed.filter(pl.col("season") < cutoff)
     stage1 = Stage1FootballGameModel(random_seed=random_seed).fit(train_games)
-    done = stage2_df.filter(pl.col("actual_targets").is_not_null())
     train_rows = done.filter(pl.col("season") < cutoff)
     test_rows = done.filter(pl.col("season") >= cutoff)
     if train_rows.is_empty() or test_rows.is_empty():

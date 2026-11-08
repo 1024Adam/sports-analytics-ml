@@ -43,6 +43,8 @@ DEFENSE_SENSITIVITY: Final[float] = 0.5
 GAMMA_RECONCILE: Final[float] = 0.50
 SCRIPT_FLOOR_PASS: Final[float] = 0.10
 SCRIPT_FLOOR_RUSH: Final[float] = 0.08
+ENV_PASSING_YARDS_SENSITIVITY: Final[float] = 0.05
+ENV_PASSING_YARDS_FLOOR: Final[float] = 0.75
 MAX_REDISTRIBUTION: Final[float] = 1.6
 SCALE_BOUNDS: Final[tuple[float, float]] = (0.6, 1.6)
 TD_EXPOSURE_POWER: Final[float] = 1.0
@@ -494,6 +496,12 @@ class Stage2FootballPlayerModel:
         gl_mult = np.clip(
             np.sqrt(np.maximum(_f64(df, "gl_carry_share", 0.0), 1e-3) / gl_prior), 0.6, 1.8
         )
+        # Wind/cold/rain lower yards per attempt and per target (never raise them)
+        env_mult = np.clip(
+            1.0 - ENV_PASSING_YARDS_SENSITIVITY * _f64(df, "env_passing_penalty"),
+            ENV_PASSING_YARDS_FLOOR,
+            1.0,
+        )
         p_act = np.clip(_f64(df, "p_active", 1.0), 0.0, 1.0)
         pass_share = _f64(df, "pass_att_share", 0.0)
         qb_w = np.where(is_qb, pass_share * p_act, 0.0)
@@ -515,13 +523,15 @@ class Stage2FootballPlayerModel:
                 np.where(is_qb, 0.0, team_pass * _f64(df, "target_share") * p_act),
             ),
             pl.Series("r_comp", np.where(is_qb, _f64(df, "qb_comp_rate"), 0.0)),
-            pl.Series("r_ypa", np.where(is_qb, _f64(df, "qb_yds_per_att") * pass_idx, 0.0)),
+            pl.Series(
+                "r_ypa", np.where(is_qb, _f64(df, "qb_yds_per_att") * pass_idx * env_mult, 0.0)
+            ),
             pl.Series("r_td_att", np.where(is_qb, _f64(df, "qb_td_per_att") * mu_scale, 0.0)),
             pl.Series("r_int_att", np.where(is_qb, _f64(df, "qb_int_per_att"), 0.0)),
             pl.Series("r_ypc", carry_rate * rush_idx),
             pl.Series("r_td_carry", carry_td * mu_scale * np.where(is_qb, 1.0, gl_mult)),
             pl.Series("r_catch", _f64(df, "catch_rate")),
-            pl.Series("r_ypt", _f64(df, "rec_yds_per_target") * rec_idx),
+            pl.Series("r_ypt", _f64(df, "rec_yds_per_target") * rec_idx * env_mult),
             pl.Series(
                 "r_td_tgt", _f64(df, "rec_td_per_target") * mu_scale * np.where(is_qb, 0.0, rz_mult)
             ),

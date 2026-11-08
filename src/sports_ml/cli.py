@@ -169,12 +169,32 @@ def _run_football_ingestion(
     client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse", offline=offline)
     reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
     ingestor = NflverseIngestor(client, reconciler)
-    return ingestor.ingest(
+    report = ingestor.ingest(
         from_year=from_year,
         current_season=current_season,
         start_date=_parse_iso_date(start_date, "--start-date"),
         end_date=_parse_iso_date(end_date, "--end-date"),
     )
+    if not offline:
+        _sync_football_forecasts(settings, reconciler.read_games())
+    return report
+
+
+def _sync_football_forecasts(settings: Settings, games: pl.DataFrame) -> None:
+    """Cache Open-Meteo forecasts for outdoor venues; weather is optional, so failures only warn."""
+    from sports_ml.sports.football.ingestion.weather import (
+        OpenMeteoForecastClient,
+        sync_football_forecasts,
+    )
+
+    client = OpenMeteoForecastClient(settings.paths.raw_dir / "football" / "weather")
+    sync = sync_football_forecasts(games, client)
+    console.print(
+        f"Forecast weather: {sync.windows_requested} venue windows "
+        f"({sync.windows_from_cache} cached, {sync.windows_failed} failed)."
+    )
+    for failure in sync.failures[:3]:
+        console.print(f"[yellow]Forecast sync warning: {failure}[/yellow]")
 
 
 def _run_football_train(settings: Settings, *, version: str, include_stage2: bool) -> None:

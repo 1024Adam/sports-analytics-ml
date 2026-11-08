@@ -31,7 +31,12 @@ from sports_ml.config import Settings, get_settings
 from sports_ml.core.evaluation import BenchmarkComparisonReport, compare_against_baselines
 from sports_ml.core.registry import ModelMetadata, ModelRegistry
 from sports_ml.sports.football.constants import normalize_football_team
-from sports_ml.sports.football.features.pipeline import build_football_stage1_features
+from sports_ml.sports.football.features.environment import build_environment_features
+from sports_ml.sports.football.features.pipeline import (
+    build_football_stage1_features,
+    load_football_game_weather,
+    strip_forbidden_columns,
+)
 from sports_ml.sports.football.features.player import build_football_stage2_features
 from sports_ml.sports.football.ingestion.lineups import (
     FootballStartingQBResolver,
@@ -126,6 +131,8 @@ class _SilverBundle:
     draft_picks: pl.DataFrame | None
     names: dict[int, str]
     incumbents: dict[str, int]
+    snap_logs: pl.DataFrame | None
+    weather: pl.DataFrame
 
 
 def _read_optional(path: Path) -> pl.DataFrame | None:
@@ -223,6 +230,8 @@ class FootballMatchupPredictor:
             draft_picks=_read_optional(draft_path),
             names=names,
             incumbents=incumbents,
+            snap_logs=_read_optional(silver / "snap_game_logs.parquet"),
+            weather=load_football_game_weather(self.settings, games),
         )
         return self._silver
 
@@ -258,6 +267,9 @@ class FootballMatchupPredictor:
             availability=silver.availability,
             draft_picks=silver.draft_picks,
             starting_qbs=self._resolve_starters(silver),
+            snap_logs=silver.snap_logs,
+            weather=silver.weather,
+            as_of_time_utc=self.as_of_time_utc,
         )
         ModelRegistry.validate_features(self._gold, self.metadata, stage=1)
         return self._gold
@@ -363,6 +375,9 @@ class FootballMatchupPredictor:
             stage1_df=gold,
             as_of_time_utc=self.as_of_time_utc,
             starting_qbs=self._starting_qb_frame(game_ids),
+            environment=build_environment_features(
+                strip_forbidden_columns(silver.games), silver.weather
+            ),
         ).filter(pl.col("game_id").is_in(game_ids))
         if rows.is_empty():
             return None, set()

@@ -92,12 +92,14 @@ See `SILVER_FOOTBALL_TEAM_LOGS_SCHEMA`, `SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA`, `S
 * **Player logs** (weekly player stats + snap share): the nflverse `gsis_id` is the canonical key (`player_id` = digits of the id); `snaps`/`snap_share` come from `snap_counts` via the `players` `pfr_id -> gsis_id` crosswalk and degrade to null when unavailable. Milestone 26 adds `completions`, `pass_air_yards`, `rec_air_yards` (weekly stats) and play-level usage `rz_targets`, `rz_carries`, `gl_carries` (inside the 20 / inside the 5, from pbp `yardline_100`).
 * **QB logs** (dropback level, `id` column): `dropbacks`, `pass_attempts`, `qb_epa_total`, `cpoe_total`/`cpoe_plays`, `sacks`, `air_yards_total`, `scrambles`, and `is_starter` (first dropback QB).
 
-Uniqueness: `(game_id, team)`, `(game_id, player_id)`, `(game_id, team, qb_id)` (`FootballAdapter.validate_team_game_logs` / `validate_participant_schema`).
+* **Snap logs** (`snap_game_logs.parquet`, Milestone 27, from `snap_counts` + the `pfr_id -> gsis_id` crosswalk): one row per `(game_id, team, player_id)` for **every** position (linemen, linebackers, defensive backs included) with `position`, `offense_snaps/offense_pct`, `defense_snaps/defense_pct`. `player_game_logs` only covers stat-sheet players, so position-group availability weights come from here.
+
+Uniqueness: `(game_id, team)`, `(game_id, player_id)`, `(game_id, team, player_id)` for snap logs, `(game_id, team, qb_id)` (`FootballAdapter.validate_team_game_logs` / `validate_participant_schema`).
 
 ### 3.3 `team_week_availability.parquet` (as-of snapshots)
 One row per `(game_id, team, player_id, source, as_of_time_utc)` with `source` $\in \{\text{injury\_report}, \text{depth\_chart}, \text{inactives}\}`, `report_status`, `practice_status`, `depth_rank`, and `is_inactive`. Stamps are conservative (a later stamp can only hide information):
 * Injury reports use `date_modified`, else `kickoff - 24 h`.
-* Depth charts use `dt` when present, else `kickoff - 2 days`.
+* Depth charts use `dt` when present, else `kickoff - 2 days`. All formations are kept (offense, defense, special teams). The 2025+ nflverse layout (`dt`, `team`, `pos_abb`, `pos_rank`, no `season`/`week`) is normalized by assigning each timestamped snapshot to the team's next scheduled game at or after `dt`.
 * Official inactives are reconstructed from weekly rosters (`status == "INA"`) at `kickoff - 90 min`.
 
 ---
@@ -218,3 +220,35 @@ Reference result on real nflverse data (2012-2024 Silver, 8 test seasons 2017-20
 Ledgers: `data/predictions/football_predictions.parquet` (one row per prediction, deduplicated by `game_id`, latest wins, when scored) and `football_player_predictions.parquet`. `score_football_prediction_ledger` reports log loss/Brier/accuracy against home-rate and coin-flip baselines (plus the market-edge report when closing odds exist) and player projection MAE. Predictions made for already-final games are retrospective and are scored the same way, so use them for smoke tests rather than live evaluation.
 
 CLI: `features build`, `train [--include-stage2]`, `backtest [--stage 1|2|all] [--splits N]`, `predict [--season --week | --date | --team --games] [--matchup AWAY@HOME] [--include-players] [--offline]`, and `score-predictions` all accept `--sport football` (`--league nfl`). Output shows `P(Away)`/`P(Home)`, projected score, a QB matchup card, and position-grouped projection tables with `P(Anytime TD)`.
+
+## 11. Weather, Roof/Surface & Availability Features (Milestone 27)
+
+**Forecast weather** (`ingestion/weather.py`, cached under `data/raw/football/weather/`). Historical games use the Open-Meteo *previous runs* archive (`temperature_2m`, `wind_speed_10m`, `precipitation_probability` with the `_previous_day1` suffix, i.e. the forecast issued about 24 h before the valid time, `forecast_lead_hours = 24`); upcoming games (within 14 days) use the live forecast with `forecast_lead_hours = hours until the valid time`. `ingest --sport football` syncs the outdoor/open-roof venue windows (failures only warn; `--offline` skips the sync and Gold builds read the cache only). Hourly rows are averaged over the four hours starting at the kickoff hour (precipitation: maximum).
+
+Archive coverage is the binding constraint: temperature exists from 2021, but wind and precipitation probability only from 2024, so most historical seasons use the observed proxy below. `build_game_weather` returns one row per game:
+
+| Case | `weather_temp_f / wind_mph / precip_prob` | Flags |
+| --- | --- | --- |
+| Dome / closed roof (stadium registry default roof, never the observed game-day roof) | 70 F / 0 mph / 0 | `weather_is_indoor = 1` |
+| Season where >= 90% of outdoor games (up to the 14-day forecast horizon) have a complete forecast | forecast; neutral 55 F / 7 mph / 0.15 if a game is missing | `weather_is_imputed = 1` for the missing game |
+| Any other season | **observed** nflverse `temp`/`wind` for *every* outdoor game of that season; precipitation neutral | `weather_is_observed_proxy = 1`, `weather_precip_is_imputed = 1` |
+
+Forecasts and observations are therefore never mixed inside a season, raw `forecast_*` columns stay null where no forecast exists, and `obs_weather_*` remain quarantined (Gold builders still strip them; only `build_game_weather` reads them, for the flagged proxy).
+
+**Environment features** (`features/environment.py`; `ENVIRONMENT_FEATURE_COLUMNS`): `wind_penalty = ((wind - 15) / 10)^1.5` above 15 mph, `cold_penalty = (40 - temp) / 10` below 40 F, `is_precipitation_risk` (prob >= 0.5), all scaled by `roof_exposure` (1.0 outdoors, 0.5 open-retractable, 0 covered); `home_/away_warm_team_in_cold` (+ `diff_`) for dome or warm-climate (latitude <= 35.3) teams playing outdoors in the cold away from their own venue; `env_passing_penalty`, `env_kicking_penalty`, and `env_total_shift` (expected-points prior: `-(1.2 wind + 0.3 cold + 0.8 precip)`); surface/altitude interactions `cold_penalty_x_turf`, `precip_risk_x_grass`, `altitude_kicking_boost`. Stage 1 applies same-sign monotone constraints (`LEVEL_MONOTONE_CONSTRAINTS`: worse weather never raises either team's expected score) and Stage 2 multiplies yards per attempt/target by `1 - 0.05 * env_passing_penalty` (floor 0.75) through the `env_passing_penalty` feature. Without a weather frame, outdoor games are neutral and flagged `weather_is_imputed = 1`.
+
+**Availability features** (`features/availability.py`; `AVAILABILITY_FEATURE_COLUMNS`, `home_*`/`away_*`/`diff_*`): for each team-game the weight of every player is his mean snap share over the team's last 6 released games; `ol_`, `pass_rush_`, `secondary_`, `skill_availability_index = sum(w * p_play) / sum(w)` per position group (OL: T/G/C; pass rush: DE/DT/DL/NT/EDGE/OLB; secondary: CB/S/SS/FS/DB; skill: RB/FB/WR/TE), `starter_snap_share_missing` (weight-averaged `1 - p_play` over players with weight >= 0.5), and `qb_p_starts` (probability the depth-chart QB starts, resolver-style). `availability_is_imputed` marks team-games without snapshots or snap history.
+
+* `p_play = 0` for official inactives stamped by the cutoff, otherwise a **historical start probability** for the latest injury designation: `(played + 10 * prior) / (total + 10)` with `prior = status_play_probability(...)` (Out 0, Doubtful 0.05, Questionable 0.60, practice levels 0.85-1.0). `played` is "has snaps in the snap log"; the counts include only games released before the prediction time. No designation means the player is assumed to play.
+* **As-of rules**: snapshots stamped after `min(kickoff - 90 min, as_of_time_utc)` are ignored; a game's outcomes (snap logs, start-probability counts) are released 4 h after its kickoff and never after `min(kickoff, as_of_time_utc)`.
+
+**Backtest impact (real nflverse data, 2012-2026 Silver, 10 test seasons 2017-2026, `min_train_seasons = 5`)**:
+
+| Stage 1 feature set | Log loss | Brier | ECE | Margin MAE | Total MAE |
+| --- | --- | --- | --- | --- | --- |
+| Before (no Milestone 27 columns) | 0.6240 | 0.2171 | 0.0233 | 10.144 | 11.150 |
+| + environment only | 0.6243 | 0.2174 | 0.0243 | 10.161 | 11.126 |
+| + availability only | 0.6235 | 0.2169 | 0.0267 | 10.147 | 11.166 |
+| After (both) | 0.6241 | 0.2173 | 0.0207 | 10.179 | 11.135 |
+
+Season-bootstrap 95% intervals of the after-minus-before differences all include zero: log loss `+0.0000 [-0.0017, +0.0019]`, margin MAE `+0.032 [-0.006, +0.082]`, total MAE `-0.018 [-0.064, +0.034]`. Stage 1 therefore does not regress; the features mainly matter for Stage 2 passing environments and as inputs for the in-season signals (forecasts and live availability) that the historical proxy cannot show.

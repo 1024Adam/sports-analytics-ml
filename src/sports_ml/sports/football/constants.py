@@ -1082,6 +1082,21 @@ SILVER_FOOTBALL_AVAILABILITY_SCHEMA: Final[dict[str, pl.DataType]] = {
     "is_inactive": pl.Boolean(),
 }
 
+SILVER_FOOTBALL_SNAP_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "game_id": pl.Int64(),
+    "event_seq": pl.Int32(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "week": pl.Int16(),
+    "team": pl.Utf8(),
+    "player_id": pl.Int64(),
+    "position": pl.Utf8(),
+    "offense_snaps": pl.Int16(),
+    "offense_pct": pl.Float64(),
+    "defense_snaps": pl.Int16(),
+    "defense_pct": pl.Float64(),
+}
+
 GAMES_REQUIRED_COLUMNS: Final[tuple[str, ...]] = (
     "season",
     "season_type",

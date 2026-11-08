@@ -249,10 +249,17 @@ def build_football_stage2_features(
     stage1_df: pl.DataFrame | None = None,
     as_of_time_utc: datetime | None = None,
     starting_qbs: pl.DataFrame | None = None,
+    environment: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build the Stage 2 Gold matrix (`identifiers + STAGE2_PLAYER_FEATURE_COLUMNS + targets`)."""
     avail = _availability_index(availability)
     draft = _draft_lookup(draft_picks)
+    env_penalty: dict[int, float] = {}
+    if environment is not None and not environment.is_empty():
+        env_penalty = {
+            int(r["game_id"]): float(r["env_passing_penalty"])
+            for r in environment.select("game_id", "env_passing_penalty").iter_rows(named=True)
+        }
     # Resolver-named QBs are always rows for upcoming games (prior-based if they have no history)
     forced_qbs: dict[tuple[int, str], list[int]] = defaultdict(list)
     if starting_qbs is not None:
@@ -465,6 +472,7 @@ def build_football_stage2_features(
             "team_elo_win_prob": elo,
             "team_pace_plays_pg": plays_pg,
             "team_pass_rate": pass_rate,
+            "env_passing_penalty": env_penalty.get(int(g["game_id"]), 0.0),  # type: ignore[call-overload]
         }
         completed = g.get("_logs")
         for col in STAGE2_TARGET_COLUMNS:

@@ -780,27 +780,27 @@ Implement optional Stage 2 player projections conditioned on Stage 1 (QB, RB, WR
 ---
 
 ## Milestone 27: Weather, Roof/Surface & Injury / Depth-Chart Availability Features (`sports/football/ingestion/` & `features/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Add environment and roster-availability signals that matter in the NFL (wind/precipitation/cold for passing and kicking; missing OL, pass rush, secondary, and skill players) while preventing **observed-weather** and **post-game inactive** leakage.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/ingestion/weather.py`:
+- [x] `src/sports_ml/sports/football/ingestion/weather.py`:
   - Pre-game **forecast** weather per outdoor/open-roof venue (`forecast_temp_f`, `forecast_wind_mph`, `forecast_precip_prob`, `forecast_lead_hours`) from a cached historical-forecast source (e.g., Open-Meteo historical forecast archive) snapshotted at a fixed lead time before kickoff; domes and closed-roof games get neutral indoor values. Observed nflverse `temp`/`wind` are permitted only as a flagged fallback (`weather_is_observed_proxy = 1`) for seasons without forecast coverage and are never silently mixed with forecasts.
-- [ ] `src/sports_ml/sports/football/features/environment.py`:
+- [x] `src/sports_ml/sports/football/features/environment.py`:
   - `wind_penalty` (nonlinear above ~15 mph), `cold_penalty`, `is_precipitation_risk`, roof/surface/altitude interactions, team-specific dome/warm-weather-team-in-cold flags, and expected-points environment shifts (feeding Stage 1 totals and Stage 2 passing/kicking projections).
-- [ ] `src/sports_ml/sports/football/features/availability.py`:
+- [x] `src/sports_ml/sports/football/features/availability.py`:
   - Position-group availability from Tier 1/Tier 2 snapshots weighted by prior snap share / player value: `ol_availability_index`, `pass_rush_availability_index`, `secondary_availability_index`, `skill_availability_index`, `starter_snap_share_missing`, `qb_p_starts`, with `diff_*` features and as-of-time stamps.
   - Injury-report designations are converted to **historical start probabilities** (e.g., empirical $P(\text{plays} \mid \text{Questionable})$ estimated only from games $<$ the prediction date) rather than hard 0/1 assumptions.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_weather_availability.py`:
+- [x] `tests/sports/football/test_football_weather_availability.py`:
   - Verify a high-wind forecast lowers expected passing environment monotonically and has no effect in domes/closed-roof games; verify forecast-vs-observed columns are never mixed and the observed-proxy flag is set when used.
   - **Strict As-Of Test**: mutating inactives/injury designations stamped after the as-of time leaves features bit-for-bit unchanged; mutating post-kickoff weather leaves forecast features unchanged.
   - Verify losing a starting LT / top pass rusher decreases the corresponding availability index proportionally to prior snap share, and that empirical `Questionable` start probabilities are estimated without future games.
-- [ ] Run `sports-ml backtest --sport football --league nfl` before/after to confirm Stage 1 Log Loss / score MAE do not regress, reporting the delta with season-bootstrap confidence intervals.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] Run `sports-ml backtest --sport football --league nfl` before/after to confirm Stage 1 Log Loss / score MAE do not regress, reporting the delta with season-bootstrap confidence intervals.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

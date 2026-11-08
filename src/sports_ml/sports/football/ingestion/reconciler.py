@@ -31,6 +31,7 @@ from sports_ml.sports.football.constants import (
     SILVER_FOOTBALL_GAMES_SCHEMA,
     SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA,
     SILVER_FOOTBALL_QB_LOGS_SCHEMA,
+    SILVER_FOOTBALL_SNAP_LOGS_SCHEMA,
     SILVER_FOOTBALL_TEAM_LOGS_SCHEMA,
     canonical_game_id_from_nflverse,
     is_neutral_game,
@@ -561,6 +562,49 @@ def _snap_share_frame(
     )
 
 
+def build_snap_game_logs(
+    snap_counts_df: pl.DataFrame | None,
+    players_df: pl.DataFrame | None,
+    games_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """Build all-position offensive/defensive snap shares per `(game_id, player_id)`.
+
+    Unlike `player_game_logs` (stat-sheet players only), this keeps linemen, linebackers and
+    defensive backs so position-group availability can be weighted by prior snap share.
+    """
+    empty = pl.DataFrame(schema=SILVER_FOOTBALL_SNAP_LOGS_SCHEMA)
+    if snap_counts_df is None or snap_counts_df.is_empty() or games_df.is_empty():
+        return empty
+    if players_df is None or "pfr_id" not in players_df.columns:
+        return empty
+    crosswalk = (
+        players_df.select(pl.col("pfr_id"), pl.col("gsis_id"))
+        .drop_nulls()
+        .unique(subset=["pfr_id"], keep="first")
+    )
+    games = games_df.select("game_id", "event_seq", "start_time_utc", "season", "week")
+    snaps = (
+        _with_canonical_game_id(snap_counts_df)
+        .join(crosswalk, left_on="pfr_player_id", right_on="pfr_id", how="inner")
+        .select(
+            pl.col("_gid").alias("game_id"),
+            pl.col("team")
+            .map_elements(normalize_football_team, return_dtype=pl.Utf8)
+            .alias("team"),
+            pl.col("gsis_id").map_elements(_gsis_or_none, return_dtype=pl.Int64).alias("player_id"),
+            pl.col("position").cast(pl.Utf8).str.to_uppercase().alias("position"),
+            pl.col("offense_snaps").cast(pl.Int16, strict=False).alias("offense_snaps"),
+            pl.col("offense_pct").cast(pl.Float64, strict=False).alias("offense_pct"),
+            pl.col("defense_snaps").cast(pl.Int16, strict=False).alias("defense_snaps"),
+            pl.col("defense_pct").cast(pl.Float64, strict=False).alias("defense_pct"),
+        )
+        .filter(pl.col("player_id").is_not_null())
+        .join(games, on="game_id", how="inner")
+        .unique(subset=["game_id", "team", "player_id"], keep="last")
+    )
+    return snaps
+
+
 def _availability_rows(
     source: str,
     frame: pl.DataFrame,
@@ -592,6 +636,53 @@ def _availability_rows(
     ).filter(pl.col("player_id").is_not_null())
     return base.join(games, on=["season", "week", "team"], how="inner").with_columns(
         pl.lit(source).alias("source")
+    )
+
+
+def _normalize_depth_chart(depth_df: pl.DataFrame, lookup: pl.DataFrame) -> pl.DataFrame:
+    """Map the 2025+ nflverse depth-chart layout onto the legacy `(season, week, club_code, ...)`.
+
+    The newer feed has timestamped snapshots (`dt`, `team`, `pos_abb`, `pos_rank`) but no
+    `season`/`week`; each snapshot is assigned to the team's next scheduled game at or after `dt`.
+    """
+    if "season" in depth_df.columns or not {"dt", "team", "pos_abb"} <= set(depth_df.columns):
+        return depth_df
+    snaps = (
+        depth_df.with_columns(
+            pl.col("dt")
+            .cast(pl.Utf8)
+            .str.to_datetime(time_zone="UTC", time_unit="us", strict=False)
+            .alias("_dt"),
+            pl.col("team")
+            .map_elements(normalize_football_team, return_dtype=pl.Utf8)
+            .alias("_team"),
+        )
+        .filter(pl.col("_dt").is_not_null() & pl.col("gsis_id").is_not_null())
+        .sort("_dt")
+    )
+    games = lookup.select(
+        pl.col("team").alias("_team"),
+        pl.col("season"),
+        pl.col("week"),
+        pl.col("start_time_utc").alias("_next_kickoff"),
+    ).sort("_next_kickoff")
+    joined = snaps.join_asof(
+        games,
+        left_on="_dt",
+        right_on="_next_kickoff",
+        by="_team",
+        strategy="forward",
+        check_sortedness=False,
+    ).filter(pl.col("season").is_not_null())
+    return joined.select(
+        pl.col("season"),
+        pl.col("week"),
+        pl.col("_team").alias("club_code"),
+        pl.col("gsis_id"),
+        pl.col("pos_abb").alias("position"),
+        pl.col("pos_abb").alias("depth_position"),
+        pl.col("pos_rank").cast(pl.Utf8).alias("depth_team"),
+        pl.col("_dt").alias("dt"),
     )
 
 
@@ -631,9 +722,9 @@ def build_availability_snapshots(
         )
 
     if depth_charts_df is not None and not depth_charts_df.is_empty():
-        depth = depth_charts_df
-        if "formation" in depth.columns:
-            depth = depth.filter(pl.col("formation") == "Offense")
+        # Offense, defense and special teams are all kept: Milestone 27 weights position-group
+        # availability (OL, pass rush, secondary) from the full depth chart.
+        depth = _normalize_depth_chart(depth_charts_df, lookup)
         dc = _availability_rows(SOURCE_DEPTH_CHART, depth, lookup, team_col="club_code")
         as_of = pl.col("start_time_utc") - UNTIMED_DEPTH_CHART_LEAD
         if "dt" in dc.columns:
@@ -694,6 +785,10 @@ class FootballSilverReconciler:
     @property
     def qb_logs_path(self) -> Path:
         return self.silver_dir / "qb_game_logs.parquet"
+
+    @property
+    def snap_logs_path(self) -> Path:
+        return self.silver_dir / "snap_game_logs.parquet"
 
     @property
     def availability_path(self) -> Path:
@@ -795,6 +890,24 @@ class FootballSilverReconciler:
             schema=SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA,
             unique_keys=["game_id", "player_id"],
             sort_keys=["start_time_utc", "event_seq", "game_id", "team", "player_id"],
+            persist=persist,
+        )
+
+    def reconcile_snap_game_logs(
+        self,
+        snap_counts_df: pl.DataFrame | None,
+        *,
+        players_df: pl.DataFrame | None = None,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Build `snap_game_logs.parquet` (all-position snap shares) from nflverse snap counts."""
+        incoming = build_snap_game_logs(snap_counts_df, players_df, self.read_games())
+        return self._upsert(
+            self.snap_logs_path,
+            incoming,
+            schema=SILVER_FOOTBALL_SNAP_LOGS_SCHEMA,
+            unique_keys=["game_id", "team", "player_id"],
+            sort_keys=["start_time_utc", "game_id", "team", "player_id"],
             persist=persist,
         )
 

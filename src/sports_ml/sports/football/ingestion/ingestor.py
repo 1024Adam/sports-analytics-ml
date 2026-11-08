@@ -34,6 +34,7 @@ class FootballIngestionReport(BaseModel):
     team_log_rows: int = 0
     qb_log_rows: int = 0
     player_log_rows: int = 0
+    snap_log_rows: int = 0
     availability_rows: int = 0
     has_snap_counts: dict[int, bool] = Field(default_factory=dict)
     has_ngs: dict[int, bool] = Field(default_factory=dict)
@@ -119,7 +120,7 @@ class NflverseIngestor:
 
         players = self.client.try_fetch_asset("players")
         missing: set[str] = set() if players is not None else {"players"}
-        counts = {"games": 0, "team": 0, "qb": 0, "player": 0, "avail": 0}
+        counts = {"games": 0, "team": 0, "qb": 0, "player": 0, "snap": 0, "avail": 0}
         has_snaps: dict[int, bool] = {}
         has_ngs: dict[int, bool] = {}
         has_inj: dict[int, bool] = {}
@@ -161,6 +162,10 @@ class NflverseIngestor:
                 ).height
             else:
                 missing.add("player_stats")
+            if _present(snaps):
+                counts["snap"] = self.reconciler.reconcile_snap_game_logs(
+                    snaps, players_df=players
+                ).height
             counts["avail"] = self.reconciler.reconcile_availability(
                 injuries_df=injuries, depth_charts_df=depth, weekly_rosters_df=weekly
             ).height
@@ -171,6 +176,7 @@ class NflverseIngestor:
             team_log_rows=counts["team"],
             qb_log_rows=counts["qb"],
             player_log_rows=counts["player"],
+            snap_log_rows=counts["snap"],
             availability_rows=counts["avail"],
             has_snap_counts=has_snaps,
             has_ngs=has_ngs,

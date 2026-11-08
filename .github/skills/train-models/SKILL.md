@@ -52,4 +52,5 @@ uv run sports-ml features build --sport football --league nfl      # Stage 1 + S
 uv run sports-ml train --sport football --include-stage2 --version v1
 ```
 - `features build` writes `data/gold/football/stage1_features.parquet` and `stage2_features.parquet` (player rows: actual participants for completed games, recent contributors for upcoming games).
+- Stage 1 Gold also carries Milestone 27 environment columns (forecast or flagged observed-proxy weather, wind/cold/precipitation penalties) and position-group availability indices (OL, pass rush, secondary, skill, `qb_p_starts`); rebuild features after re-ingesting to pick them up.
 - `train` fits `Stage1FootballGameModel` on all completed games and, with `--include-stage2`, `Stage2FootballPlayerModel` (conditioned on in-sample Stage 1 scores) and saves a fingerprinted bundle to `artifacts/football/<version>/` and `latest/` (Stage 2 gets its own `stage2_schema_sha256`). Without `--include-stage2` the bundle is Stage 1 only.

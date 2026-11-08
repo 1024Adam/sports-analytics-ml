@@ -90,7 +90,7 @@ def derive_starting_qbs_from_pbp(pbp_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _status_multiplier(report_status: str | None, practice_status: str | None) -> float:
+def status_play_probability(report_status: str | None, practice_status: str | None) -> float:
     game = (report_status or "").strip().lower()
     if game in GAME_STATUS_MULTIPLIER:
         return GAME_STATUS_MULTIPLIER[game]
@@ -174,7 +174,7 @@ class FootballStartingQBResolver:
             .last()
         )
         status = {
-            int(r["player_id"]): _status_multiplier(r["report_status"], r["practice_status"])
+            int(r["player_id"]): status_play_probability(r["report_status"], r["practice_status"])
             for r in injuries.iter_rows(named=True)
             if r["player_id"] is not None
         }

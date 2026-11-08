@@ -12,6 +12,7 @@ Missingness is explicit (`*_is_imputed` flags); feature columns contain zero `Na
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -19,7 +20,16 @@ import polars as pl
 
 from sports_ml.config import Settings
 from sports_ml.sports.football.adapter import FootballAdapter
+from sports_ml.sports.football.features.availability import (
+    AVAILABILITY_FEATURE_COLUMNS,
+    attach_availability_features,
+    build_availability_features,
+)
 from sports_ml.sports.football.features.elo_hooks import FootballQBEloHook
+from sports_ml.sports.football.features.environment import (
+    ENVIRONMENT_FEATURE_COLUMNS,
+    build_environment_features,
+)
 from sports_ml.sports.football.features.player import build_football_stage2_features
 from sports_ml.sports.football.features.player_columns import STAGE2_PLAYER_FEATURE_COLUMNS
 from sports_ml.sports.football.features.qb import (
@@ -40,6 +50,7 @@ from sports_ml.sports.football.features.team import (
     metric_sides,
     team_feature_column_names,
 )
+from sports_ml.sports.football.ingestion.weather import build_game_weather, load_cached_forecasts
 
 FORBIDDEN_FEATURE_PREFIXES: Final[tuple[str, ...]] = ("market_", "obs_weather_")
 FORBIDDEN_FEATURE_TOKENS: Final[tuple[str, ...]] = ("odds", "spread", "closing")
@@ -168,6 +179,8 @@ def _stage1_candidate_columns() -> tuple[str, ...]:
     cols.append("diff_travel_km")
     cols.extend(_SCHEDULE_GAME_COLUMNS)
     cols.extend(ELO_COLUMNS)
+    cols.extend(ENVIRONMENT_FEATURE_COLUMNS)
+    cols.extend(AVAILABILITY_FEATURE_COLUMNS)
     seen: dict[str, None] = {}
     for c in cols:
         seen.setdefault(c, None)
@@ -203,8 +216,16 @@ def build_football_stage1_features(
     starting_qbs: pl.DataFrame | None = None,
     head_coach_changed: pl.DataFrame | None = None,
     config: TeamFeatureConfig | None = None,
+    snap_logs: pl.DataFrame | None = None,
+    weather: pl.DataFrame | None = None,
+    as_of_time_utc: datetime | None = None,
 ) -> pl.DataFrame:
-    """Build the Stage 1 Gold matrix (identifiers, labels, `STAGE1_FEATURE_COLUMNS`)."""
+    """Build the Stage 1 Gold matrix (identifiers, labels, `STAGE1_FEATURE_COLUMNS`).
+
+    `weather` is the per-game frame from `build_game_weather` (forecast or flagged observed
+    proxy); without it outdoor weather is neutral and flagged `weather_is_imputed`. `snap_logs`
+    and `availability` feed the position-group availability indices as of `as_of_time_utc`.
+    """
     games = FootballAdapter().validate_event_schema(strip_forbidden_columns(games_df))
     games = games.drop("event_id", "sport", strict=False)
     games = games.with_columns(pl.col("game_id").cast(pl.Int64))
@@ -245,11 +266,17 @@ def build_football_stage1_features(
     base_joined = attach(base_joined, team, team_cols, "away_team", "away")
     base_joined = attach(base_joined, qb, qb_cols, "home_team", "home")
     base_joined = attach(base_joined, qb, qb_cols, "away_team", "away")
+    environment = build_environment_features(games, weather)
+    availability_frame = build_availability_features(
+        games, snap_logs, availability, as_of_time_utc=as_of_time_utc
+    )
     out = (
         base_joined.join(schedule, on="game_id", how="left")
         .join(elo, on="game_id", how="left")
+        .join(environment, on="game_id", how="left")
         .sort("start_time_utc", "event_seq", "game_id")
     )
+    out = attach_availability_features(out, availability_frame)
 
     diff_exprs: list[pl.Expr] = []
     for m in TEAM_METRICS:
@@ -284,6 +311,12 @@ def assert_feature_matrix_clean(df: pl.DataFrame) -> None:
             raise ValueError(f"Feature column '{c}' has {nulls} nulls and {nans} NaNs.")
 
 
+def load_football_game_weather(settings: Settings, games_df: pl.DataFrame) -> pl.DataFrame:
+    """Per-game weather from the cached forecasts (flagged observed proxy where uncovered)."""
+    cache = settings.paths.raw_dir / "football" / "weather"
+    return build_game_weather(games_df, load_cached_forecasts(cache))
+
+
 def build_and_persist_football_gold_features(
     settings: Settings,
     *,
@@ -309,13 +342,16 @@ def build_and_persist_football_gold_features(
     draft_path: Path = settings.paths.raw_dir / "football" / "nflverse" / "draft_picks.parquet"
     draft = pl.read_parquet(draft_path) if draft_path.exists() else None
 
+    games = pl.read_parquet(games_path)
     features = build_football_stage1_features(
-        pl.read_parquet(games_path),
+        games,
         team_logs,
         qb_logs,
         player_logs=read("player_game_logs.parquet"),
         availability=read("team_week_availability.parquet"),
         draft_picks=draft,
+        snap_logs=read("snap_game_logs.parquet"),
+        weather=load_football_game_weather(settings, games),
     )
     if persist:
         gold = settings.paths.gold_dir / "football"
@@ -349,6 +385,9 @@ def build_and_persist_football_stage2_features(
         games,
         player_logs,
         team_logs,
+        environment=build_environment_features(
+            strip_forbidden_columns(games), load_football_game_weather(settings, games)
+        ),
         availability=pl.read_parquet(avail_path) if avail_path.exists() else None,
         draft_picks=pl.read_parquet(draft_path) if draft_path.exists() else None,
         stage1_df=stage1_df,

@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from sports_ml.sports.football.features.availability import (
+    AVAILABILITY_FEATURE_COLUMNS,
+    AVAILABILITY_METRICS,
+    StartProbabilityTracker,
+    build_availability_features,
+)
 from sports_ml.sports.football.features.elo_hooks import (
     DEFAULT_KAPPA_QB,
     FootballQBEloHook,
@@ -10,6 +16,10 @@ from sports_ml.sports.football.features.elo_hooks import (
     compute_football_elo_ratings,
     compute_qb_elo_delta,
     prepare_football_elo_games,
+)
+from sports_ml.sports.football.features.environment import (
+    ENVIRONMENT_FEATURE_COLUMNS,
+    build_environment_features,
 )
 from sports_ml.sports.football.features.pipeline import (
     FOOTBALL_STAGE1_CANDIDATE_FEATURE_COLS,
@@ -22,6 +32,7 @@ from sports_ml.sports.football.features.pipeline import (
     build_football_stage1_features,
     filter_forbidden_feature_columns,
     is_forbidden_feature_column,
+    load_football_game_weather,
     strip_forbidden_columns,
 )
 from sports_ml.sports.football.features.player import build_football_stage2_features
@@ -56,6 +67,13 @@ from sports_ml.sports.football.features.team import (
 )
 
 __all__ = [
+    "AVAILABILITY_FEATURE_COLUMNS",
+    "AVAILABILITY_METRICS",
+    "ENVIRONMENT_FEATURE_COLUMNS",
+    "StartProbabilityTracker",
+    "build_availability_features",
+    "build_environment_features",
+    "load_football_game_weather",
     "DEFAULT_KAPPA_QB",
     "FOOTBALL_SCHEDULE_FEATURE_COLUMNS",
     "FOOTBALL_STAGE1_CANDIDATE_FEATURE_COLS",

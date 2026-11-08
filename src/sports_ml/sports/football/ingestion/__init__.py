@@ -34,6 +34,7 @@ from sports_ml.sports.football.ingestion.reconciler import (
     build_games_frame,
     build_player_game_logs,
     build_qb_game_logs,
+    build_snap_game_logs,
     build_team_game_logs,
 )
 
@@ -56,6 +57,7 @@ __all__ = [
     "build_games_frame",
     "build_player_game_logs",
     "build_qb_game_logs",
+    "build_snap_game_logs",
     "build_team_game_logs",
     "check_football_data_sources",
     "check_nflverse_asset",

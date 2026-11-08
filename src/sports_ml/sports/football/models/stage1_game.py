@@ -77,6 +77,15 @@ HOME_MONOTONE_CONSTRAINTS: Final[dict[str, int]] = {
     "qb_elo_diff_pre": 1,
 }
 
+# Environment level features move both teams' scoring in the same direction (same sign for both
+# regressors): worse weather never raises expected points, and the shift is monotone.
+LEVEL_MONOTONE_CONSTRAINTS: Final[dict[str, int]] = {
+    "wind_penalty": -1,
+    "cold_penalty": -1,
+    "env_passing_penalty": -1,
+    "env_total_shift": 1,
+}
+
 ClassifierKind = Literal["logistic", "gbdt", "both"]
 
 
@@ -216,7 +225,10 @@ class Stage1FootballGameModel:
 
     def _monotone(self, home: bool) -> list[int]:
         sign = 1 if home else -1
-        return [sign * HOME_MONOTONE_CONSTRAINTS.get(c, 0) for c in self.feature_columns]
+        return [
+            sign * HOME_MONOTONE_CONSTRAINTS.get(c, 0) + LEVEL_MONOTONE_CONSTRAINTS.get(c, 0)
+            for c in self.feature_columns
+        ]
 
     def _new_calibrator(self) -> BinaryProbabilityCalibrator:
         return BinaryProbabilityCalibrator(
@@ -816,6 +828,7 @@ __all__ = [
     "FitBoundaryAudit",
     "FootballStage1BacktestResult",
     "HOME_MONOTONE_CONSTRAINTS",
+    "LEVEL_MONOTONE_CONSTRAINTS",
     "ScoreMetrics",
     "SliceReport",
     "Stage1FootballGameModel",

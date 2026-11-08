@@ -80,6 +80,8 @@ STAGE2_PLAYER_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "team_elo_win_prob",
     "team_pace_plays_pg",
     "team_pass_rate",
+    # Forecast wind/cold/precipitation passing penalty (0 in domes and for neutral weather)
+    "env_passing_penalty",
 )
 
 STAGE2_FEATURE_COLUMNS_CANDIDATE: Final[tuple[str, ...]] = STAGE2_PLAYER_FEATURE_COLUMNS

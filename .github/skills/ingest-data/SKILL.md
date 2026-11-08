@@ -72,5 +72,6 @@ Report the row counts, date range (`min(game_date)` to `max(game_date)`), and wh
 ## NFL Football (`--sport football --league nfl`)
 - `uv run sports-ml check-sources --sport football --league nfl` probes the nflverse release assets and schema contracts.
 - `uv run sports-ml ingest --sport football --league nfl --from-year 2018` (or `--current-season`, or `--start-date/--end-date`) fetches nflverse schedules, play-by-play, player stats, snap counts, injuries, depth charts and rosters into `data/raw/football/nflverse/`, then reconciles Silver tables under `data/silver/football/` (`games`, `team_game_logs`, `player_game_logs`, `qb_game_logs`, `team_week_availability`).
-- `--offline` serves only already-cached nflverse assets (seasons with no cached schedule are skipped); `--seasons` is not supported for football.
+- After the nflverse sync, ingestion caches Open-Meteo forecast weather for outdoor venues under `data/raw/football/weather/` (non-fatal on failure) and writes `snap_game_logs.parquet` (all-position snap shares used for position-group availability). Re-run ingestion after upgrading to populate both.
+- `--offline` serves only already-cached nflverse assets (and skips the forecast sync) (seasons with no cached schedule are skipped); `--seasons` is not supported for football.
 - `player_game_logs.parquet` carries Stage 2 usage columns (`completions`, `pass_air_yards`, `rec_air_yards`, `rz_targets`, `rz_carries`, `gl_carries`); re-run ingestion after upgrading so older Silver files gain them.
