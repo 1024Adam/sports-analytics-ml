@@ -157,7 +157,7 @@ class NflverseIngestor:
 
             if _present(stats) and stats is not None:
                 counts["player"] = self.reconciler.reconcile_player_game_logs(
-                    stats, snap_counts_df=snaps, players_df=players
+                    stats, snap_counts_df=snaps, players_df=players, pbp_df=pbp
                 ).height
             else:
                 missing.add("player_stats")

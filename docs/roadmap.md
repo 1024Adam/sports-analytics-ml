@@ -747,13 +747,13 @@ Implement the mandatory NFL Stage 1 pipeline: calibrated 2-way win probabilities
 ---
 
 ## Milestone 26: Stage 2 QB / RB / WR-TE Projections, Anytime-TD Probabilities, Unified Football Predictor & CLI (`sports/football/models/` & `cli.py`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Implement optional Stage 2 player projections conditioned on Stage 1 (QB, RB, WR/TE; **anytime-TD** and milestone probabilities), wire `FootballMatchupPredictor` into the `sports-ml` CLI with week-based addressing, and update skills/docs.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/features/player.py` & `src/sports_ml/sports/football/models/stage2_player.py`:
+- [x] `src/sports_ml/sports/football/features/player.py` & `src/sports_ml/sports/football/models/stage2_player.py`:
   - **Player feature matrix** (leak-free `.shift(1)`, shrunk per-opportunity rates): QB attempts/air yards/`cpoe`; RB `carry_share`, `target_share`, goal-line share, snap share; WR/TE `target_share`, `air_yards_share`, `wopr`, `route_participation`, red-zone target share; opposing defense vs. position EPA/yards allowed; rookie/debut priors from draft capital; availability probability from Tier 1/2 (`p_active`).
   - **Team Opportunity Model**: Projects team `proj_plays`, `proj_pass_attempts`, `proj_rush_attempts` from Stage 1 expected scores/margin (game-script effect: trailing teams pass more), pace, and pass-rate-over-expected.
   - **QB**: `proj_pass_att`, `proj_completions`, `proj_pass_yds`, `proj_pass_td`, `proj_int`, `proj_rush_yds`, `proj_rush_td`, `prob_250plus_pass_yds`, `prob_300plus_pass_yds`, `prob_2plus_pass_td`.
@@ -761,21 +761,21 @@ Implement optional Stage 2 player projections conditioned on Stage 1 (QB, RB, WR
   - **WR/TE**: `proj_targets`, `proj_rec`, `proj_rec_yds`, `proj_rec_td`, `prob_5plus_rec`, `prob_75plus_rec_yds`, `prob_100plus_rec_yds`.
   - **Anytime TD (`prob_anytime_td`)** for RB/WR/TE/QB (rushing + receiving) from zero-inflated / Poisson TD-rate models tied to red-zone usage and team expected points.
   - **Cross-Stage Coherence Reconciler (`reconcile_football_stage2_projections`)**: Soft-scales player TD and yardage totals toward team expected points / projected passing & rushing totals ($\gamma = 0.50$), and enforces opportunity conservation (sum of projected targets $\approx$ team projected attempts; carries sum $\approx$ team rush attempts).
-- [ ] `src/sports_ml/sports/football/models/predictor.py`:
+- [x] `src/sports_ml/sports/football/models/predictor.py`:
   - `FootballMatchupPredictor` with `predict_matchup(season, week, away, home, include_players=False)`, `predict_week(season, week, include_players=False)`, `predict_date(...)`, and `predict_team_next_games(team, n_games, include_players=False)`; appends to `data/predictions/football_predictions.parquet`.
   - Confidence warnings: `CONFIRMED_QB` vs. `PROBABLE_QB` vs. `QB_UNCERTAIN` (questionable/doubtful) vs. `BACKUP_QB`, `EARLY_SEASON_SHRINKAGE` (Weeks 1–4), `DEBUT_OR_NEW_QB_PRIOR`, `NEUTRAL_OR_INTERNATIONAL_SITE`, `KEY_OFFENSIVE_PLAYER_OUT`, `STAGE1_ONLY_NO_PLAYER_DATA`.
-- [ ] `src/sports_ml/cli.py`:
+- [x] `src/sports_ml/cli.py`:
   - Register `--sport football` (with `--league nfl`, the default) across `check-sources`, `ingest`, `features build`, `train`, `backtest`, `predict`, and `score-predictions`, adding `--season` and `--week` options (and `--matchup AWAY@HOME`, `--team`, `--games`, `--include-players` consistent with other sports); extend `.github/skills/*` (ingest-data, train-models, predict-matchup, evaluate-and-score, onboard-sport-plugin) and docs for NFL.
   - Rich output: `P(Away)`, `P(Home)`, projected score line, QB matchup card (`Starter`, `Confirmed/Probable`, `QB Value`), and position-grouped player projection tables including `P(Anytime TD)`.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_stage2_player.py`:
+- [x] `tests/sports/football/test_stage2_player.py`:
   - Verify all projected counts are non-negative, probabilities lie in $[0,1]$, `prob_100plus_*` $\le$ `prob_75plus_*`, and a player with `p_active = 0` projects `0` opportunities.
   - **Opportunity Conservation**: projected target/carry/attempt sums reconcile to team totals within tolerance.
   - **Game-Script Monotonicity**: Raising Stage 1 team expected margin (leading) increases RB `proj_carries` and decreases QB `proj_pass_att`; raising team $\hat{\mu}$ increases anytime-TD probabilities.
   - **Role Monotonicity**: a higher `target_share` WR has strictly higher `proj_targets` than an otherwise identical lower-share WR.
-- [ ] `tests/sports/football/test_football_cli_e2e.py`: Offline end-to-end `ingest` $\rightarrow$ `features build` $\rightarrow$ `train` $\rightarrow$ `backtest` $\rightarrow$ `predict` (Stage 1, `--include-players`, `--week`, `--team`) $\rightarrow$ `score-predictions`.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `tests/sports/football/test_football_cli_e2e.py`: Offline end-to-end `ingest` $\rightarrow$ `features build` $\rightarrow$ `train` $\rightarrow$ `backtest` $\rightarrow$ `predict` (Stage 1, `--include-players`, `--week`, `--team`) $\rightarrow$ `score-predictions`.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: train-models
-description: "Use when: building pre-game Gold feature tables (`sports-ml features build`) or training production Stage 1 and Stage 2 model bundles (`sports-ml train`) for `--sport hockey` or `--sport soccer`, updating model artifacts in `artifacts/<sport>/`, or refreshing SHA-256 schema fingerprints (`metadata.json`)."
+description: "Use when: building pre-game Gold feature tables (`sports-ml features build`) or training production Stage 1 and Stage 2 model bundles (`sports-ml train`) for `--sport hockey`, `--sport soccer`, or `--sport football`, updating model artifacts in `artifacts/<sport>/`, or refreshing SHA-256 schema fingerprints (`metadata.json`)."
 argument-hint: "Optional --sport (hockey|soccer), --include-stage2, --version <tag>, or features-only..."
 user-invocable: true
 disable-model-invocation: false
@@ -45,3 +45,11 @@ Read `artifacts/hockey/latest/metadata.json` and summarize for the user:
 2. **Training Coverage**: `min_event_date`, `max_event_date`, and `total_events`.
 3. **Schema Fingerprints**: `schema_sha256` (Stage 1) and `stage2_schema_sha256` (Stage 2, if enabled).
 4. **Validation Metrics**: `log_loss`, `brier_score`, `ece`, and `accuracy`.
+
+## NFL Football (`--sport football`)
+```bash
+uv run sports-ml features build --sport football --league nfl      # Stage 1 + Stage 2 Gold parquet
+uv run sports-ml train --sport football --include-stage2 --version v1
+```
+- `features build` writes `data/gold/football/stage1_features.parquet` and `stage2_features.parquet` (player rows: actual participants for completed games, recent contributors for upcoming games).
+- `train` fits `Stage1FootballGameModel` on all completed games and, with `--include-stage2`, `Stage2FootballPlayerModel` (conditioned on in-sample Stage 1 scores) and saves a fingerprinted bundle to `artifacts/football/<version>/` and `latest/` (Stage 2 gets its own `stage2_schema_sha256`). Without `--include-stage2` the bundle is Stage 1 only.

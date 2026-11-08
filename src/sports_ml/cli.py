@@ -53,7 +53,10 @@ from sports_ml.sports.baseball.models import (
     run_baseball_stage1_walk_forward_backtest,
     score_baseball_prediction_ledger,
 )
-from sports_ml.sports.football.features import build_and_persist_football_gold_features
+from sports_ml.sports.football.features import (
+    build_and_persist_football_gold_features,
+    build_and_persist_football_stage2_features,
+)
 from sports_ml.sports.football.ingestion import (
     FootballSilverReconciler,
     NflverseClient,
@@ -160,9 +163,10 @@ def _run_football_ingestion(
     current_season: bool,
     start_date: str | None,
     end_date: str | None,
+    offline: bool = False,
 ) -> Any:
     settings.paths.ensure_dirs(sport="football")
-    client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse")
+    client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse", offline=offline)
     reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
     ingestor = NflverseIngestor(client, reconciler)
     return ingestor.ingest(
@@ -171,6 +175,132 @@ def _run_football_ingestion(
         start_date=_parse_iso_date(start_date, "--start-date"),
         end_date=_parse_iso_date(end_date, "--end-date"),
     )
+
+
+def _run_football_train(settings: Settings, *, version: str, include_stage2: bool) -> None:
+    from sports_ml.sports.football.models import train_football_stage1_bundle
+
+    try:
+        gold = build_and_persist_football_gold_features(settings)
+        stage2 = (
+            build_and_persist_football_stage2_features(settings, stage1_df=gold)
+            if include_stage2
+            else None
+        )
+        result = train_football_stage1_bundle(
+            gold,
+            settings.paths.artifacts_dir,
+            model_version=version,
+            stage2_df=stage2,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if include_stage2 and result.stage2_model is None:
+        console.print("[yellow]No completed player rows found — Stage 2 was not trained.[/yellow]")
+    metrics = ", ".join(f"{k}={v:.4f}" for k, v in result.validation_metrics.items())
+    console.print(
+        f"[bold green]Training complete[/bold green] for sport='football' "
+        f"(version={version}): Stage 1 games={result.n_training_games}, "
+        f"Stage 2 rows={result.n_stage2_rows}.\nValidation: {metrics}\n"
+        f"Artifacts: {result.bundle_dir}"
+    )
+
+
+def _run_football_backtest(settings: Settings, *, stage: str, n_splits: int) -> None:
+    from sports_ml.sports.football.models import (
+        evaluate_football_stage2_holdout,
+        run_football_stage1_walk_forward_backtest,
+    )
+    from sports_ml.sports.football.reporting import render_football_backtest
+
+    if stage not in {"1", "2", "all"}:
+        raise typer.BadParameter("--stage must be '1', '2', or 'all'.")
+    try:
+        gold = build_and_persist_football_gold_features(settings)
+        completed = gold.filter(pl.col("home_score").is_not_null())
+        holdout = max(1, n_splits)
+        n_seasons = completed["season"].n_unique()
+        result = None
+        if stage in {"1", "all"}:
+            result = run_football_stage1_walk_forward_backtest(
+                completed,
+                min_train_seasons=max(1, n_seasons - holdout),
+                n_bootstrap=200,
+            )
+        stage2_metrics = None
+        if stage in {"2", "all"}:
+            stage2_df = build_and_persist_football_stage2_features(settings, stage1_df=gold)
+            if stage2_df.is_empty():
+                raise ValueError("No Stage 2 player rows available; re-run football ingestion.")
+            stage2_metrics = evaluate_football_stage2_holdout(
+                completed, stage2_df, n_holdout_seasons=min(holdout, max(1, n_seasons - 1))
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    render_football_backtest(console, result, stage2_metrics)
+
+
+def _run_football_predict(
+    settings: Settings,
+    *,
+    league: str,
+    season: int | None,
+    week: int | None,
+    game_date: date | None,
+    matchup: str | None,
+    team: str | None,
+    n_games: int | None,
+    include_players: bool,
+    offline: bool,
+) -> None:
+    from sports_ml.sports.football.models import FootballMatchupPredictor
+    from sports_ml.sports.football.reporting import render_football_predictions
+
+    _ensure_football_league(league)
+    if not offline:
+        _run_football_ingestion(
+            settings, from_year=None, current_season=True, start_date=None, end_date=None
+        )
+    artifact_dir = settings.paths.artifacts_dir / "football" / "latest"
+    try:
+        predictor = FootballMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
+        if team:
+            predictions = predictor.predict_team_next_games(
+                team,
+                n_games=n_games if n_games is not None else 1,
+                from_date=game_date,
+                include_players=include_players,
+            )
+        elif game_date is not None and season is None and week is None:
+            predictions = predictor.predict_date(
+                game_date, include_players=include_players, matchup_filter=matchup
+            )
+        else:
+            target = predictor.upcoming_week()
+            resolved_season = season if season is not None else (target[0] if target else None)
+            resolved_week = week if week is not None else (target[1] if target else None)
+            if resolved_season is None or resolved_week is None:
+                raise ValueError("No upcoming games found; pass --season and --week.")
+            predictions = predictor.predict_week(
+                resolved_season,
+                resolved_week,
+                include_players=include_players,
+                matchup_filter=matchup,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    render_football_predictions(console, predictions)
+
+
+def _run_football_score(settings: Settings) -> None:
+    from sports_ml.sports.football.models import score_football_prediction_ledger
+    from sports_ml.sports.football.reporting import render_football_score
+
+    try:
+        score = score_football_prediction_ledger(settings)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    render_football_score(console, score)
 
 
 def _ensure_baseball_league(league: str) -> str:
@@ -1079,10 +1209,10 @@ def ingest_command(
     """Download, cache, and reconcile raw sport feeds into Silver Parquet tables."""
     if sport.strip().lower() == "football":
         _ensure_football_league(league)
-        if offline or seasons is not None:
+        if seasons is not None:
             raise typer.BadParameter(
-                "Football ingestion supports --from-year, --current-season, and "
-                "--start-date/--end-date (not --seasons or --offline)."
+                "Football ingestion supports --from-year, --current-season, "
+                "--start-date/--end-date, and --offline (not --seasons)."
             )
         try:
             report = _run_football_ingestion(
@@ -1091,6 +1221,7 @@ def ingest_command(
                 current_season=current_season,
                 start_date=start_date,
                 end_date=end_date,
+                offline=offline,
             )
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -1198,12 +1329,14 @@ def features_build_command(
     if sport.strip().lower() == "football":
         _ensure_football_league(league)
         try:
-            f_df = build_and_persist_football_gold_features(get_settings())
+            f_settings = get_settings()
+            f_df = build_and_persist_football_gold_features(f_settings)
+            f2_df = build_and_persist_football_stage2_features(f_settings, stage1_df=f_df)
         except FileNotFoundError as exc:
             raise typer.BadParameter(str(exc)) from exc
         console.print(
             f"[bold green]Gold features built[/bold green] for sport='football': "
-            f"Stage 1 rows={f_df.height}, Stage 2 rows=0 (player projections: Milestone 26)."
+            f"Stage 1 rows={f_df.height}, Stage 2 rows={f2_df.height}."
         )
         return
     slug = _ensure_supported_sport(sport)
@@ -1262,7 +1395,10 @@ def _render_market_disagreement_table(edge_report: MarketEdgeReport | None, spor
 @app.command("backtest")
 def backtest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
@@ -1278,6 +1414,10 @@ def backtest_command(
     ] = 2,
 ) -> None:
     """Run walk-forward time-series backtesting across historical seasons."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        _run_football_backtest(get_settings(), stage=stage.strip().lower(), n_splits=n_splits)
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     if slug == "baseball":
@@ -1535,7 +1675,10 @@ def backtest_command(
 @app.command("train")
 def train_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
@@ -1554,6 +1697,10 @@ def train_command(
     ] = "v1",
 ) -> None:
     """Build/refresh Gold features and fit production model artifacts."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        _run_football_train(get_settings(), version=version, include_stage2=include_stage2)
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 
@@ -2095,7 +2242,10 @@ def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -
 @app.command("predict")
 def predict_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
@@ -2143,8 +2293,34 @@ def predict_command(
         bool,
         typer.Option("--offline", help="Skip live network sync and use cached Silver tables."),
     ] = False,
+    season: Annotated[
+        int | None,
+        typer.Option("--season", help="Football season year (defaults to the upcoming slate)."),
+    ] = None,
+    week: Annotated[
+        int | None,
+        typer.Option("--week", min=1, help="Football week (defaults to the upcoming slate)."),
+    ] = None,
 ) -> None:
     """Generate Stage 1 game win probabilities and optional Stage 2 player projections."""
+    if sport.strip().lower() == "football":
+        if team and matchup:
+            raise typer.BadParameter("Specify either --team or --matchup, not both.")
+        if n_games is not None and not team:
+            raise typer.BadParameter("--games requires --team to be specified.")
+        _run_football_predict(
+            get_settings(),
+            league=league,
+            season=season,
+            week=week,
+            game_date=_parse_iso_date(game_date, "--date"),
+            matchup=matchup,
+            team=team,
+            n_games=n_games,
+            include_players=include_players,
+            offline=offline,
+        )
+        return
     slug = _ensure_supported_sport(sport)
     if team and matchup:
         raise typer.BadParameter("Specify either --team or --matchup, not both.")
@@ -2234,10 +2410,16 @@ def predict_command(
 @app.command("score-predictions")
 def score_predictions_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
 ) -> None:
     """Score the live append-only prediction ledger against completed Silver games."""
+    if sport.strip().lower() == "football":
+        _run_football_score(get_settings())
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 

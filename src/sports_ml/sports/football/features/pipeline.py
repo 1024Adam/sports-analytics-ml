@@ -20,6 +20,8 @@ import polars as pl
 from sports_ml.config import Settings
 from sports_ml.sports.football.adapter import FootballAdapter
 from sports_ml.sports.football.features.elo_hooks import FootballQBEloHook
+from sports_ml.sports.football.features.player import build_football_stage2_features
+from sports_ml.sports.football.features.player_columns import STAGE2_PLAYER_FEATURE_COLUMNS
 from sports_ml.sports.football.features.qb import (
     QB_FEATURE_COLUMNS,
     build_qb_elo_value_maps,
@@ -174,28 +176,7 @@ def _stage1_candidate_columns() -> tuple[str, ...]:
 
 FOOTBALL_STAGE1_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = _stage1_candidate_columns()
 
-# Team-context candidates for Stage 2 player rows (`team_*` = player's team, `opp_*` = opponent);
-# the player-level builders arrive in Milestone 26.
-FOOTBALL_STAGE2_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = (
-    "is_home_flag",
-    "team_off_epa_per_play_std",
-    "opp_def_epa_per_play_std",
-    "team_off_pass_epa_per_dropback_std",
-    "opp_def_pass_epa_per_dropback_std",
-    "team_off_rush_epa_per_rush_std",
-    "opp_def_rush_epa_per_rush_std",
-    "team_off_points_per_drive_std",
-    "opp_def_points_per_drive_std",
-    "team_adj_off_epa",
-    "opp_adj_def_epa",
-    "qb_value",
-    "qb_is_backup",
-    "days_rest",
-    "is_short_week",
-    "is_playoff_flag",
-    "is_neutral_site_flag",
-    "elo_diff_pre",
-)
+FOOTBALL_STAGE2_CANDIDATE_FEATURE_COLS: Final[tuple[str, ...]] = STAGE2_PLAYER_FEATURE_COLUMNS
 
 STAGE1_FEATURE_COLUMNS: Final[tuple[str, ...]] = filter_forbidden_feature_columns(
     FOOTBALL_STAGE1_CANDIDATE_FEATURE_COLS
@@ -341,3 +322,39 @@ def build_and_persist_football_gold_features(
         gold.mkdir(parents=True, exist_ok=True)
         features.write_parquet(gold / "stage1_features.parquet", compression="zstd")
     return features
+
+
+def build_and_persist_football_stage2_features(
+    settings: Settings,
+    *,
+    stage1_df: pl.DataFrame | None = None,
+    persist: bool = True,
+) -> pl.DataFrame:
+    """Build the Stage 2 player Gold matrix from Silver (empty frame if no player logs exist)."""
+    silver = settings.paths.silver_dir / "football"
+    players_path = silver / "player_game_logs.parquet"
+    if not (silver / "games.parquet").exists():
+        raise FileNotFoundError(
+            f"Silver football games not found under {silver}; run "
+            "`sports-ml ingest --sport football --league nfl` first."
+        )
+    games = pl.read_parquet(silver / "games.parquet")
+    team_logs = pl.read_parquet(silver / "team_game_logs.parquet")
+    player_logs = pl.read_parquet(players_path) if players_path.exists() else None
+    avail_path = silver / "team_week_availability.parquet"
+    draft_path: Path = settings.paths.raw_dir / "football" / "nflverse" / "draft_picks.parquet"
+    if player_logs is None or player_logs.is_empty():
+        return pl.DataFrame()
+    frame = build_football_stage2_features(
+        games,
+        player_logs,
+        team_logs,
+        availability=pl.read_parquet(avail_path) if avail_path.exists() else None,
+        draft_picks=pl.read_parquet(draft_path) if draft_path.exists() else None,
+        stage1_df=stage1_df,
+    )
+    if persist:
+        gold = settings.paths.gold_dir / "football"
+        gold.mkdir(parents=True, exist_ok=True)
+        frame.write_parquet(gold / "stage2_features.parquet", compression="zstd")
+    return frame

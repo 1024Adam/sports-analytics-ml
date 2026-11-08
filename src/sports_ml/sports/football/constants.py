@@ -1023,6 +1023,8 @@ SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "snaps": pl.Int16(),
     "snap_share": pl.Float64(),
     "pass_attempts": pl.Int16(),
+    "completions": pl.Int16(),
+    "pass_air_yards": pl.Float64(),
     "pass_yards": pl.Float64(),
     "pass_tds": pl.Int8(),
     "interceptions": pl.Int8(),
@@ -1033,6 +1035,10 @@ SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "receptions": pl.Int16(),
     "rec_yards": pl.Float64(),
     "rec_tds": pl.Int8(),
+    "rec_air_yards": pl.Float64(),
+    "rz_targets": pl.Int16(),
+    "rz_carries": pl.Int16(),
+    "gl_carries": pl.Int16(),
 }
 
 SILVER_FOOTBALL_QB_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
@@ -1094,3 +1100,71 @@ TEAM_LOGS_REQUIRED_COLUMNS: Final[tuple[str, ...]] = (
     "opponent",
     "is_home",
 )
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 player-model priors (approximate NFL replacement/league levels per position)
+# ---------------------------------------------------------------------------
+# Position priors for shrunk, per-opportunity rates and role shares. Fixed constants (not
+# estimated from the evaluation data) so cold-start rows never depend on future games.
+POSITION_PRIORS: Final[dict[str, dict[str, float]]] = {
+    "QB": {
+        "pass_att_share": 0.95,
+        "comp_rate": 0.645,
+        "yds_per_att": 7.0,
+        "td_per_att": 0.044,
+        "int_per_att": 0.025,
+        "rush_att_pg": 3.0,
+        "rush_ypc": 5.0,
+        "rush_td_per_carry": 0.035,
+        "snap_share": 0.98,
+    },
+    "RB": {
+        "carry_share": 0.30,
+        "gl_carry_share": 0.30,
+        "rz_carry_share": 0.30,
+        "target_share": 0.08,
+        "rz_target_share": 0.07,
+        "air_yards_share": 0.02,
+        "rush_ypc": 4.2,
+        "rush_td_per_carry": 0.04,
+        "catch_rate": 0.77,
+        "rec_yds_per_target": 5.9,
+        "rec_td_per_target": 0.025,
+        "snap_share": 0.45,
+    },
+    "WR": {
+        "target_share": 0.14,
+        "rz_target_share": 0.12,
+        "air_yards_share": 0.15,
+        "catch_rate": 0.64,
+        "rec_yds_per_target": 8.2,
+        "rec_td_per_target": 0.050,
+        "snap_share": 0.75,
+    },
+    "TE": {
+        "target_share": 0.09,
+        "rz_target_share": 0.10,
+        "air_yards_share": 0.08,
+        "catch_rate": 0.68,
+        "rec_yds_per_target": 7.4,
+        "rec_td_per_target": 0.060,
+        "snap_share": 0.65,
+    },
+}
+# Draft-capital bonus (pick 1 = full bonus) added to the share priors of drafted players.
+DRAFT_SHARE_BONUS: Final[dict[str, dict[str, float]]] = {
+    "QB": {"pass_att_share": 0.03},
+    "RB": {"carry_share": 0.20, "target_share": 0.04},
+    "WR": {"target_share": 0.10},
+    "TE": {"target_share": 0.05},
+}
+STAGE2_SHRINK_K: Final[dict[str, float]] = {
+    "share": 60.0,
+    "yards": 40.0,
+    "td": 120.0,
+    "qb_att": 200.0,
+    "qb_td": 250.0,
+    "defense_games": 6.0,
+    "team_games": 6.0,
+}

@@ -21,6 +21,7 @@ from sports_ml.sports.football.models.stage1_game import (
     Stage1FootballGameModel,
     run_football_stage1_walk_forward_backtest,
 )
+from sports_ml.sports.football.models.stage2_player import Stage2FootballPlayerModel
 
 FOOTBALL_SPORT_SLUG = "football"
 MIN_BACKTEST_SEASONS = 4
@@ -34,6 +35,8 @@ class FootballTrainingResult:
     bundle_dir: Path
     validation_metrics: dict[str, float]
     n_training_games: int
+    stage2_model: Stage2FootballPlayerModel | None = None
+    n_stage2_rows: int = 0
 
 
 def _completed_games(features_df: pl.DataFrame) -> pl.DataFrame:
@@ -91,14 +94,26 @@ def train_football_stage1_bundle(
     artifacts_dir: Path,
     *,
     model_version: str = "v1",
+    stage2_df: pl.DataFrame | None = None,
     random_seed: int = RANDOM_SEED,
 ) -> FootballTrainingResult:
-    """Fit Stage 1 on all completed games and persist a fingerprinted bundle."""
+    """Fit Stage 1 (and optional Stage 2 from `stage2_df`) on completed games and persist a bundle.
+
+    Stage 2 is conditioned on in-sample Stage 1 expected scores (documented mild optimism).
+    """
     completed = _completed_games(features_df)
     if completed.is_empty():
         raise ValueError("No completed football games available to train on.")
     metrics = compute_validation_metrics(completed, random_seed=random_seed)
     model = Stage1FootballGameModel(random_seed=random_seed).fit(completed)
+    stage2_model: Stage2FootballPlayerModel | None = None
+    stage2_train: pl.DataFrame | None = None
+    if stage2_df is not None and not stage2_df.is_empty():
+        stage2_train = stage2_df.filter(pl.col("actual_targets").is_not_null())
+        if not stage2_train.is_empty():
+            stage2_model = Stage2FootballPlayerModel(random_seed=random_seed).fit(
+                stage2_train, model.predict(completed)
+            )
     bundle_dir = ModelRegistry(artifacts_dir=artifacts_dir).save_bundle(
         sport=FOOTBALL_SPORT_SLUG,
         model_version=model_version,
@@ -106,6 +121,9 @@ def train_football_stage1_bundle(
         stage1_train_df=completed,
         stage1_feature_columns=model.feature_columns,
         validation_metrics=metrics,
+        stage2_model=stage2_model,
+        stage2_train_df=stage2_train if stage2_model is not None else None,
+        stage2_feature_columns=stage2_model.feature_columns if stage2_model else None,
         update_latest=True,
     )
     return FootballTrainingResult(
@@ -113,7 +131,41 @@ def train_football_stage1_bundle(
         bundle_dir=bundle_dir,
         validation_metrics=metrics,
         n_training_games=completed.height,
+        stage2_model=stage2_model,
+        n_stage2_rows=stage2_train.height
+        if stage2_model is not None and stage2_train is not None
+        else 0,
     )
+
+
+def evaluate_football_stage2_holdout(
+    features_df: pl.DataFrame,
+    stage2_df: pl.DataFrame,
+    *,
+    n_holdout_seasons: int = 1,
+    random_seed: int = RANDOM_SEED,
+) -> dict[str, float]:
+    """Fit Stage 1 + Stage 2 on earlier seasons, then score the newest `n_holdout_seasons`.
+
+    Stage 2 trains against in-sample Stage 1 scores but is evaluated against the out-of-sample
+    Stage 1 scores of the held-out seasons (MAE vs. a position-mean baseline).
+    """
+    completed = _completed_games(features_df)
+    seasons = sorted(completed["season"].unique().to_list())
+    if len(seasons) <= n_holdout_seasons:
+        raise ValueError("Need more completed seasons than held-out seasons for Stage 2 backtest.")
+    cutoff = seasons[-n_holdout_seasons]
+    train_games = completed.filter(pl.col("season") < cutoff)
+    stage1 = Stage1FootballGameModel(random_seed=random_seed).fit(train_games)
+    done = stage2_df.filter(pl.col("actual_targets").is_not_null())
+    train_rows = done.filter(pl.col("season") < cutoff)
+    test_rows = done.filter(pl.col("season") >= cutoff)
+    if train_rows.is_empty() or test_rows.is_empty():
+        raise ValueError("Stage 2 backtest needs player rows on both sides of the holdout split.")
+    stage2 = Stage2FootballPlayerModel(random_seed=random_seed).fit(
+        train_rows, stage1.predict(train_games)
+    )
+    return stage2.evaluate(test_rows, stage1.predict(completed.filter(pl.col("season") >= cutoff)))
 
 
 def load_football_stage1_bundle(

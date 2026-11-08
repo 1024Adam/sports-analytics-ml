@@ -171,7 +171,9 @@ class NflverseClient:
         transport: httpx.BaseTransport | None = None,
         retry_attempts: int = 3,
         retry_min_wait: float = 0.5,
+        offline: bool = False,
     ) -> None:
+        self.offline = offline
         self.cache_dir = cache_dir
         self.timeout_seconds = timeout_seconds
         self.transport = transport
@@ -268,6 +270,10 @@ class NflverseClient:
         existing = self._existing_path(path, spec.fmt)
         refreshable = is_active_season or not spec.per_season
         ttl = ttl_seconds if ttl_seconds is not None else (21600.0 if is_active_season else 86400.0)
+        if self.offline:
+            if existing is None:
+                raise NflverseAssetUnavailableError(f"Offline and not cached: {path.name}")
+            return self._parse(self._read_cache(path, spec.fmt), spec.fmt)
         if existing is not None:
             fresh = (not refreshable) or (time.time() - existing.stat().st_mtime) <= ttl
             if fresh:

@@ -44,7 +44,10 @@ from sports_ml.sports.football.ingestion.lineups import (
     TIER1_CUTOFF_MINUTES,
     derive_starting_qbs_from_pbp,
 )
-from sports_ml.sports.football.ingestion.pbp_aggregates import aggregate_filtered_offense
+from sports_ml.sports.football.ingestion.pbp_aggregates import (
+    aggregate_filtered_offense,
+    aggregate_player_pbp_usage,
+)
 
 _EASTERN = ZoneInfo("America/New_York")
 DEFAULT_KICKOFF_ET: Final[str] = "13:00"
@@ -442,8 +445,9 @@ def build_player_game_logs(
     *,
     snap_counts_df: pl.DataFrame | None = None,
     players_df: pl.DataFrame | None = None,
+    pbp_df: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """Build Silver player-game rows from weekly player stats (+ snap share when available)."""
+    """Build Silver player-game rows from weekly stats (+ snap share and play-level usage)."""
     if player_stats_df.is_empty() or games_df.is_empty():
         return pl.DataFrame(schema=SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA)
     stats = player_stats_df.select(
@@ -458,6 +462,9 @@ def build_player_game_logs(
         _first_present(player_stats_df, "player_display_name", "player_name").alias("player_name"),
         _first_present(player_stats_df, "position").alias("position"),
         _first_present(player_stats_df, "attempts").alias("pass_attempts"),
+        _first_present(player_stats_df, "completions").alias("completions"),
+        _first_present(player_stats_df, "passing_air_yards").alias("pass_air_yards"),
+        _first_present(player_stats_df, "receiving_air_yards").alias("rec_air_yards"),
         _first_present(player_stats_df, "passing_yards").alias("pass_yards"),
         _first_present(player_stats_df, "passing_tds").alias("pass_tds"),
         _first_present(player_stats_df, "passing_interceptions", "interceptions").alias(
@@ -497,6 +504,10 @@ def build_player_game_logs(
             pl.lit(None, dtype=pl.Int16).alias("snaps"),
             pl.lit(None, dtype=pl.Float64).alias("snap_share"),
         )
+    usage = _player_pbp_usage_frame(pbp_df)
+    if usage is not None:
+        out = out.join(usage, on=["game_id", "player_id"], how="left")
+        out = out.with_columns(pl.col("rz_targets", "rz_carries", "gl_carries").fill_null(0))
     out = out.with_columns(
         pl.when(pl.col("snap_share").is_not_null())
         .then(pl.col("snap_share") >= 0.5)
@@ -506,6 +517,21 @@ def build_player_game_logs(
     return _cast_to_schema(out, SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA).sort(
         "start_time_utc", "event_seq", "game_id", "team", "player_id"
     )
+
+
+def _player_pbp_usage_frame(pbp_df: pl.DataFrame | None) -> pl.DataFrame | None:
+    if pbp_df is None or pbp_df.is_empty():
+        return None
+    usage = aggregate_player_pbp_usage(_with_canonical_game_id(pbp_df))
+    if usage.is_empty():
+        return None
+    return usage.select(
+        pl.col("_gid").alias("game_id"),
+        pl.col("gsis_id").map_elements(_gsis_or_none, return_dtype=pl.Int64).alias("player_id"),
+        "rz_targets",
+        "rz_carries",
+        "gl_carries",
+    ).filter(pl.col("player_id").is_not_null())
 
 
 def _snap_share_frame(
@@ -752,14 +778,16 @@ class FootballSilverReconciler:
         *,
         snap_counts_df: pl.DataFrame | None = None,
         players_df: pl.DataFrame | None = None,
+        pbp_df: pl.DataFrame | None = None,
         persist: bool = True,
     ) -> pl.DataFrame:
-        """Build `player_game_logs.parquet` from weekly stats (+ snap share)."""
+        """Build `player_game_logs.parquet` from weekly stats (+ snap share, pbp usage)."""
         incoming = build_player_game_logs(
             player_stats_df,
             self.read_games(),
             snap_counts_df=snap_counts_df,
             players_df=players_df,
+            pbp_df=pbp_df,
         )
         return self._upsert(
             self.player_logs_path,

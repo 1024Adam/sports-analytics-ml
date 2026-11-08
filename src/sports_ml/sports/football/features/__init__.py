@@ -18,10 +18,16 @@ from sports_ml.sports.football.features.pipeline import (
     STAGE2_FEATURE_COLUMNS,
     assert_zero_firewall_contamination,
     build_and_persist_football_gold_features,
+    build_and_persist_football_stage2_features,
     build_football_stage1_features,
     filter_forbidden_feature_columns,
     is_forbidden_feature_column,
     strip_forbidden_columns,
+)
+from sports_ml.sports.football.features.player import build_football_stage2_features
+from sports_ml.sports.football.features.player_columns import (
+    STAGE2_PLAYER_FEATURE_COLUMNS,
+    STAGE2_TARGET_COLUMNS,
 )
 from sports_ml.sports.football.features.qb import (
     QB_FEATURE_COLUMNS,
@@ -63,6 +69,10 @@ __all__ = [
     "TeamFeatureConfig",
     "assert_zero_firewall_contamination",
     "build_and_persist_football_gold_features",
+    "build_and_persist_football_stage2_features",
+    "build_football_stage2_features",
+    "STAGE2_PLAYER_FEATURE_COLUMNS",
+    "STAGE2_TARGET_COLUMNS",
     "build_elo_context",
     "build_football_schedule_features",
     "build_football_stage1_features",

@@ -56,3 +56,6 @@ src/sports_ml/sports/<sport>/
    - Future-Mutation Anti-Leakage test (including MLB doubleheader Game 1 $\rightarrow$ Game 2 or PGA Round $r \rightarrow r+1$).
    - Stage 1 probability sum-to-one test ($\sum P = 1.0$ per game or across tournament field).
    - Stage 2 non-negativity and Stage 1 environment conditioning test.
+
+## Reference Implementation: NFL Football (`sports/football/`)
+`sports/football/` is the most complete weekly-cadence template: `adapter.py`, `constants.py`, `ingestion/` (nflverse client with offline cache mode, 2-tier starter resolver, reconciler), `features/` (`team`, `qb`, `schedule_context`, `player`, `pipeline`), `models/` (`stage1_game`, `stage2_player`, `training`, `predictor`) and `reporting.py` (Rich renderers). CLI wiring for a plugin that does not fit the shared hockey/soccer/baseball path is a thin branch in `cli.py` that delegates to plugin helpers, as football does for `ingest`, `check-sources`, `features build`, `train`, `backtest`, `predict`, and `score-predictions`.

@@ -135,3 +135,60 @@ def aggregate_filtered_offense(pbp: pl.DataFrame) -> pl.DataFrame:
             pl.col("f_off_drive_points").fill_null(0.0),
         )
     )
+
+
+GOAL_LINE_YARDLINE_100: Final[float] = 5.0
+
+
+def aggregate_player_pbp_usage(pbp: pl.DataFrame) -> pl.DataFrame:
+    """Return per `(_gid, gsis_id)` red-zone targets/carries and goal-line carries.
+
+    Needs `receiver_player_id`, `rusher_player_id`, `yardline_100`, `pass_attempt`, `play_type`;
+    returns an empty frame when those play-level columns are unavailable.
+    """
+    needed = {
+        "_gid",
+        "receiver_player_id",
+        "rusher_player_id",
+        "yardline_100",
+        "pass_attempt",
+        "play_type",
+        "qb_kneel",
+        "qb_spike",
+    }
+    schema = {
+        "_gid": pl.Int64,
+        "gsis_id": pl.Utf8,
+        "rz_targets": pl.Int64,
+        "rz_carries": pl.Int64,
+        "gl_carries": pl.Int64,
+    }
+    if not needed.issubset(pbp.columns):
+        return pl.DataFrame(schema=schema)
+    base = pbp.filter(
+        pl.col("yardline_100").is_not_null()
+        & ~_flag("qb_kneel")
+        & ~_flag("qb_spike")
+        & (pl.col("yardline_100") <= RED_ZONE_YARDLINE_100)
+    )
+    targets = (
+        base.filter(
+            (pl.col("pass_attempt").fill_null(0) == 1) & pl.col("receiver_player_id").is_not_null()
+        )
+        .group_by("_gid", pl.col("receiver_player_id").alias("gsis_id"))
+        .agg(pl.len().alias("rz_targets"))
+    )
+    rushes = (
+        base.filter((pl.col("play_type") == "run") & pl.col("rusher_player_id").is_not_null())
+        .group_by("_gid", pl.col("rusher_player_id").alias("gsis_id"))
+        .agg(
+            pl.len().alias("rz_carries"),
+            (pl.col("yardline_100") <= GOAL_LINE_YARDLINE_100).sum().alias("gl_carries"),
+        )
+    )
+    return (
+        targets.join(rushes, on=["_gid", "gsis_id"], how="full", coalesce=True)
+        .with_columns(pl.col("rz_targets", "rz_carries", "gl_carries").fill_null(0))
+        .select(list(schema))
+        .cast(schema)  # type: ignore[arg-type]
+    )

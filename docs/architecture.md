@@ -209,6 +209,8 @@ sports-analytics-ml/
 │           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor
 │           │   ├── models/
 │           │   │   ├── stage1_game.py   # Calibrated win prob + expected scores, walk-forward backtest
+│           │   │   ├── stage2_player.py # QB/RB/WR/TE projections, opportunity-conserving reconciliation
+│           │   │   ├── predictor.py     # FootballMatchupPredictor, ledger, QB warnings, live scoring
 │           │   │   └── training.py      # Fingerprinted artifacts/football bundle persistence
 │           │   └── features/
 │           │       ├── elo_hooks.py        # MOV Elo driver, starting-QB & venue Elo hooks
@@ -216,7 +218,8 @@ sports-analytics-ml/
 │           │       ├── team.py             # Rolling/EWMA EPA, ridge SoS, luck signals, cold-start shrinkage
 │           │       ├── qb.py               # Starting-QB features, draft priors, qb_value for the Elo hook
 │           │       ├── schedule_context.py # Per-game rest/travel/round context + Elo & QB-adjusted Elo
-│           │       └── pipeline.py         # Gold stage1_features.parquet + odds/observed-outcome firewall
+│           │       ├── player.py           # Stage 2 player Gold rows (shares, rates, defense vs position, p_active)
+│           │       └── pipeline.py         # Gold stage1/stage2 parquet + odds/observed-outcome firewall
 │           └── hockey/              # NHL HOCKEY PLUGIN
 │               ├── __init__.py
 │               ├── adapter.py       # HockeyAdapter implementing SportAdapter
@@ -297,10 +300,14 @@ Used when experimenting with new features, auditing data, or measuring out-of-sa
 # Verify live connectivity and schema contracts across all external feeds
 sports-ml check-sources --sport hockey
 
-# NFL Football: ingest/check-sources/features build are live (Milestones 23-24); train/predict CLI wiring lands in Milestone 26
+# NFL Football (Milestones 23-26)
 sports-ml check-sources --sport football --league nfl
 sports-ml ingest --sport football --league nfl --from-year 2018
 sports-ml features build --sport football --league nfl
+sports-ml train --sport football --include-stage2
+sports-ml backtest --sport football --stage all --splits 2
+sports-ml predict --sport football --season 2026 --week 9 --matchup KC@BUF --include-players
+sports-ml score-predictions --sport football
 
 # Sync only the current season to date (or a specific date window)
 sports-ml ingest --sport hockey --current-season

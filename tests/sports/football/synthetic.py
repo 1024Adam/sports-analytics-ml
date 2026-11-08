@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -320,3 +321,143 @@ def SILVER_FOOTBALL_TEAM_LOGS_SCHEMA_PARTIAL() -> dict[str, pl.DataType]:
         "time_of_possession_s",
     }
     return {k: v for k, v in SILVER_FOOTBALL_TEAM_LOGS_SCHEMA.items() if k in populated}
+
+
+ROLE_SHARES = {
+    "WR1": ("WR", 0.28),
+    "WR2": ("WR", 0.20),
+    "WR3": ("WR", 0.14),
+    "TE1": ("TE", 0.14),
+    "RB1": ("RB", 0.10),
+    "RB2": ("RB", 0.06),
+}
+
+
+def player_ids(team: str) -> dict[str, int]:
+    """Return role -> player id for a synthetic team (QB1 is `qb_ids(team)[0]`)."""
+    i = TEAMS.index(team)
+    ids = {role: 200_000 + i * 100 + k for k, role in enumerate(ROLE_SHARES)}
+    ids["QB1"], ids["QB2"] = qb_ids(team)
+    return ids
+
+
+def build_synthetic_player_logs(silver: SyntheticSilver) -> pl.DataFrame:
+    """Deterministic player-game logs consistent with the synthetic team logs."""
+    rng = np.random.default_rng(RANDOM_SEED + 7)
+    rows: list[dict[str, object]] = []
+    games = {int(r["game_id"]): r for r in silver.games.iter_rows(named=True)}
+    qb_by = {
+        (int(r["game_id"]), r["team"]): int(r["qb_id"])
+        for r in silver.qb_logs.iter_rows(named=True)
+    }
+    for t in silver.team_logs.iter_rows(named=True):
+        gid, team = int(t["game_id"]), str(t["team"])
+        g = games[gid]
+        att = max(int(t["off_dropbacks"]) - 3, 10)
+        rush_att = max(int(t["off_rushes"]) - 2, 8)
+        epa = float(t["f_off_epa"]) / max(float(t["f_off_plays"]), 1.0)
+        ids = player_ids(team)
+        base = {
+            "game_id": gid,
+            "event_seq": 1,
+            "game_date": g["game_date"],
+            "start_time_utc": g["start_time_utc"],
+            "season": g["season"],
+            "season_type": g["season_type"],
+            "week": g["week"],
+            "team": team,
+            "opponent": t["opponent"],
+        }
+        qid = qb_by.get((gid, team), ids["QB1"])
+        qb_yds = att * (6.6 + 8.0 * epa) + float(rng.normal(0, 25))
+        qb_td = float(rng.poisson(max(0.2, 1.4 + 6.0 * epa)))
+        rows.append(
+            {
+                **base,
+                "player_id": qid,
+                "player_name": f"QB {qid}",
+                "position": "QB",
+                "is_starter": True,
+                "snaps": 62,
+                "snap_share": 1.0,
+                "pass_attempts": att,
+                "completions": int(att * 0.64),
+                "pass_air_yards": att * 7.2,
+                "pass_yards": max(qb_yds, 0.0),
+                "pass_tds": int(qb_td),
+                "interceptions": int(rng.poisson(0.8)),
+                "carries": 3,
+                "rush_yards": 15.0,
+                "rush_tds": int(rng.random() < 0.1),
+                "targets": 0,
+                "receptions": 0,
+                "rec_yards": 0.0,
+                "rec_tds": 0,
+                "rec_air_yards": 0.0,
+                "rz_targets": 0,
+                "rz_carries": 1,
+                "gl_carries": 0,
+            }
+        )
+        for role, (pos, share) in ROLE_SHARES.items():
+            tg = (
+                int(round(att * share * float(rng.uniform(0.7, 1.3))))
+                if pos != "RB"
+                else int(round(att * share))
+            )
+            ca = int(round(rush_att * (0.6 if role == "RB1" else 0.3))) if pos == "RB" else 0
+            if role == "RB2" and (gid + ids["RB2"]) % 5 == 0:
+                continue
+            rec = int(tg * 0.66)
+            yds_t = 8.0 + 8.0 * epa if pos != "RB" else 5.5
+            rows.append(
+                {
+                    **base,
+                    "player_id": ids[role],
+                    "player_name": f"{role} {team}",
+                    "position": pos,
+                    "is_starter": role in ("WR1", "WR2", "TE1", "RB1"),
+                    "snaps": 50,
+                    "snap_share": 0.8 if role in ("WR1", "WR2", "RB1") else 0.5,
+                    "pass_attempts": 0,
+                    "completions": 0,
+                    "pass_air_yards": 0.0,
+                    "pass_yards": 0.0,
+                    "pass_tds": 0,
+                    "interceptions": 0,
+                    "carries": ca,
+                    "rush_yards": ca * (4.2 + 3.0 * epa) if ca else 0.0,
+                    "rush_tds": int(rng.random() < 0.04 * ca) if ca else 0,
+                    "targets": tg,
+                    "receptions": rec,
+                    "rec_yards": max(tg * yds_t + float(rng.normal(0, 8)), 0.0),
+                    "rec_tds": int(rng.random() < 0.05 * tg),
+                    "rec_air_yards": tg * (9.0 if pos != "RB" else 2.0),
+                    "rz_targets": int(rng.integers(0, 3)) if pos != "RB" else 0,
+                    "rz_carries": int(ca // 4),
+                    "gl_carries": int(ca // 8),
+                }
+            )
+    return pl.DataFrame(rows, schema=SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA).sort(
+        "start_time_utc", "event_seq", "game_id", "team", "player_id"
+    )
+
+
+def write_synthetic_silver(
+    root: Path,
+    silver: SyntheticSilver,
+    *,
+    availability: pl.DataFrame | None = None,
+    player_logs: pl.DataFrame | None = None,
+) -> None:
+    """Persist synthetic Silver tables under `<root>/data/silver/football/`."""
+    out = root / "data" / "silver" / "football"
+    out.mkdir(parents=True, exist_ok=True)
+    silver.games.write_parquet(out / "games.parquet")
+    silver.team_logs.write_parquet(out / "team_game_logs.parquet")
+    silver.qb_logs.write_parquet(out / "qb_game_logs.parquet")
+    logs = player_logs if player_logs is not None else build_synthetic_player_logs(silver)
+    logs.write_parquet(out / "player_game_logs.parquet")
+    (availability if availability is not None else silver.availability).write_parquet(
+        out / "team_week_availability.parquet"
+    )
