@@ -11,6 +11,7 @@ from typing import Final, Literal
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.optimize import minimize_scalar
 from scipy.special import expit, logit
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
@@ -18,6 +19,7 @@ from sklearn.linear_model import LogisticRegression
 from sports_ml.config import RANDOM_SEED
 
 CalibrationMethod = Literal["sigmoid", "isotonic"]
+BinaryCalibrationMethod = Literal["platt", "temperature"]
 PROB_EPS: Final[float] = 1e-6
 
 
@@ -110,6 +112,98 @@ class ProbabilityCalibrator:
             return clip_probabilities(calibrated)
 
         return clip_probabilities(probs_1d)
+
+
+class BinaryProbabilityCalibrator:
+    """Small-sample binary calibrator using Platt or temperature scaling (never isotonic).
+
+    Designed for low-volume leagues (e.g., ~270 NFL games/season) where isotonic regression
+    overfits. Falls back to the identity map when fewer than `min_samples` pooled
+    out-of-fold predictions are available, when only one class is present, or when the fitted
+    slope is not positive (`is_identity` / `fallback_reason` record why).
+
+    * `"platt"`: logistic regression on `logit(p)` (slope + intercept).
+    * `"temperature"`: `p' = sigmoid(logit(p) / T)` with `T` minimizing log loss.
+    """
+
+    def __init__(
+        self,
+        method: BinaryCalibrationMethod = "platt",
+        min_samples: int = 400,
+        random_seed: int = RANDOM_SEED,
+    ) -> None:
+        if min_samples < 2:
+            raise ValueError(f"min_samples must be >= 2, got {min_samples}.")
+        self.method: BinaryCalibrationMethod = method
+        self.min_samples = min_samples
+        self.random_seed = random_seed
+        self.slope: float = 1.0
+        self.intercept: float = 0.0
+        self.temperature: float = 1.0
+        self.n_fit_samples: int = 0
+        self.is_identity: bool = True
+        self.fallback_reason: str | None = "not_fitted"
+        self._is_fitted: bool = False
+
+    @property
+    def is_fitted(self) -> bool:
+        return self._is_fitted
+
+    def _set_identity(self, reason: str) -> BinaryProbabilityCalibrator:
+        self.slope, self.intercept, self.temperature = 1.0, 0.0, 1.0
+        self.is_identity = True
+        self.fallback_reason = reason
+        self._is_fitted = True
+        return self
+
+    def fit(
+        self,
+        raw_probs: NDArray[np.float64],
+        y_true: NDArray[np.int64],
+    ) -> BinaryProbabilityCalibrator:
+        """Fit on pooled out-of-fold predictions (identity fallback below `min_samples`)."""
+        p = clip_probabilities(np.asarray(raw_probs, dtype=np.float64).ravel())
+        y = np.asarray(y_true, dtype=np.int64).ravel()
+        if p.size != y.size or p.size == 0:
+            raise ValueError("raw_probs and y_true must be non-empty arrays of equal length.")
+        self.n_fit_samples = int(p.size)
+        if p.size < self.min_samples:
+            return self._set_identity("insufficient_samples")
+        if np.unique(y).size < 2:
+            return self._set_identity("single_class")
+
+        z = np.asarray(logit(p), dtype=np.float64)
+        if self.method == "temperature":
+
+            def nll(log_t: float) -> float:
+                q = clip_probabilities(np.asarray(expit(z / np.exp(log_t)), dtype=np.float64))
+                return float(-np.mean(y * np.log(q) + (1 - y) * np.log(1.0 - q)))
+
+            res = minimize_scalar(nll, bounds=(-2.0, 2.0), method="bounded")
+            self.temperature = float(np.exp(res.x))
+            self.slope, self.intercept = 1.0 / self.temperature, 0.0
+        else:
+            lr = LogisticRegression(C=1.0, solver="lbfgs", random_state=self.random_seed)
+            lr.fit(z.reshape(-1, 1), y)
+            slope = float(lr.coef_[0, 0])
+            if slope <= 0.0:
+                return self._set_identity("non_positive_slope")
+            self.slope, self.intercept = slope, float(lr.intercept_[0])
+            self.temperature = 1.0 / slope
+        self.is_identity = False
+        self.fallback_reason = None
+        self._is_fitted = True
+        return self
+
+    def predict_proba(self, raw_probs: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Return calibrated probabilities strictly inside `(0, 1)`."""
+        if not self._is_fitted:
+            raise RuntimeError("BinaryProbabilityCalibrator must be fitted before predict_proba.")
+        p = clip_probabilities(np.asarray(raw_probs, dtype=np.float64).ravel())
+        if self.is_identity:
+            return p
+        calibrated = np.asarray(expit(self.slope * logit(p) + self.intercept), dtype=np.float64)
+        return clip_probabilities(calibrated)
 
 
 def normalize_multiclass_probabilities(

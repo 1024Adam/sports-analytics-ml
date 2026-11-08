@@ -135,7 +135,7 @@ To ensure adding future sports—specifically **Baseball (MLB)** and **Golf (PGA
 | **Ratings (`ratings.py`)** | Pairwise Elo/Glicko engine (with starter-adjustment hooks) AND multi-entrant Plackett-Luce / field-adjusted skill rating engine. | Configures sport parameters (e.g., NHL $K=6$ & OT dampening; MLB SP-adjusted Elo; PGA field-adjusted Strokes Gained skill). |
 | **Rolling Engine (`temporal.py`)** | Strictly shifted (`shift(1)`) Polars window expressions over $N$ appearances or EWMA spans $\alpha$, generalized `pregame_exposure_rate`, and Bayesian shrinkage. | Defines sport-specific columns to roll ($xGF_{5v5}$ & GSAx in NHL; $xwOBA$ & $xFIP$ in MLB; $SG:Total$ splits in PGA). |
 | **Schedule (`schedule.py`)** | Computes days rest, back-to-backs, doubleheader turnarounds, $k$-in-$m$ density, geodesic venue travel distance, timezone shifts, and weekly-cadence rest/bye flags (`compute_weekly_cadence_features`). | Supplies venue coordinates, timezones, and optional venue/park/course environment factors. |
-| **Modeling & Eval** | Walk-forward splitter, GBDT trainers, binary & group-softmax probability calibrators, Log Loss / Brier / Ranking / Poisson deviance evaluators. | Registers Stage 1 (Event Outcome) and Stage 2 (Participant Stat) feature sets and target columns. |
+| **Modeling & Eval** | Walk-forward splitter, GBDT trainers, binary (incl. small-sample Platt/temperature) & group-softmax probability calibrators, Log Loss / Brier / Ranking / Poisson deviance evaluators. | Registers Stage 1 (Event Outcome) and Stage 2 (Participant Stat) feature sets and target columns. |
 
 ---
 
@@ -207,6 +207,9 @@ sports-analytics-ml/
 │           │   ├── adapter.py       # FootballAdapter implementing SportAdapter
 │           │   ├── constants.py     # 32 teams, stadium registry, Elo/prior parameters, Silver schemas
 │           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor
+│           │   ├── models/
+│           │   │   ├── stage1_game.py   # Calibrated win prob + expected scores, walk-forward backtest
+│           │   │   └── training.py      # Fingerprinted artifacts/football bundle persistence
 │           │   └── features/
 │           │       ├── elo_hooks.py        # MOV Elo driver, starting-QB & venue Elo hooks
 │           │       ├── schedule_hooks.py   # Weekly cadence, Thursday/Monday, body-clock & international travel

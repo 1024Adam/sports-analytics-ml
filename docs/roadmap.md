@@ -722,27 +722,27 @@ Construct leak-free Gold features (`data/gold/football/`) capturing opponent-adj
 ---
 
 ## Milestone 25: Stage 1 — Calibrated Home/Away Win Probability & Expected Team Scores (`sports/football/models/stage1_game.py`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Implement the mandatory NFL Stage 1 pipeline: calibrated 2-way win probabilities and expected team scores, with a walk-forward backtest that respects NFL's small samples and season-week structure.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/models/stage1_game.py`:
+- [x] `src/sports_ml/sports/football/models/stage1_game.py`:
   - **Expected Team Scores Model**: Poisson/Tweedie-style or Gaussian-link LightGBM regressors (heavily regularized, shallow trees, monotone constraints on key QB/EPA features) predicting $(\hat{\mu}_{\text{home}}, \hat{\mu}_{\text{away}})$ with league/season mean anchoring; reports implied margin $\hat{\mu}_{\text{home}} - \hat{\mu}_{\text{away}}$ and total $\hat{\mu}_{\text{home}} + \hat{\mu}_{\text{away}}$ for diagnostics.
   - **Hybrid Win-Probability Ensemble (`Stage1FootballGameModel`)**: Blends QB-adjusted Elo, a score-implied win probability $\Phi(\text{margin}/\sigma_{\text{margin}})$ with empirically estimated $\sigma_{\text{margin}} \approx 13$–$14$, and a regularized logistic / shallow-GBDT classifier. Ties are dropped from classifier targets and calibration; ratings treat them as `0.5`.
   - **Calibration**: `BinaryProbabilityCalibrator` using **Platt / temperature scaling** fit on pooled out-of-fold predictions from prior seasons (no isotonic—too few games), with a guard that falls back to the identity map when calibration sample size is below a configured minimum.
   - **Walk-Forward Backtest Harness (`run_football_stage1_walk_forward_backtest`)**: Expanding-window, week-aligned splits (train $\rightarrow$ calibrate $\rightarrow$ test on whole future seasons or season-week blocks) with `FoldBoundaryAudit`; evaluates **Log Loss**, **Brier Score**, **ECE**, accuracy, and **score MAE / RMSE** against coin-flip, empirical home-win-rate prior (reported per era), and QB-adjusted Elo baselines; includes playoff-only and Week 1–4 slices. Report confidence intervals (bootstrap by season) because single-season differences are noise-dominated.
-- [ ] `src/sports_ml/sports/football/models/training.py` & `artifacts/football/`:
+- [x] `src/sports_ml/sports/football/models/training.py` & `artifacts/football/`:
   - Model bundle persistence with `metadata.json` SHA-256 schema fingerprints consistent with other sports.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_stage1_model.py`:
+- [x] `tests/sports/football/test_stage1_model.py`:
   - Verify $P(\text{Home}) \in (0,1)$, $P(\text{Away}) = 1 - P(\text{Home})$ (within `1e-9`), `prob_draw == 0.0`, finite non-negative expected scores, and neutral-site games are symmetric under home/away relabeling (within tolerance).
   - Verify tie games are excluded from classifier fit/calibration but included in Elo updates at `0.5`.
   - Verify walk-forward ordering (`gbdt_train_max_time < calibrator_min_time <= calibrator_max_time < test_min_time`) and that no fold trains on future weeks.
   - Verify calibrated models beat the empirical home-win prior and Elo-only baseline on a synthetic directional dataset, and that the calibration-size guard triggers the identity fallback.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

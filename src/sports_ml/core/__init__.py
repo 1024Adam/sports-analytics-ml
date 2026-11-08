@@ -17,6 +17,8 @@ from sports_ml.core.cache import (
     write_gzip_bytes,
 )
 from sports_ml.core.calibration import (
+    BinaryCalibrationMethod,
+    BinaryProbabilityCalibrator,
     CalibrationMethod,
     MulticlassProbabilityCalibrator,
     ProbabilityCalibrator,
@@ -103,6 +105,8 @@ from sports_ml.core.validation import WalkForwardSplit, WalkForwardValidator
 
 __all__ = [
     "BenchmarkComparisonReport",
+    "BinaryCalibrationMethod",
+    "BinaryProbabilityCalibrator",
     "CANONICAL_EVENT_KEY_COLS",
     "CANONICAL_PARTICIPANT_KEY_COLS",
     "CANONICAL_TEMPORAL_SORT_COLS",

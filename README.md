@@ -18,7 +18,7 @@ Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on
 - **NHL Hockey (`--sport hockey`)**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, high-danger chances, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`), **MoneyPuck**, and pre-game starting goalie/lineup feeds.
 - **English Premier League (EPL) Soccer (`--sport soccer`)**: Ingests fixtures, squad availability, set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**.
 - **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`)**: Unified dual-league baseball plugin covering **Major League Baseball (30 MLB clubs, 2-way binary outcome)** and **Nippon Professional Baseball (12 Central & Pacific League clubs, 3-way 12-inning tie-aware `1X2` outcome)** with starting pitcher `xFIP`/`K-BB%`/velocity delta (`sp_velo_delta_mph`), 3-day bullpen workload, handedness platoon lineups, ballpark factors, and cross-league (`NPB ↔ MLB`) player translation priors.
-- **NFL Football (`--sport football --league nfl`)**: Weekly-cadence NFL plugin (nflverse data) with a 32-team/stadium registry, margin-of-victory tie-aware Elo, starting-QB and venue (altitude/dome/rest) Elo hooks, and kickoff-exact rest/bye/short-week features. Foundation (Milestone 22), nflverse ingestion with a 2-tier starting-QB resolver (Milestone 23), and leak-free Gold features with a hard odds firewall (Milestone 24) are shipped; models and train/predict CLI follow in Milestones 25–26.
+- **NFL Football (`--sport football --league nfl`)**: Weekly-cadence NFL plugin (nflverse data) with a 32-team/stadium registry, margin-of-victory tie-aware Elo, starting-QB and venue (altitude/dome/rest) Elo hooks, and kickoff-exact rest/bye/short-week features. Foundation (Milestone 22), nflverse ingestion with a 2-tier starting-QB resolver (Milestone 23), leak-free Gold features with a hard odds firewall (Milestone 24), and the calibrated Stage 1 win-probability/expected-score model with a walk-forward backtest (Milestone 25) are shipped; Stage 2 player projections and the train/predict CLI follow in Milestone 26.
 
 ---
 
@@ -73,7 +73,7 @@ uv run sports-ml train --sport soccer --include-stage2
 # 3. Predict an EPL matchweek or specific matchup with Stage 2 Outfield & GK Projections
 uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --include-players
 
-# --- NFL Football (--sport football --league nfl) --- (ingest/check-sources/features build live; train/predict arrive in Milestones 25-26)
+# --- NFL Football (--sport football --league nfl) --- (ingest/check-sources/features build live; train/predict CLI arrives in Milestone 26)
 uv run sports-ml check-sources --sport football --league nfl
 uv run sports-ml ingest --sport football --league nfl --from-year 2018
 uv run sports-ml features build --sport football --league nfl
