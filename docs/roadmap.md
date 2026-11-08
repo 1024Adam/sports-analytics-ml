@@ -2,7 +2,7 @@
 
 > **Related Documents**: [System Architecture Blueprint](./architecture.md) | [NHL Data & Feature Specification](./hockey-data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [MLB & NPB Baseball Data & Feature Specification](./baseball-data-and-features.md) | Football (NFL) Data & Feature Specification (`./football-data-and-features.md`, authored in Milestone 22)
 
-This roadmap breaks the `sports-analytics-ml` platform into sequential, testable milestones across six phases (**Phase 1: Core Engine & NHL Hockey**, Milestones 1–6; **Phase 2: English Premier League (EPL) Soccer**, Milestones 7–11; **Phase 3: Platform Scalability & Storage Optimization**, Milestone 12; **Phase 4: Market Benchmarking, Cross-Competition Fatigue & Micro-Features**, Milestones 13–15; **Phase 5: Dual-League MLB & NPB Baseball Plugin**, Milestones 16–21; and **Phase 6: Football (NFL) Plugin**, Milestones 22–29) designed for execution by the `sports-ml-developer` agent. Each milestone has explicit file deliverables, acceptance criteria, and mandatory `pytest` anti-leakage gates.
+This roadmap breaks the `sports-analytics-ml` platform into sequential, testable milestones across seven phases (**Phase 1: Core Engine & NHL Hockey**, Milestones 1–6; **Phase 2: English Premier League (EPL) Soccer**, Milestones 7–11; **Phase 3: Platform Scalability & Storage Optimization**, Milestone 12; **Phase 4: Market Benchmarking, Cross-Competition Fatigue & Micro-Features**, Milestones 13–15; **Phase 5: Dual-League MLB & NPB Baseball Plugin**, Milestones 16–21; **Phase 6: Football (NFL) Plugin**, Milestones 22–29; and **Phase 7: User Personalization**, Milestone 30) designed for execution by the `sports-ml-developer` agent. Each milestone has explicit file deliverables, acceptance criteria, and mandatory `pytest` anti-leakage gates.
 
 ---
 
@@ -849,6 +849,45 @@ Benchmark NFL Stage 1 against closing market lines (moneyline-implied probabilit
 - [ ] `tests/sports/football/test_football_odds_firewall.py` (extended) & `tests/core/test_market.py` (extended):
   - **Strict Anti-Contamination Test**: no `market_*`, `*odds*`, or `spread*`/`total*` market column in `STAGE1_FEATURE_COLUMNS` / `STAGE2_FEATURE_COLUMNS`; mutating `market_*` columns changes `0.0` of predicted probabilities and expected scores while updating the `MarketEdgeReport`.
   - Verify de-vigged 2-way probabilities lie strictly in $(0,1)$ and sum to `1.0` (within `1e-9`); ATS evaluator correctly handles pushes, `-110` break-even math, and half-point vs. whole-point spreads.
+- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+
+---
+
+# Phase 7: User Personalization
+
+## Milestone 30: Starred Teams & Cross-Sport `predict --starred` (`config/`, `core/starred.py` & `cli.py`)
+**Status**: `[ ] Not Started`
+
+### Goal
+Let the user maintain a personal list of favorite teams across every supported sport and run a single command that shows the calibrated predictions for each starred team's next game(s). This is a thin orchestration layer over each plugin's existing `predict_team_next_games(team, n_games, include_players)`; it adds **no** new modeling and must not change any prediction output.
+
+### Design Constraints
+1. **Teams are keyed by `(sport, league, team)`**, never a bare tricode (`PHI`, `BOS`, `SEA`, `TOR`, `LAC`, etc. collide across sports). `league` is `"nhl"`, `"epl"`, `"mlb"`/`"npb"`, or `"nfl"`; baseball entries may omit the league and rely on the predictor's existing MLB-vs-NPB auto-resolution, but the resolved league is stored on add.
+2. **Sport-agnostic core, sport-specific resolution**: `core/` only stores/validates entries and orchestrates calls; each sport adapter supplies team validation/normalization (reusing existing alias maps, e.g., `OAK`→`ATH`, `WSH`/`WAS`) via a small `TeamResolver` protocol, so new sports (e.g., football) register by exposing a resolver and a predictor.
+3. **Graceful partial failure**: one starred team being out of season, having no scheduled game, or belonging to a sport with no trained artifacts/stale Silver data must never abort the command; it produces a clear per-team `SKIPPED` line (`NO_UPCOMING_GAME`, `NO_TRAINED_ARTIFACTS`, `SOURCE_UNAVAILABLE`) and the remaining teams still render. Exit code is `0` if at least one prediction rendered, non-zero only if every entry failed.
+4. **Sync once per sport, not per team**: live ingestion refresh (unless `--offline`) runs at most once per sport per invocation.
+5. **No prediction-semantics drift**: starred runs reuse the exact existing predictor methods and ledger append path, so predictions are identical to `predict --sport X --team Y --games N`.
+
+### Deliverables
+- [ ] `src/sports_ml/core/starred.py`:
+  - `StarredTeam` (frozen pydantic model: `sport`, `league`, `team`, optional `label`) and `StarredTeamsConfig` with load/save/add/remove/list, deduplication on `(sport, league, team)`, schema validation with a clear error for unknown sports, and atomic writes.
+  - `TeamResolver` protocol (`resolve(team: str, league: str | None) -> ResolvedTeam`) and a registry reusing `core/registry.py`; implementations added for hockey, soccer, and baseball (and registered by the football plugin once Milestone 22 lands; football must not be a prerequisite for this milestone).
+- [ ] `config/starred_teams.toml` (git-ignored; path overridable via `SPORTS_ML_STARRED_TEAMS_FILE` and honoring `SPORTS_ML_ROOT_DIR`), plus a committed `config/starred_teams.example.toml`; add `config/starred_teams.toml` to `.gitignore`. A missing file is treated as an empty list (not an error).
+- [ ] `src/sports_ml/cli.py`:
+  - `sports-ml starred add --sport hockey --team COL`, `starred add --sport baseball --team LAD` (league auto-resolved), `starred remove ...`, `starred list` (Rich table of sport / league / team / full name).
+  - `sports-ml predict --starred [--games N] [--include-players] [--offline]` and the alias `sports-ml predict starred`, with `--games` defaulting to `1` (next game per team). `--starred` is mutually exclusive with `--sport`, `--team`, `--matchup`, and `--date` (clear error message) and, when combined with `--include-players`, applies to every sport that supports Stage 2.
+  - Orchestrator groups entries by sport, builds one predictor per sport, calls `predict_team_next_games(...)` per team, merges results into **one chronologically sorted view by kickoff time** (displayed in the user's local timezone, with the sport/league shown per row), and delegates rendering to the existing per-sport renderers (2-way vs. 3-way tables stay separate per sport; no new table formats).
+  - Empty list prints a helpful hint (`sports-ml starred add --sport ... --team ...`) and exits `0`.
+- [ ] Update `README.md` (CLI examples), `docs/architecture.md` (CLI section), and the `predict-matchup` skill playbook with the `starred` workflow.
+
+### Verification & Acceptance Criteria
+- [ ] `tests/core/test_starred.py`:
+  - Verify add/remove/list round-trips, deduplication on `(sport, league, team)`, that `PHI` in hockey and `PHI` in baseball coexist as separate entries, alias normalization (e.g., `OAK` stored as `ATH`), rejection of unknown sports/teams, atomic write (no partial file on failure), missing file $\rightarrow$ empty list, and `SPORTS_ML_STARRED_TEAMS_FILE` / `SPORTS_ML_ROOT_DIR` overrides.
+- [ ] `tests/test_starred_cli_e2e.py` (offline fixtures, stubbed/trained tiny artifacts):
+  - Starring one team in each supported sport and running `predict --starred` returns each team's next game in chronological order with the same probabilities as `predict --sport X --team Y --games 1` (bit-for-bit identical).
+  - **Partial-failure Test**: a starred team with no upcoming game and a sport with missing artifacts produce `SKIPPED` rows while other teams still render and exit code is `0`; all-failed returns non-zero.
+  - **Sync-Once Test**: with the network layer mocked, two starred teams in the same sport trigger a single ingestion refresh.
+  - `predict --starred` combined with `--sport`/`--team`/`--matchup`/`--date` fails with a clear message, and `predict starred` behaves identically to `predict --starred`.
 - [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 
