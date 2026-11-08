@@ -21,6 +21,13 @@ from sports_ml.sports.football.features.environment import (
     ENVIRONMENT_FEATURE_COLUMNS,
     build_environment_features,
 )
+from sports_ml.sports.football.features.micro import (
+    MICRO_FEATURE_COLUMNS,
+    MICRO_TEAM_FEATURES,
+    STAGE1_MICRO_FEATURE_COLUMNS,
+    attach_micro_features,
+    build_micro_team_features,
+)
 from sports_ml.sports.football.features.pipeline import (
     FOOTBALL_STAGE1_CANDIDATE_FEATURE_COLS,
     FOOTBALL_STAGE2_CANDIDATE_FEATURE_COLS,
@@ -67,6 +74,11 @@ from sports_ml.sports.football.features.team import (
 )
 
 __all__ = [
+    "MICRO_FEATURE_COLUMNS",
+    "MICRO_TEAM_FEATURES",
+    "STAGE1_MICRO_FEATURE_COLUMNS",
+    "attach_micro_features",
+    "build_micro_team_features",
     "AVAILABILITY_FEATURE_COLUMNS",
     "AVAILABILITY_METRICS",
     "ENVIRONMENT_FEATURE_COLUMNS",

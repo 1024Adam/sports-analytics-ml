@@ -805,51 +805,51 @@ Add environment and roster-availability signals that matter in the NFL (wind/pre
 ---
 
 ## Milestone 28: Play-by-Play Micro-Features: Pressure, CPOE, Pace, PROE & Situational Efficiency (`sports/football/ingestion/` & `features/`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Compress play-level nflverse data and Next Gen Stats into compact, high-signal pre-game features beyond coarse EPA, and wire them into Stage 1 and Stage 2.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/ingestion/pbp_micro.py` & `ngs.py`:
+- [x] `src/sports_ml/sports/football/ingestion/pbp_micro.py` & `ngs.py`:
   - Aggregate play-level data into `zstd` Parquet `data/silver/football/team_pbp_micro_logs.parquet` and `player_pbp_micro_logs.parquet`:
     - **Pace & Script**: neutral-situation seconds/play, plays per game, **Pass Rate Over Expected (`proe`)** (neutral game-state), 4th-down aggressiveness vs. model (`fourth_down_go_rate_over_expected`), two-minute/late-game efficiency.
     - **Pass Game Quality**: `cpoe`, `air_yards_per_attempt`, `adot`, `yac_over_expected`, `pressure_rate_allowed`/`pressure_rate_generated` (where available, e.g., from Next Gen Stats / PFR-type fields), `sack_rate_over_expected`, `time_to_throw`.
     - **Situational**: `red_zone_epa_per_play`, `third_down_epa`, `explosive_pass_rate_allowed`, `rush_yards_over_expected` (NGS), `run_stuff_rate`, penalty-adjusted EPA, and score-state-neutral (win-probability banded) splits.
     - **Player micro**: `target_share`, `air_yards_share`, `yards_per_route_run` (when routes are available), `separation`, `rush_yards_over_expected`, `efficiency` vs. usage.
   - Respect source availability windows (`has_ngs = False` before 2016) with graceful, flagged imputation.
-- [ ] `src/sports_ml/sports/football/features/pipeline.py`:
+- [x] `src/sports_ml/sports/football/features/pipeline.py`:
   - Wire rolling `.shift(1)` micro-features into Stage 1 (`diff_proe`, `diff_pressure_rate_edge`, `diff_neutral_pace`, `diff_red_zone_epa`, `diff_cpoe_vs_coverage`) and Stage 2 (player rolling `yprr`, `rush_yards_over_expected`, `air_yards_share`), preserving the Milestone 24 odds/observed-outcome firewall.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_micro_features.py`:
+- [x] `tests/sports/football/test_football_micro_features.py`:
   - **Strict Temporal Anti-Leakage Test**: mutating play-level data at games $\ge t$ leaves all pre-game micro-features for games $< t$ bit-for-bit unchanged.
   - **Conservation Test**: play-level EPA aggregated by team-game equals the team-game EPA total in `team_game_logs.parquet` (within `1e-6`), and neutral-situation filters never include plays outside the configured score/time band.
   - **Availability Test**: Pre-2016 seasons produce finite imputed micro-features with `*_is_imputed = 1` and zero `NaN`s.
-- [ ] Re-run `sports-ml backtest --sport football --league nfl` to verify out-of-sample Log Loss / Brier / score MAE improvement (reported with season-bootstrap CIs; ship the micro-feature set only if it does not regress).
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] Re-run `sports-ml backtest --sport football --league nfl` to verify out-of-sample Log Loss / Brier / score MAE improvement (reported with season-bootstrap CIs; ship the micro-feature set only if it does not regress).
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 
 ## Milestone 29: NFL Closing-Odds Benchmark, De-Vigging & ATS / Total Evaluation Firewall (`sports/football/ingestion/odds.py`)
-**Status**: `[ ] Not Started`
+**Status**: `[x] Completed`
 
 ### Goal
 Benchmark NFL Stage 1 against closing market lines (moneyline-implied probabilities, closing spread, closing total) under the **strict `market_*` anti-contamination firewall** established in Milestone 13—market data is used for **evaluation only**, never as a model input.
 
 ### Deliverables
-- [ ] `src/sports_ml/sports/football/ingestion/odds.py`:
+- [x] `src/sports_ml/sports/football/ingestion/odds.py`:
   - `FootballOddsIngestor`: Reads closing moneyline, spread, and total from the quarantined nflverse schedule columns (Milestone 23) plus an optional local historical-odds CSV (`data/raw/odds/nfl_historical_odds.csv.gz`) and optional `THE_ODDS_API_KEY` pre-game snapshot (gracefully skipped when absent). Persists nullable `market_home_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_away` (power de-vigged via `core/market.py`), `market_spread_home`, and `market_total_points` to `data/silver/football/games.parquet`.
-- [ ] `src/sports_ml/core/market.py` & `core/evaluation.py` (additive):
+- [x] `src/sports_ml/core/market.py` & `core/evaluation.py` (additive):
   - Spread/total evaluators: model-implied margin vs. closing spread (**ATS** hit rate with push handling, expected-value at standard $-110$ juice, break-even $52.38\%$), model-implied total vs. closing total (**over/under** hit rate), and **closing-line value (CLV)** summaries, bucketed by disagreement $\tau \in \{1, 2, 3\}$ points, with explicit **key-number (3, 6, 7, 10)** handling for pushes.
-- [ ] `src/sports_ml/cli.py`:
+- [x] `src/sports_ml/cli.py`:
   - Display the **De-Vigged Market Closing Line** benchmark and the **Fundamental vs. Market Disagreement** / ATS / total breakdown in `sports-ml backtest --sport football --league nfl` and `score-predictions --sport football --league nfl` when odds are present.
 
 ### Verification & Acceptance Criteria
-- [ ] `tests/sports/football/test_football_odds_firewall.py` (extended) & `tests/core/test_market.py` (extended):
+- [x] `tests/sports/football/test_football_odds_firewall.py` (extended) & `tests/core/test_market.py` (extended):
   - **Strict Anti-Contamination Test**: no `market_*`, `*odds*`, or `spread*`/`total*` market column in `STAGE1_FEATURE_COLUMNS` / `STAGE2_FEATURE_COLUMNS`; mutating `market_*` columns changes `0.0` of predicted probabilities and expected scores while updating the `MarketEdgeReport`.
   - Verify de-vigged 2-way probabilities lie strictly in $(0,1)$ and sum to `1.0` (within `1e-9`); ATS evaluator correctly handles pushes, `-110` break-even math, and half-point vs. whole-point spreads.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src tests`, and `pytest --cov=sports_ml` pass with 0 errors.
 
 ---
 

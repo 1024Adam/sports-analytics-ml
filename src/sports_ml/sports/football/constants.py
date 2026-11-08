@@ -1097,6 +1097,98 @@ SILVER_FOOTBALL_SNAP_LOGS_SCHEMA: Final[dict[str, pl.DataType]] = {
     "defense_pct": pl.Float64(),
 }
 
+# ---------------------------------------------------------------------------
+# Milestone 28: play-by-play micro-feature Silver tables
+# ---------------------------------------------------------------------------
+TEAM_MICRO_KEY_SCHEMA: Final[dict[str, pl.DataType]] = {
+    "game_id": pl.Int64(),
+    "event_seq": pl.Int32(),
+    "start_time_utc": pl.Datetime("us", "UTC"),
+    "season": pl.Int32(),
+    "week": pl.Int16(),
+    "team": pl.Utf8(),
+    "opponent": pl.Utf8(),
+}
+# Offense-side numerators/denominators (defense is the opponent's row). `epa_total` / `plays`
+# reconcile exactly to `team_game_logs.off_epa_total` / `off_plays`.
+TEAM_MICRO_PBP_COLUMNS: Final[tuple[str, ...]] = (
+    "epa_total",
+    "plays",
+    "neutral_plays",
+    "neutral_epa",
+    "neutral_epa_plays",
+    "neutral_seconds",
+    "neutral_seconds_plays",
+    "proe_num",
+    "proe_den",
+    "fourth_go_num",
+    "fourth_go_den",
+    "two_min_plays",
+    "two_min_epa",
+    "dropbacks",
+    "cpoe_sum",
+    "cpoe_plays",
+    "air_yards_sum",
+    "air_yards_plays",
+    "adot_sum",
+    "adot_plays",
+    "yac_oe_sum",
+    "yac_oe_plays",
+    "pressure_num",
+    "sacks",
+    "rz_plays",
+    "rz_epa",
+    "third_down_plays",
+    "third_down_epa",
+    "explosive_pass",
+    "pass_plays",
+    "run_stuffs",
+    "rush_plays",
+    "nopen_epa",
+    "nopen_plays",
+)
+TEAM_MICRO_NGS_COLUMNS: Final[tuple[str, ...]] = (
+    "ngs_pass_attempts",
+    "ngs_time_to_throw_sum",
+    "ngs_cpoe_sum",
+    "ngs_rush_attempts",
+    "ngs_ryoe_sum",
+    "ngs_targets",
+    "ngs_separation_sum",
+    "ngs_receptions",
+    "ngs_yac_oe_sum",
+)
+SILVER_FOOTBALL_TEAM_MICRO_SCHEMA: Final[dict[str, pl.DataType]] = {
+    **TEAM_MICRO_KEY_SCHEMA,
+    **{c: pl.Float64() for c in (*TEAM_MICRO_PBP_COLUMNS, *TEAM_MICRO_NGS_COLUMNS)},
+    "has_ngs": pl.Int8(),
+}
+PLAYER_MICRO_PBP_COLUMNS: Final[tuple[str, ...]] = (
+    "targets",
+    "target_air_yards",
+    "receptions",
+    "rec_yards",
+    "yac_oe_sum",
+    "yac_oe_plays",
+    "rush_attempts",
+    "rush_yards",
+)
+PLAYER_MICRO_NGS_COLUMNS: Final[tuple[str, ...]] = (
+    "ngs_rush_attempts",
+    "ngs_ryoe_sum",
+    "ngs_targets",
+    "ngs_separation_sum",
+)
+SILVER_FOOTBALL_PLAYER_MICRO_SCHEMA: Final[dict[str, pl.DataType]] = {
+    **TEAM_MICRO_KEY_SCHEMA,
+    "player_id": pl.Int64(),
+    **{c: pl.Float64() for c in (*PLAYER_MICRO_PBP_COLUMNS, *PLAYER_MICRO_NGS_COLUMNS)},
+    "has_ngs": pl.Int8(),
+}
+NGS_FIRST_SEASON: Final[int] = 2016
+# Receiving yards per (estimated) route run priors by position; routes = snaps x team dropback rate.
+YPRR_PRIORS: Final[dict[str, float]] = {"WR": 1.50, "TE": 1.20, "RB": 0.80}
+
 GAMES_REQUIRED_COLUMNS: Final[tuple[str, ...]] = (
     "season",
     "season_type",

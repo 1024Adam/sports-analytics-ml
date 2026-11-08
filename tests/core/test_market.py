@@ -5,12 +5,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from sports_ml.core.evaluation import evaluate_line_markets
 from sports_ml.core.market import (
+    BREAK_EVEN_WIN_RATE,
+    STANDARD_JUICE_DECIMAL,
     american_to_decimal,
+    ats_break_even,
+    closing_line_value,
     decimal_to_raw_prob,
     devig_probabilities,
     evaluate_market_edge,
+    evaluate_spread_betting,
+    evaluate_total_betting,
     is_forbidden_market_column,
+    is_key_number_line,
+    is_whole_point_line,
 )
 
 
@@ -183,3 +192,142 @@ def test_is_forbidden_market_column() -> None:
     assert is_forbidden_market_column("PINNACLE_ODDS") is True
     assert is_forbidden_market_column("xgf_pct_5v5_w10_diff") is False
     assert is_forbidden_market_column("elo_home_win_prob") is False
+
+
+def test_two_way_devig_stays_in_open_unit_interval_across_nfl_price_ranges() -> None:
+    """Power de-vig of NFL moneylines (heavy favorite to pick'em) stays in (0, 1) and sums to 1."""
+    pairs = [(-1500, 800), (-110, -110), (-250, 205), (100, -120), (-3000, 1200), (-105, -115)]
+    dec = np.array([[american_to_decimal(a), american_to_decimal(b)] for a, b in pairs])
+    for method in ("power", "multiplicative", "shin"):
+        probs = devig_probabilities(dec, method=method)
+        assert np.all((probs > 0.0) & (probs < 1.0))
+        np.testing.assert_allclose(probs.sum(axis=1), 1.0, rtol=0.0, atol=1e-9)
+    pick = devig_probabilities(dec[1], method="power")
+    assert pick[0] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_ats_break_even_and_roi_math_at_minus_110() -> None:
+    assert pytest.approx(110.0 / 210.0) == BREAK_EVEN_WIN_RATE
+    assert ats_break_even() == pytest.approx(0.5238095, abs=1e-6)
+    assert pytest.approx(1.9090909, abs=1e-6) == STANDARD_JUICE_DECIMAL
+    with pytest.raises(ValueError, match="decimal_odds"):
+        ats_break_even(1.0)
+    # 11 wins and 10 losses at -110 is exactly break-even: 11 * (100/110) - 10 = 0
+    n = 21
+    spread = np.full(n, -2.5)
+    model = np.full(n, 6.0)  # edge +3.5 on the home side every game
+    actual = np.where(np.arange(n) < 11, 7.0, 1.0)  # home covers 11 of 21
+    rep = evaluate_spread_betting(model, spread, actual)
+    b = rep.get_bucket(3.0)
+    assert b is not None
+    assert (b.wins, b.losses, b.pushes) == (11, 10, 0)
+    assert b.hit_rate == pytest.approx(11 / 21)
+    assert b.hit_rate == pytest.approx(rep.break_even_win_rate)
+    assert b.roi == pytest.approx(0.0, abs=1e-12)
+
+
+def test_ats_handles_pushes_whole_vs_half_point_and_side_selection() -> None:
+    # spread_home: -3 (home favored by 3), +3 (home 3-pt dog), -2.5 (half point), -7
+    spread = np.array([-3.0, 3.0, -2.5, -7.0, -3.0])
+    model = np.array([6.0, -6.0, 6.0, 1.0, 6.0])  # edges +3, -3, +3.5, -6, +3
+    actual = np.array([3.0, -3.0, 3.0, 10.0, 7.0])  # pushes in games 0 and 1
+    rep = evaluate_spread_betting(model, spread, actual)
+    assert rep.n_whole_point_lines == 4 and rep.n_half_point_lines == 1
+    b = rep.get_bucket(3.0)
+    assert b is not None
+    # game 0: home bet, margin+spread = 0 -> push; game 1: away bet, -3+3 = 0 -> push
+    # game 2: home bet, 3-2.5 > 0 win; game 3: away bet, home covers (10-7>0) -> loss;
+    # game 4: home bet, 7-3 > 0 win
+    assert (b.wins, b.losses, b.pushes) == (2, 1, 2)
+    assert b.hit_rate == pytest.approx(2 / 3)  # pushes excluded from the hit rate
+    assert b.roi == pytest.approx((2 * (100 / 110) - 1) / 5)  # ... and refunded in the ROI base
+    assert b.n_bets == 5
+    # half-point lines can never push
+    half = evaluate_spread_betting(np.array([5.0]), np.array([-2.5]), np.array([3.0]))
+    hb = half.get_bucket(1.0)
+    assert hb is not None and hb.pushes == 0
+    assert hb.wins + hb.losses == 1
+    assert is_whole_point_line(-3.0) and not is_whole_point_line(-2.5)
+
+
+def test_key_numbers_are_flagged_on_closing_lines() -> None:
+    assert all(is_key_number_line(x) for x in (-3.0, 3.0, 6.0, -7.0, 10.0))
+    assert not any(is_key_number_line(x) for x in (-3.5, 4.0, 5.0, 14.0))
+    spread = np.array([-3.0, -3.0, -4.0, -7.0])
+    model = np.array([6.0, 6.0, 8.0, 12.0])
+    actual = np.array([3.0, 10.0, 4.0, 7.0])  # pushes at -3 (game 0), -4 (game 2), -7 (game 3)
+    b = evaluate_spread_betting(model, spread, actual).get_bucket(1.0)
+    assert b is not None
+    assert b.key_bets == 3 and b.key_pushes == 2  # the push at -4 is not a key-number push
+
+
+def test_thresholds_bucket_by_disagreement_and_empty_buckets_are_null() -> None:
+    spread = np.zeros(4) - 1.0
+    model = np.array([0.5, 1.5, 2.5, 3.5]) - 1.0 + 1.0  # edges -0.5? computed below
+    edges = model + spread
+    rep = evaluate_spread_betting(model, spread, np.array([2.0, 2.0, 2.0, 2.0]))
+    counts = [rep.get_bucket(t).n_bets for t in (1.0, 2.0, 3.0)]  # type: ignore[union-attr]
+    assert counts == [int(np.sum(np.abs(edges) >= t)) for t in (1.0, 2.0, 3.0)]
+    assert counts == sorted(counts, reverse=True)
+    none = evaluate_spread_betting(
+        np.array([0.0]), np.array([-1.0]), np.array([3.0]), thresholds=(5.0,)
+    )
+    nb = none.get_bucket(5.0)
+    assert nb is not None and nb.n_bets == 0 and nb.hit_rate is None and nb.roi is None
+    with pytest.raises(ValueError, match="at least one game"):
+        evaluate_spread_betting(np.array([np.nan]), np.array([-1.0]), np.array([3.0]))
+
+
+def test_totals_over_under_pushes_and_missing_lines() -> None:
+    closing = np.array([44.0, 44.0, 44.5, 50.0, np.nan])
+    model = np.array([47.0, 40.0, 48.0, 46.0, 45.0])  # over, under, over, under, (no line)
+    actual = np.array([44.0, 41.0, 45.0, 52.0, 40.0])  # push, under wins, over wins, under loses
+    rep = evaluate_total_betting(model, closing, actual)
+    assert rep.n_games == 4  # NaN closing total dropped
+    b = rep.get_bucket(3.0)
+    assert b is not None
+    assert (b.wins, b.losses, b.pushes) == (2, 1, 1)
+    assert b.key_bets == 0
+    assert rep.mean_abs_error_model == pytest.approx(float(np.mean(np.abs(model[:4] - actual[:4]))))
+
+
+def test_closing_line_value_signs_for_spread_and_total_bets() -> None:
+    one, neg = np.array([1.0]), np.array([-1.0])
+    # home bet at +3 closing +1 -> +2; away bet on the same prices -> -2
+    assert closing_line_value(one, np.array([3.0]), np.array([1.0]), "spread")[0] == 2.0
+    assert closing_line_value(neg, np.array([3.0]), np.array([1.0]), "spread")[0] == -2.0
+    # over taken at 44 closing 46 -> +2; under taken at 46 closing 44 -> +2
+    assert closing_line_value(one, np.array([44.0]), np.array([46.0]), "total")[0] == 2.0
+    assert closing_line_value(neg, np.array([46.0]), np.array([44.0]), "total")[0] == 2.0
+    rep = evaluate_spread_betting(
+        np.array([6.0, -6.0]),
+        np.array([-3.0, -3.0]),
+        np.array([4.0, -4.0]),
+        taken_spread_home=np.array([-2.0, -4.0]),  # home taken -2 (close -3): home side +1
+    )
+    b = rep.get_bucket(3.0)
+    assert b is not None and b.n_bets == 2
+    # game 0: home bet, taken -2 vs close -3 -> CLV +1; game 1: away bet, taken -4 vs close -3 -> +1
+    assert b.mean_clv == pytest.approx(1.0) and b.clv_positive_rate == 1.0
+    assert (
+        evaluate_spread_betting(np.array([6.0]), np.array([-3.0]), np.array([4.0]))
+        .buckets[0]
+        .mean_clv
+        is None
+    )
+
+
+def test_evaluate_line_markets_skips_markets_without_closing_lines() -> None:
+    rep = evaluate_line_markets(
+        model_margin=np.array([3.0, 1.0]),
+        actual_margin=np.array([7.0, -2.0]),
+        closing_spread_home=np.array([-3.0, np.nan]),
+    )
+    assert rep.spread is not None and rep.spread.n_games == 1
+    assert rep.total is None
+    empty = evaluate_line_markets(
+        model_margin=np.array([3.0]),
+        actual_margin=np.array([7.0]),
+        closing_spread_home=np.array([np.nan]),
+    )
+    assert empty.spread is None and empty.total is None

@@ -42,6 +42,10 @@ from sports_ml.sports.football.ingestion.lineups import (
     FootballStartingQBResolver,
     ResolvedStartingQB,
 )
+from sports_ml.sports.football.models.market_eval import (
+    FootballMarketEvaluation,
+    evaluate_football_market,
+)
 from sports_ml.sports.football.models.stage1_game import Stage1FootballGameModel
 from sports_ml.sports.football.models.stage2_player import (
     PROJECTION_COLUMNS,
@@ -119,6 +123,10 @@ class FootballMatchupPrediction(BaseModel):
     away_qb: FootballQBCard
     warnings: list[str] = Field(default_factory=list)
     player_projections: FootballPlayerMatchupProjections | None = None
+    # Evaluation-only market context at prediction time (never a model input)
+    market_spread_home: float | None = None
+    market_total_points: float | None = None
+    market_prob_home: float | None = None
 
 
 @dataclass
@@ -133,6 +141,8 @@ class _SilverBundle:
     incumbents: dict[str, int]
     snap_logs: pl.DataFrame | None
     weather: pl.DataFrame
+    micro_logs: pl.DataFrame | None
+    player_micro: pl.DataFrame | None
 
 
 def _read_optional(path: Path) -> pl.DataFrame | None:
@@ -232,6 +242,8 @@ class FootballMatchupPredictor:
             incumbents=incumbents,
             snap_logs=_read_optional(silver / "snap_game_logs.parquet"),
             weather=load_football_game_weather(self.settings, games),
+            micro_logs=_read_optional(silver / "team_pbp_micro_logs.parquet"),
+            player_micro=_read_optional(silver / "player_pbp_micro_logs.parquet"),
         )
         return self._silver
 
@@ -270,6 +282,7 @@ class FootballMatchupPredictor:
             snap_logs=silver.snap_logs,
             weather=silver.weather,
             as_of_time_utc=self.as_of_time_utc,
+            micro_logs=silver.micro_logs,
         )
         ModelRegistry.validate_features(self._gold, self.metadata, stage=1)
         return self._gold
@@ -375,6 +388,7 @@ class FootballMatchupPredictor:
             stage1_df=gold,
             as_of_time_utc=self.as_of_time_utc,
             starting_qbs=self._starting_qb_frame(game_ids),
+            player_micro=silver.player_micro,
             environment=build_environment_features(
                 strip_forbidden_columns(silver.games), silver.weather
             ),
@@ -476,6 +490,17 @@ class FootballMatchupPredictor:
         if include_players:
             proj, key_out = self._stage2_projection(gold, preds, ids)
 
+        market_by_game = {
+            int(r["game_id"]): r
+            for r in silver.games.select(
+                "game_id",
+                *[
+                    c
+                    for c in ("market_spread_home", "market_total_points", "market_prob_home")
+                    if c in silver.games.columns
+                ],
+            ).iter_rows(named=True)
+        }
         game_dates = {
             int(r["game_id"]): r["game_date"]
             for r in silver.games.select("game_id", "game_date").iter_rows(named=True)
@@ -534,6 +559,9 @@ class FootballMatchupPredictor:
                     away_qb=cards[1],
                     warnings=warnings,
                     player_projections=players,
+                    market_spread_home=market_by_game.get(gid, {}).get("market_spread_home"),
+                    market_total_points=market_by_game.get(gid, {}).get("market_total_points"),
+                    market_prob_home=market_by_game.get(gid, {}).get("market_prob_home"),
                 )
             )
         if persist_ledger:
@@ -568,8 +596,14 @@ class FootballMatchupPredictor:
                 "home_qb_status": [p.home_qb.status for p in predictions],
                 "away_qb_status": [p.away_qb.status for p in predictions],
                 "warnings": [",".join(p.warnings) for p in predictions],
+                "market_spread_home_at_pred": [p.market_spread_home for p in predictions],
+                "market_total_at_pred": [p.market_total_points for p in predictions],
+                "market_prob_home_at_pred": [p.market_prob_home for p in predictions],
             },
             schema_overrides={
+                "market_spread_home_at_pred": pl.Float64,
+                "market_total_at_pred": pl.Float64,
+                "market_prob_home_at_pred": pl.Float64,
                 "home_qb_id": pl.Int64,
                 "away_qb_id": pl.Int64,
                 "predicted_at_utc": pl.Datetime("us", "UTC"),
@@ -728,6 +762,7 @@ class FootballLedgerScore:
     n_games: int
     player_mae: dict[str, float]
     n_player_rows: int
+    market: FootballMarketEvaluation | None = None
 
 
 def score_football_prediction_ledger(settings: Settings) -> FootballLedgerScore:
@@ -763,8 +798,13 @@ def score_football_prediction_ledger(settings: Settings) -> FootballLedgerScore:
         market_probs=market_probs,
     )
     player_mae, n_players = _score_player_ledger(settings)
+    market_eval = evaluate_football_market(ledger, pl.read_parquet(games_path))
     return FootballLedgerScore(
-        report=report, n_games=joined.height, player_mae=player_mae, n_player_rows=n_players
+        report=report,
+        n_games=joined.height,
+        player_mae=player_mae,
+        n_player_rows=n_players,
+        market=market_eval,
     )
 
 

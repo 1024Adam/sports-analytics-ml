@@ -35,6 +35,7 @@ class FootballIngestionReport(BaseModel):
     qb_log_rows: int = 0
     player_log_rows: int = 0
     snap_log_rows: int = 0
+    micro_log_rows: int = 0
     availability_rows: int = 0
     has_snap_counts: dict[int, bool] = Field(default_factory=dict)
     has_ngs: dict[int, bool] = Field(default_factory=dict)
@@ -120,7 +121,7 @@ class NflverseIngestor:
 
         players = self.client.try_fetch_asset("players")
         missing: set[str] = set() if players is not None else {"players"}
-        counts = {"games": 0, "team": 0, "qb": 0, "player": 0, "snap": 0, "avail": 0}
+        counts = {"games": 0, "team": 0, "qb": 0, "player": 0, "snap": 0, "micro": 0, "avail": 0}
         has_snaps: dict[int, bool] = {}
         has_ngs: dict[int, bool] = {}
         has_inj: dict[int, bool] = {}
@@ -134,6 +135,9 @@ class NflverseIngestor:
             if pbp is not None and windowed:
                 ids = set(season_sched["game_id"].to_list())
                 pbp = pbp.filter(pl.col("game_id").is_in(list(ids)))
+            ngs = self.client.fetch_nextgen_stats("passing", season)
+            ngs_rush = self.client.fetch_nextgen_stats("rushing", season)
+            ngs_rec = self.client.fetch_nextgen_stats("receiving", season)
             starting_qbs = self._starting_qbs(pbp) if _present(pbp) else None
 
             counts["games"] = self.reconciler.reconcile_games(
@@ -141,6 +145,12 @@ class NflverseIngestor:
             ).height
             if _present(pbp) and pbp is not None:
                 counts["team"] = self.reconciler.reconcile_team_game_logs(pbp).height
+                counts["micro"] = self.reconciler.reconcile_team_pbp_micro_logs(
+                    pbp, ngs_passing=ngs, ngs_rushing=ngs_rush, ngs_receiving=ngs_rec
+                ).height
+                self.reconciler.reconcile_player_pbp_micro_logs(
+                    pbp, ngs_rushing=ngs_rush, ngs_receiving=ngs_rec
+                )
                 counts["qb"] = self.reconciler.reconcile_qb_game_logs(pbp).height
             else:
                 missing.add("pbp")
@@ -150,7 +160,6 @@ class NflverseIngestor:
             injuries = self.client.try_fetch_asset("injuries", season, is_active_season=active)
             depth = self.client.try_fetch_asset("depth_charts", season, is_active_season=active)
             weekly = self.client.try_fetch_asset("rosters_weekly", season, is_active_season=active)
-            ngs = self.client.fetch_nextgen_stats("passing", season)
 
             has_snaps[season] = _present(snaps)
             has_inj[season] = _present(injuries)
@@ -177,6 +186,7 @@ class NflverseIngestor:
             qb_log_rows=counts["qb"],
             player_log_rows=counts["player"],
             snap_log_rows=counts["snap"],
+            micro_log_rows=counts["micro"],
             availability_rows=counts["avail"],
             has_snap_counts=has_snaps,
             has_ngs=has_ngs,

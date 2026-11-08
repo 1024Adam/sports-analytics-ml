@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from sports_ml.sports.football.models.market_eval import (
+    FootballMarketEvaluation,
+    evaluate_football_market,
+)
 from sports_ml.sports.football.models.predictor import (
     FootballLedgerScore,
     FootballMatchupPrediction,
@@ -33,6 +37,8 @@ from sports_ml.sports.football.models.training import (
 )
 
 __all__ = [
+    "FootballMarketEvaluation",
+    "evaluate_football_market",
     "BootstrapInterval",
     "FitBoundaryAudit",
     "FootballStage1BacktestResult",

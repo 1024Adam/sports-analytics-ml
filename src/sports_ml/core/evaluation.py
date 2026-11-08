@@ -20,7 +20,7 @@ from sports_ml.core.calibration import (
 )
 
 if TYPE_CHECKING:
-    from sports_ml.core.market import MarketEdgeReport
+    from sports_ml.core.market import LineBettingReport, MarketEdgeReport
 
 
 class EvaluationMetrics(BaseModel):
@@ -370,7 +370,52 @@ def compare_multiclass_against_baselines(
 
 
 # Rebuild models referencing forward-declared MarketEdgeReport at import time
+from sports_ml.core.market import LineBettingReport as _LineBettingReport  # noqa: E402
 from sports_ml.core.market import MarketEdgeReport as _MarketEdgeReport  # noqa: E402
 
 BenchmarkComparisonReport.model_rebuild(_types_namespace={"MarketEdgeReport": _MarketEdgeReport})
 MulticlassBenchmarkReport.model_rebuild(_types_namespace={"MarketEdgeReport": _MarketEdgeReport})
+
+
+class LineMarketReport(BaseModel):
+    """ATS and over/under evaluation of model-implied margins and totals vs. closing lines."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    spread: LineBettingReport | None = None
+    total: LineBettingReport | None = None
+
+
+def evaluate_line_markets(
+    *,
+    model_margin: NDArray[np.float64],
+    actual_margin: NDArray[np.float64],
+    closing_spread_home: NDArray[np.float64] | None = None,
+    taken_spread_home: NDArray[np.float64] | None = None,
+    model_total: NDArray[np.float64] | None = None,
+    actual_total: NDArray[np.float64] | None = None,
+    closing_total: NDArray[np.float64] | None = None,
+    taken_total: NDArray[np.float64] | None = None,
+) -> LineMarketReport:
+    """Build a `LineMarketReport`; a market is skipped when none of its closing lines exist."""
+    from sports_ml.core.market import evaluate_spread_betting, evaluate_total_betting
+
+    spread = None
+    if closing_spread_home is not None and np.isfinite(closing_spread_home).any():
+        spread = evaluate_spread_betting(
+            model_margin, closing_spread_home, actual_margin, taken_spread_home=taken_spread_home
+        )
+    total = None
+    if (
+        closing_total is not None
+        and model_total is not None
+        and actual_total is not None
+        and np.isfinite(closing_total).any()
+    ):
+        total = evaluate_total_betting(
+            model_total, closing_total, actual_total, taken_total=taken_total
+        )
+    return LineMarketReport(spread=spread, total=total)
+
+
+LineMarketReport.model_rebuild(_types_namespace={"LineBettingReport": _LineBettingReport})

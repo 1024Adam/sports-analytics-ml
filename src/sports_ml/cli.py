@@ -58,6 +58,7 @@ from sports_ml.sports.football.features import (
     build_and_persist_football_stage2_features,
 )
 from sports_ml.sports.football.ingestion import (
+    FootballOddsIngestor,
     FootballSilverReconciler,
     NflverseClient,
     NflverseIngestor,
@@ -175,6 +176,8 @@ def _run_football_ingestion(
         start_date=_parse_iso_date(start_date, "--start-date"),
         end_date=_parse_iso_date(end_date, "--end-date"),
     )
+    odds_ingestor = FootballOddsIngestor(settings.paths.raw_dir / "odds")
+    odds_ingestor.persist_to_silver(settings.paths.silver_dir / "football", offline=offline)
     if not offline:
         _sync_football_forecasts(settings, reconciler.read_games())
     return report
@@ -228,6 +231,7 @@ def _run_football_train(settings: Settings, *, version: str, include_stage2: boo
 
 def _run_football_backtest(settings: Settings, *, stage: str, n_splits: int) -> None:
     from sports_ml.sports.football.models import (
+        evaluate_football_market,
         evaluate_football_stage2_holdout,
         run_football_stage1_walk_forward_backtest,
     )
@@ -257,7 +261,11 @@ def _run_football_backtest(settings: Settings, *, stage: str, n_splits: int) -> 
             )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    render_football_backtest(console, result, stage2_metrics)
+    market = None
+    if result is not None:
+        games_path = settings.paths.silver_dir / "football" / "games.parquet"
+        market = evaluate_football_market(result.oof_predictions, pl.read_parquet(games_path))
+    render_football_backtest(console, result, stage2_metrics, market)
 
 
 def _run_football_predict(

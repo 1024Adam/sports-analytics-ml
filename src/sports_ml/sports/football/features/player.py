@@ -32,6 +32,7 @@ from sports_ml.sports.football.constants import (
     DRAFT_SHARE_BONUS,
     POSITION_PRIORS,
     STAGE2_SHRINK_K,
+    YPRR_PRIORS,
     normalize_football_team,
 )
 from sports_ml.sports.football.features.player_columns import (
@@ -60,6 +61,8 @@ LEAGUE_RUSH_YDS_PG: Final[float] = 115.0
 LEAGUE_REC_YDS_PG: Final[float] = 190.0
 LEAGUE_PLAYS_PG: Final[float] = 63.0
 LEAGUE_PASS_RATE: Final[float] = 0.58
+YPRR_SHRINK_K: Final[float] = 80.0
+RYOE_SHRINK_K: Final[float] = 40.0
 
 
 def normalize_position(raw: object) -> str | None:
@@ -93,6 +96,10 @@ class _Player:
     pass_yds: float = 0.0
     pass_td: float = 0.0
     ints: float = 0.0
+    routes: float = 0.0
+    ryoe: float = 0.0
+    ryoe_att: float = 0.0
+    ngs_seen: int = 0
     t_targets: float = 0.0
     t_air: float = 0.0
     t_rz_t: float = 0.0
@@ -121,6 +128,9 @@ class _Player:
             "pass_yds",
             "pass_td",
             "ints",
+            "routes",
+            "ryoe",
+            "ryoe_att",
             "t_targets",
             "t_air",
             "t_rz_t",
@@ -250,10 +260,18 @@ def build_football_stage2_features(
     as_of_time_utc: datetime | None = None,
     starting_qbs: pl.DataFrame | None = None,
     environment: pl.DataFrame | None = None,
+    player_micro: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build the Stage 2 Gold matrix (`identifiers + STAGE2_PLAYER_FEATURE_COLUMNS + targets`)."""
     avail = _availability_index(availability)
     draft = _draft_lookup(draft_picks)
+    ngs_by: dict[tuple[int, str, int], tuple[float, float]] = {}
+    if player_micro is not None and not player_micro.is_empty():
+        for r in player_micro.filter(pl.col("ngs_rush_attempts") > 0).iter_rows(named=True):
+            ngs_by[(int(r["game_id"]), str(r["team"]), int(r["player_id"]))] = (
+                float(r["ngs_ryoe_sum"]),
+                float(r["ngs_rush_attempts"]),
+            )
     env_penalty: dict[int, float] = {}
     if environment is not None and not environment.is_empty():
         env_penalty = {
@@ -435,6 +453,17 @@ def build_football_stage2_features(
             "route_participation": snap
             if pos in ("WR", "TE")
             else (snap * 0.5 if pos == "RB" else 0.0),
+            "yprr": shrink_scalar(
+                _ratio(st.rec_yds, st.routes), st.routes, YPRR_PRIORS[pos], YPRR_SHRINK_K
+            )
+            if pos in YPRR_PRIORS
+            else 0.0,
+            "rush_yards_over_expected_per_att": shrink_scalar(
+                _ratio(st.ryoe, st.ryoe_att), st.ryoe_att, 0.0, RYOE_SHRINK_K
+            )
+            if pos in ("RB", "QB")
+            else 0.0,
+            "ngs_is_imputed": int(st.ngs_seen == 0),
             "rz_target_share": rz_t_share if pos != "QB" else 0.0,
             "carry_share": carry_share if pos in ("RB", "QB") else 0.0,
             "gl_carry_share": gl_share if pos in ("RB", "QB") else 0.0,
@@ -598,6 +627,23 @@ def build_football_stage2_features(
                     st.pass_yds += _f(r, "pass_yards")
                     st.pass_td += _f(r, "pass_tds")
                     st.ints += _f(r, "interceptions")
+                    if pos in YPRR_PRIORS:
+                        snaps = r.get("snaps")
+                        plays_obs = team_style_obs.get((gid, team))
+                        db_rate = (
+                            plays_obs[1] / plays_obs[0]
+                            if plays_obs is not None and plays_obs[0] > 0
+                            else LEAGUE_PASS_RATE
+                        )
+                        if snaps is not None:
+                            st.routes += float(snaps) * db_rate  # type: ignore[arg-type]
+                        elif snap_raw is not None and plays_obs is not None:
+                            st.routes += float(snap_raw) * plays_obs[1]  # type: ignore[arg-type]
+                    ngs = ngs_by.get((gid, team, pid))
+                    if ngs is not None:
+                        st.ryoe += ngs[0]
+                        st.ryoe_att += ngs[1]
+                        st.ngs_seen += 1
                     if tot is not None:
                         st.t_targets += tot["targets"]
                         st.t_air += tot["air"]
@@ -669,6 +715,7 @@ def build_football_stage2_features(
         "pos_is_wr",
         "pos_is_te",
         "p_active_is_imputed",
+        "ngs_is_imputed",
         "is_debut_flag",
         "career_games_pre",
     ):

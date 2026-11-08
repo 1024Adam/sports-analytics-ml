@@ -206,10 +206,11 @@ sports-analytics-ml/
 │           ├── football/            # NFL FOOTBALL PLUGIN (Phase 6)
 │           │   ├── adapter.py       # FootballAdapter implementing SportAdapter
 │           │   ├── constants.py     # 32 teams, stadium registry, Elo/prior parameters, Silver schemas
-│           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor, weather (Open-Meteo forecasts)
+│           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor, weather (Open-Meteo forecasts), pbp_micro + ngs (micro logs), odds (closing-line archive/live snapshot)
 │           │   ├── models/
 │           │   │   ├── stage1_game.py   # Calibrated win prob + expected scores, walk-forward backtest
 │           │   │   ├── stage2_player.py # QB/RB/WR/TE projections, opportunity-conserving reconciliation
+│           │   │   ├── market_eval.py   # Evaluation-only closing-odds benchmark, ATS/total/CLV
 │           │   │   ├── predictor.py     # FootballMatchupPredictor, ledger, QB warnings, live scoring
 │           │   │   └── training.py      # Fingerprinted artifacts/football bundle persistence
 │           │   └── features/
@@ -218,6 +219,7 @@ sports-analytics-ml/
 │           │       ├── team.py             # Rolling/EWMA EPA, ridge SoS, luck signals, cold-start shrinkage
 │           │       ├── qb.py               # Starting-QB features, draft priors, qb_value for the Elo hook
 │           │       ├── schedule_context.py # Per-game rest/travel/round context + Elo & QB-adjusted Elo
+│           │       ├── micro.py            # Rolling PROE/pace/pressure-proxy/CPOE/red-zone micro features
 │           │       ├── environment.py      # Wind/cold/precip penalties, roof/surface/altitude interactions, env shifts
 │           │       ├── availability.py     # Position-group availability indices, empirical start probabilities
 │           │       ├── player.py           # Stage 2 player Gold rows (shares, rates, defense vs position, p_active)

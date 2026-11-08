@@ -29,7 +29,7 @@ from scipy.stats import poisson
 from sklearn.linear_model import Ridge
 
 from sports_ml.config import RANDOM_SEED
-from sports_ml.sports.football.constants import POSITION_PRIORS
+from sports_ml.sports.football.constants import POSITION_PRIORS, YPRR_PRIORS
 from sports_ml.sports.football.features.player_columns import (
     STAGE2_PLAYER_FEATURE_COLUMNS,
     STAGE2_TARGET_COLUMNS,
@@ -43,6 +43,9 @@ DEFENSE_SENSITIVITY: Final[float] = 0.5
 GAMMA_RECONCILE: Final[float] = 0.50
 SCRIPT_FLOOR_PASS: Final[float] = 0.10
 SCRIPT_FLOOR_RUSH: Final[float] = 0.08
+RYOE_BLEND: Final[float] = 0.25
+YPRR_BLEND: Final[float] = 0.15
+YPRR_MULT_BOUNDS: Final[tuple[float, float]] = (0.85, 1.15)
 ENV_PASSING_YARDS_SENSITIVITY: Final[float] = 0.05
 ENV_PASSING_YARDS_FLOOR: Final[float] = 0.75
 MAX_REDISTRIBUTION: Final[float] = 1.6
@@ -513,7 +516,21 @@ class Stage2FootballPlayerModel:
             .agg(pl.col("_w").sum().alias("_s"))
         )
         qb_norm = _f64(df.join(qb_sum, on=["game_id", "team"], how="left"), "_s", 0.0)
-        carry_rate = np.where(is_qb, _f64(df, "qb_rush_ypc"), _f64(df, "rush_ypc"))
+        ryoe = _f64(df, "rush_yards_over_expected_per_att")
+        carry_rate = (
+            np.where(is_qb, _f64(df, "qb_rush_ypc"), _f64(df, "rush_ypc")) + RYOE_BLEND * ryoe
+        )
+        yprr_prior = np.array([YPRR_PRIORS.get(p, np.nan) for p in pos])
+        yprr_mult = np.where(
+            np.isnan(yprr_prior),
+            1.0,
+            np.clip(
+                1.0
+                + YPRR_BLEND
+                * (_f64(df, "yprr") / np.where(np.isnan(yprr_prior), 1.0, yprr_prior) - 1.0),
+                *YPRR_MULT_BOUNDS,
+            ),
+        )
         carry_td = np.where(is_qb, _f64(df, "qb_rush_td_per_carry"), _f64(df, "rush_td_per_carry"))
         return df.with_columns(
             pl.Series("proj_pass_att", np.where(is_qb, team_pass * _safe_div(qb_w, qb_norm), 0.0)),
@@ -531,7 +548,7 @@ class Stage2FootballPlayerModel:
             pl.Series("r_ypc", carry_rate * rush_idx),
             pl.Series("r_td_carry", carry_td * mu_scale * np.where(is_qb, 1.0, gl_mult)),
             pl.Series("r_catch", _f64(df, "catch_rate")),
-            pl.Series("r_ypt", _f64(df, "rec_yds_per_target") * rec_idx * env_mult),
+            pl.Series("r_ypt", _f64(df, "rec_yds_per_target") * rec_idx * env_mult * yprr_mult),
             pl.Series(
                 "r_td_tgt", _f64(df, "rec_td_per_target") * mu_scale * np.where(is_qb, 0.0, rz_mult)
             ),

@@ -30,6 +30,11 @@ from sports_ml.sports.football.features.environment import (
     ENVIRONMENT_FEATURE_COLUMNS,
     build_environment_features,
 )
+from sports_ml.sports.football.features.micro import (
+    STAGE1_MICRO_FEATURE_COLUMNS,
+    attach_micro_features,
+    build_micro_team_features,
+)
 from sports_ml.sports.football.features.player import build_football_stage2_features
 from sports_ml.sports.football.features.player_columns import STAGE2_PLAYER_FEATURE_COLUMNS
 from sports_ml.sports.football.features.qb import (
@@ -181,6 +186,7 @@ def _stage1_candidate_columns() -> tuple[str, ...]:
     cols.extend(ELO_COLUMNS)
     cols.extend(ENVIRONMENT_FEATURE_COLUMNS)
     cols.extend(AVAILABILITY_FEATURE_COLUMNS)
+    cols.extend(STAGE1_MICRO_FEATURE_COLUMNS)
     seen: dict[str, None] = {}
     for c in cols:
         seen.setdefault(c, None)
@@ -219,8 +225,12 @@ def build_football_stage1_features(
     snap_logs: pl.DataFrame | None = None,
     weather: pl.DataFrame | None = None,
     as_of_time_utc: datetime | None = None,
+    micro_logs: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Build the Stage 1 Gold matrix (identifiers, labels, `STAGE1_FEATURE_COLUMNS`).
+
+    `micro_logs` is Silver `team_pbp_micro_logs`; without it the micro columns resolve to their
+    league priors and are flagged `*_is_imputed = 1`.
 
     `weather` is the per-game frame from `build_game_weather` (forecast or flagged observed
     proxy); without it outdoor weather is neutral and flagged `weather_is_imputed`. `snap_logs`
@@ -277,6 +287,7 @@ def build_football_stage1_features(
         .sort("start_time_utc", "event_seq", "game_id")
     )
     out = attach_availability_features(out, availability_frame)
+    out = attach_micro_features(out, build_micro_team_features(games, micro_logs))
 
     diff_exprs: list[pl.Expr] = []
     for m in TEAM_METRICS:
@@ -352,6 +363,7 @@ def build_and_persist_football_gold_features(
         draft_picks=draft,
         snap_logs=read("snap_game_logs.parquet"),
         weather=load_football_game_weather(settings, games),
+        micro_logs=read("team_pbp_micro_logs.parquet"),
     )
     if persist:
         gold = settings.paths.gold_dir / "football"
@@ -391,6 +403,11 @@ def build_and_persist_football_stage2_features(
         availability=pl.read_parquet(avail_path) if avail_path.exists() else None,
         draft_picks=pl.read_parquet(draft_path) if draft_path.exists() else None,
         stage1_df=stage1_df,
+        player_micro=(
+            pl.read_parquet(silver / "player_pbp_micro_logs.parquet")
+            if (silver / "player_pbp_micro_logs.parquet").exists()
+            else None
+        ),
     )
     if persist:
         gold = settings.paths.gold_dir / "football"

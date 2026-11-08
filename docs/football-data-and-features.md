@@ -94,7 +94,9 @@ See `SILVER_FOOTBALL_TEAM_LOGS_SCHEMA`, `SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA`, `S
 
 * **Snap logs** (`snap_game_logs.parquet`, Milestone 27, from `snap_counts` + the `pfr_id -> gsis_id` crosswalk): one row per `(game_id, team, player_id)` for **every** position (linemen, linebackers, defensive backs included) with `position`, `offense_snaps/offense_pct`, `defense_snaps/defense_pct`. `player_game_logs` only covers stat-sheet players, so position-group availability weights come from here.
 
-Uniqueness: `(game_id, team)`, `(game_id, player_id)`, `(game_id, team, player_id)` for snap logs, `(game_id, team, qb_id)` (`FootballAdapter.validate_team_game_logs` / `validate_participant_schema`).
+* **Micro logs** (`team_pbp_micro_logs.parquet`, `player_pbp_micro_logs.parquet`, Milestone 28): offense-side additive numerators/denominators per `(game_id, team)` and per `(game_id, team, player_id)` built from play-by-play and Next Gen Stats; see section 12.
+
+Uniqueness: `(game_id, team)`, `(game_id, player_id)`, `(game_id, team, player_id)` for snap and player micro logs, `(game_id, team, qb_id)` (`FootballAdapter.validate_team_game_logs` / `validate_participant_schema`).
 
 ### 3.3 `team_week_availability.parquet` (as-of snapshots)
 One row per `(game_id, team, player_id, source, as_of_time_utc)` with `source` $\in \{\text{injury\_report}, \text{depth\_chart}, \text{inactives}\}`, `report_status`, `practice_status`, `depth_rank`, and `is_inactive`. Stamps are conservative (a later stamp can only hide information):
@@ -252,3 +254,51 @@ Forecasts and observations are therefore never mixed inside a season, raw `forec
 | After (both) | 0.6241 | 0.2173 | 0.0207 | 10.179 | 11.135 |
 
 Season-bootstrap 95% intervals of the after-minus-before differences all include zero: log loss `+0.0000 [-0.0017, +0.0019]`, margin MAE `+0.032 [-0.006, +0.082]`, total MAE `-0.018 [-0.064, +0.034]`. Stage 1 therefore does not regress; the features mainly matter for Stage 2 passing environments and as inputs for the in-season signals (forecasts and live availability) that the historical proxy cannot show.
+
+## 12. Play-by-Play Micro-Features (Milestone 28)
+
+**Silver micro logs** (`ingestion/pbp_micro.py`, `ingestion/ngs.py`; written by `ingest --sport football`, with Next Gen Stats fetched per season). Every column is an additive numerator or denominator, so rolling rates are exposure-weighted and the defensive view of a metric is the opponent's row.
+
+* `epa_total` / `plays` use exactly the `team_game_logs` scrimmage definition and reconcile to `off_epa_total` / `off_plays` (tested to `1e-6`). All other metrics exclude QB kneels and spikes.
+* **Neutral situation** (`NeutralSituationConfig`): win probability in `[0.20, 0.80]`, `|score margin| <= 14`, more than 120 s left in the half, regulation, and down `<= 3`. It feeds `neutral_seconds` / `neutral_seconds_plays` (seconds from a snap to the next snap of the same drive, kept only when in `(0, 60]` s), `proe_num` / `proe_den` (`pass - xpass`, with nflfastR's `xpass`), and `neutral_epa`.
+* Pass game: `cpoe_*`, `air_yards_*`, `adot_*` (targeted plays), `yac_oe_*` (`yards_after_catch - xyac_mean_yardage`), `pressure_num`, `sacks`. nflverse play-by-play has **no charted pressure or time-to-throw**, so `pressure_rate` is a proxy, `(sack or qb_hit) / dropbacks`; time to throw comes only from NGS. Situational: red-zone and third-down EPA, `explosive_pass`, `run_stuffs`, penalty-adjusted EPA (`nopen_*`), two-minute EPA when tied or trailing, and fourth-down go rate in the go zone (`ydstogo <= 4`, own side of midfield plus 15, win probability in the garbage-time band).
+* **NGS** (`ngs_*`; passing: time to throw and CPOE weighted by attempts, rushing: rush yards over expected, receiving: separation and YAC over expected weighted by targets/receptions): weekly rows from 2016 on (`week == 0` season rows are ignored). `has_ngs = 0` marks team-games without NGS rows, so seasons before 2016 carry zeros and resolve to the league prior.
+* **Player micro logs**: receiver targets, air yards, receptions, receiving yards, YAC over expected, rush attempts/yards, plus NGS rushing/receiving totals (`ngs_ryoe_sum`, `ngs_rush_attempts`, `ngs_separation_sum`, `ngs_targets`).
+
+**Rolling team features** (`features/micro.py`): each metric is the exposure-weighted rate over the team's previous 8 games of the season (`shift(1)` inside `[team, season]`), shrunk with `bayesian_shrinkage` (`k = 8` games that carry the metric's exposure) toward `0.5 * last season's team rate + 0.5 * last season's league rate` (league default for the first season of data). `micro_is_imputed` / `ngs_is_imputed` flag team-games without any micro / NGS history; imputed rows are exact league priors, never NaN. Per-team values are offense-only or `off - def` / `def - off` edges so higher is better (pace stays raw seconds per play; `fourth_down_go_over_expected` subtracts last season's league go rate).
+
+**Stage 1 ships five matchup columns** (`STAGE1_MICRO_FEATURE_COLUMNS`): `diff_proe`, `diff_pressure_rate_edge`, `diff_neutral_pace`, `diff_red_zone_epa`, `diff_cpoe_vs_coverage` (net passing CPOE minus CPOE allowed), plus `home_/away_micro_is_imputed`. The wider set (`MICRO_FEATURE_COLUMNS`: 17 diffs including NGS time to throw, rush yards over expected, separation, third-down, penalty-adjusted and two-minute EPA, plus `pace_total_neutral` / `proe_total`) is built by `build_micro_team_features` + `attach_micro_features` but kept out of Gold because it did not improve the backtest:
+
+| Real nflverse data, 2012-2026, 10 test seasons, `min_train_seasons = 5` | Log loss | Brier | Margin MAE | Total MAE |
+| --- | --- | --- | --- | --- |
+| Before (Milestone 27 features) | 0.6241 | 0.2173 | 10.179 | 11.135 |
+| + five shipped micro diffs | 0.6240 | 0.2172 | 10.159 | 11.112 |
+| + all 17 micro diffs + totals | 0.6246 | 0.2175 | 10.160 | 11.116 |
+| + play-by-play-only subset (no NGS) | 0.6252 | 0.2177 | 10.180 | 11.108 |
+
+Season-bootstrap 95% intervals of the shipped-minus-before difference: log loss `-0.0002 [-0.0006, +0.0003]`, margin MAE `-0.016 [-0.047, +0.015]`, total MAE `-0.023 [-0.043, -0.003]` (a small gain in expected totals; no regression anywhere).
+
+**Stage 2** (`features/player.py`): `yprr` (receiving yards per route run, a **proxy**: routes = offensive snaps x the team's dropback share, shrunk toward `YPRR_PRIORS` with `k = 80`), `rush_yards_over_expected_per_att` (NGS rush yards over expected per carry, shrunk toward 0 with `k = 40`, RB/QB only), and `ngs_is_imputed` join the existing `air_yards_share`/`target_share`. All three are updated only after a game's rows are emitted. `Stage2FootballPlayerModel` adds `0.25 * rush_yards_over_expected_per_att` to yards per carry and scales yards per target by `1 + 0.15 * (yprr / prior - 1)` (clipped to 0.85-1.15). Holdout MAE (last three seasons with player rows) before to after: RB rush yards `21.064 -> 21.014`, WR receiving yards `23.673 -> 23.593`, all other stats unchanged. Real separation and routes charts are not available, so `separation` only appears in the experimental team columns.
+
+## 13. Closing-Odds Benchmark, De-Vigging & ATS / Total Evaluation (Milestone 29)
+
+**Ingestion** (`ingestion/odds.py`, `FootballOddsIngestor`; runs at the end of `ingest --sport football`). Three sources fill the nullable `market_*` columns of Silver `games.parquet` (`market_home_decimal_odds`, `market_away_decimal_odds`, `market_prob_home`, `market_prob_away`, `market_spread_home`, `market_total_points`):
+
+1. The quarantined nflverse schedule columns always win (a value they provide is never overwritten).
+2. An optional local archive `data/raw/odds/nfl_historical_odds.csv.gz` (or `.csv`) fills what the schedule lacks. Columns: `nflverse_game_id` or `game_date,home_team,away_team` (full names and legacy codes are normalized); `home_moneyline`/`away_moneyline` (American) or `home_decimal_odds`/`away_decimal_odds`; `spread_home` (betting convention, negative when the home team is favored) or nflverse-style `spread_line` (positive when home is favored); `total_points` or `total_line`. Rows match by id, else by teams with a kickoff date within one day.
+3. An optional `THE_ODDS_API_KEY` snapshot (`h2h,spreads,totals`, averaged across bookmakers) fills only games that are not final; it is skipped silently without a key, with `--offline`, or on any API failure.
+
+Moneyline pairs are **power de-vigged** (`core.market.devig_probabilities`), so `market_prob_home` and `market_prob_away` lie in `(0, 1)` and sum to 1 within `1e-9`. The two-sided quote (odds and probabilities) is taken whole from a single source or not at all.
+
+**Firewall.** Market data is evaluation-only. `STAGE1_FEATURE_COLUMNS` / `STAGE2_FEATURE_COLUMNS` contain no `market_*`, `*odds*`, `*spread*`, `*closing*`, `*moneyline*` names and none starting with `spread`/`total`; every feature builder strips `market_*`/`obs_weather_*` from its inputs. Tests mutate every market column and assert bit-for-bit identical Gold features, probabilities, and expected scores while the market reports change.
+
+**Evaluators** (`core/market.py`, additive; wrapped by `core.evaluation.evaluate_line_markets`):
+
+* `evaluate_spread_betting(model_margin, closing_spread_home, actual_margin)`: edge = `model_margin + spread_home` (positive favors the home side). The home side covers when `actual_margin + spread_home > 0`, the away side when `< 0`, and a whole-point line pushes at exactly 0 (half-point lines never push). Hit rate excludes pushes; ROI is per unit staked at `-110` (win `+100/110`, loss `-1`, push refunded), and the break-even win rate is `110/210 = 52.38%`.
+* `evaluate_total_betting(model_total, closing_total, actual_total)`: edge = `model_total - closing_total` (positive bets the over); pushes at the number.
+* Buckets by disagreement `tau in {1, 2, 3}` points (a bet is placed when `|edge| >= tau`) report `W-L-P`, hit rate, ROI, mean `|edge|`, and **key-number** handling: bets whose closing spread is 3, 6, 7 or 10 in absolute value (`FOOTBALL_KEY_NUMBERS`) and how many of them pushed. The report also states whole- vs half-point line counts and the model's versus the closing line's MAE.
+* **Closing-line value** (`closing_line_value`): a home bet taken at `+3` that closes at `+1` earned `+2` points (an over taken at 44 that closes at 46 earned `+2`; away/under flip the sign). CLV needs a line at bet time, so it appears only where one exists: the live ledger records `market_spread_home_at_pred`, `market_total_at_pred`, and `market_prob_home_at_pred`, and `score-predictions` compares them with the final closing line. Backtests have no bet-time line and omit CLV; predictions made for already-final games record the closing line itself (CLV 0).
+
+**CLI.** `backtest --sport football` (Stage 1) and `score-predictions --sport football` print, when odds exist: *De-Vigged Market Closing Line* (model vs market on the same games), *Fundamental vs. Market Disagreement* slices, *Against the Spread (ATS)*, and *Over / Under vs. Closing Total*; without odds they print "market benchmark skipped".
+
+Reference run (real nflverse closing lines, 2012-2026 Silver, last six seasons held out): market log loss `0.6128` / Brier `0.2126` versus Stage 1 `0.6263` / `0.2182`; ATS hit rate `48.4%` (1+ pt), `50.8%` (2+), `51.5%` (3+), all below the 52.38% break-even (ROI `-7.4%`, `-3.0%`, `-1.6%`); over/under `48-49%`. Model margin MAE `10.03` versus closing-line `9.75`; total MAE `11.04` versus `10.33`. In other words Stage 1 does not beat the closing line; the closing market remains the benchmark to close in on.

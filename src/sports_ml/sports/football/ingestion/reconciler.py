@@ -30,9 +30,11 @@ from sports_ml.sports.football.constants import (
     SILVER_FOOTBALL_AVAILABILITY_SCHEMA,
     SILVER_FOOTBALL_GAMES_SCHEMA,
     SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA,
+    SILVER_FOOTBALL_PLAYER_MICRO_SCHEMA,
     SILVER_FOOTBALL_QB_LOGS_SCHEMA,
     SILVER_FOOTBALL_SNAP_LOGS_SCHEMA,
     SILVER_FOOTBALL_TEAM_LOGS_SCHEMA,
+    SILVER_FOOTBALL_TEAM_MICRO_SCHEMA,
     canonical_game_id_from_nflverse,
     is_neutral_game,
     make_football_game_id,
@@ -48,6 +50,10 @@ from sports_ml.sports.football.ingestion.lineups import (
 from sports_ml.sports.football.ingestion.pbp_aggregates import (
     aggregate_filtered_offense,
     aggregate_player_pbp_usage,
+)
+from sports_ml.sports.football.ingestion.pbp_micro import (
+    build_player_pbp_micro_logs,
+    build_team_pbp_micro_logs,
 )
 
 _EASTERN = ZoneInfo("America/New_York")
@@ -791,6 +797,14 @@ class FootballSilverReconciler:
         return self.silver_dir / "snap_game_logs.parquet"
 
     @property
+    def team_micro_path(self) -> Path:
+        return self.silver_dir / "team_pbp_micro_logs.parquet"
+
+    @property
+    def player_micro_path(self) -> Path:
+        return self.silver_dir / "player_pbp_micro_logs.parquet"
+
+    @property
     def availability_path(self) -> Path:
         return self.silver_dir / "team_week_availability.parquet"
 
@@ -889,6 +903,53 @@ class FootballSilverReconciler:
             incoming,
             schema=SILVER_FOOTBALL_PLAYER_LOGS_SCHEMA,
             unique_keys=["game_id", "player_id"],
+            sort_keys=["start_time_utc", "event_seq", "game_id", "team", "player_id"],
+            persist=persist,
+        )
+
+    def reconcile_team_pbp_micro_logs(
+        self,
+        pbp_df: pl.DataFrame,
+        *,
+        ngs_passing: pl.DataFrame | None = None,
+        ngs_rushing: pl.DataFrame | None = None,
+        ngs_receiving: pl.DataFrame | None = None,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Build `team_pbp_micro_logs.parquet` (pace, PROE, CPOE, pressure proxy, NGS totals)."""
+        incoming = build_team_pbp_micro_logs(
+            pbp_df,
+            self.read_games(),
+            ngs_passing=ngs_passing,
+            ngs_rushing=ngs_rushing,
+            ngs_receiving=ngs_receiving,
+        )
+        return self._upsert(
+            self.team_micro_path,
+            incoming,
+            schema=SILVER_FOOTBALL_TEAM_MICRO_SCHEMA,
+            unique_keys=["game_id", "team"],
+            sort_keys=["start_time_utc", "event_seq", "game_id", "team"],
+            persist=persist,
+        )
+
+    def reconcile_player_pbp_micro_logs(
+        self,
+        pbp_df: pl.DataFrame,
+        *,
+        ngs_rushing: pl.DataFrame | None = None,
+        ngs_receiving: pl.DataFrame | None = None,
+        persist: bool = True,
+    ) -> pl.DataFrame:
+        """Build `player_pbp_micro_logs.parquet` (receiving/rushing micro usage, NGS totals)."""
+        incoming = build_player_pbp_micro_logs(
+            pbp_df, self.read_games(), ngs_rushing=ngs_rushing, ngs_receiving=ngs_receiving
+        )
+        return self._upsert(
+            self.player_micro_path,
+            incoming,
+            schema=SILVER_FOOTBALL_PLAYER_MICRO_SCHEMA,
+            unique_keys=["game_id", "team", "player_id"],
             sort_keys=["start_time_utc", "event_seq", "game_id", "team", "player_id"],
             persist=persist,
         )

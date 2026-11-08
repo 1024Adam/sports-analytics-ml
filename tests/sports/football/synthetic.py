@@ -22,6 +22,10 @@ from sports_ml.sports.football.constants import (
 
 TEAMS = ["BUF", "MIA", "NE", "NYJ", "KC", "DEN", "LV", "LAC"]
 SEASON_BASES = {
+    2014: datetime(2014, 9, 7, 17, 0, tzinfo=UTC),
+    2015: datetime(2015, 9, 13, 17, 0, tzinfo=UTC),
+    2016: datetime(2016, 9, 11, 17, 0, tzinfo=UTC),
+    2017: datetime(2017, 9, 10, 17, 0, tzinfo=UTC),
     2021: datetime(2021, 9, 12, 17, 0, tzinfo=UTC),
     2022: datetime(2022, 9, 11, 17, 0, tzinfo=UTC),
     2023: datetime(2023, 9, 10, 17, 0, tzinfo=UTC),

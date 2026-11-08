@@ -54,5 +54,6 @@ Report the resulting metrics clearly:
 uv run sports-ml backtest --sport football --stage all --splits 2   # Stage 1 walk-forward + Stage 2 holdout MAE
 uv run sports-ml score-predictions --sport football
 ```
+- When closing odds exist, both commands also print the *De-Vigged Market Closing Line* comparison, *Fundamental vs. Market Disagreement*, *Against the Spread* (hit rate vs. the 52.38% `-110` break-even, pushes, key numbers 3/6/7/10, ROI) and *Over / Under* tables; the live ledger adds closing-line value. Report whether Stage 1 beats the market; the market never enters training.
 - `--splits N` holds out the newest `N` seasons: Stage 1 uses expanding, week-aligned season folds (ties excluded from probability metrics); Stage 2 reports position-level MAE (QB attempts/yards, RB carries/yards, WR/TE targets/yards) against a position-mean baseline.
 - `score-predictions` joins `football_predictions.parquet` to completed Silver games (log loss, Brier, accuracy vs. home-rate/coin-flip baselines, market-edge report when odds exist) and the player ledger to `player_game_logs` for projection MAE.

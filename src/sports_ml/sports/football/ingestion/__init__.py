@@ -26,6 +26,19 @@ from sports_ml.sports.football.ingestion.nflverse_client import (
     asset_available_for_season,
     derive_active_nfl_season,
 )
+from sports_ml.sports.football.ingestion.ngs import aggregate_player_ngs, aggregate_team_ngs
+from sports_ml.sports.football.ingestion.odds import (
+    FootballOddsIngestor,
+    merge_odds_into_games,
+    parse_historical_odds_csv,
+    parse_the_odds_api_payload,
+)
+from sports_ml.sports.football.ingestion.pbp_micro import (
+    NeutralSituationConfig,
+    build_player_pbp_micro_logs,
+    build_team_pbp_micro_logs,
+    neutral_situation_mask,
+)
 from sports_ml.sports.football.ingestion.reconciler import (
     QUARANTINED_SCHEDULE_COLUMNS,
     FootballSilverReconciler,
@@ -39,6 +52,16 @@ from sports_ml.sports.football.ingestion.reconciler import (
 )
 
 __all__ = [
+    "FootballOddsIngestor",
+    "merge_odds_into_games",
+    "parse_historical_odds_csv",
+    "parse_the_odds_api_payload",
+    "NeutralSituationConfig",
+    "aggregate_player_ngs",
+    "aggregate_team_ngs",
+    "build_player_pbp_micro_logs",
+    "build_team_pbp_micro_logs",
+    "neutral_situation_mask",
     "FootballIngestionReport",
     "FootballSilverReconciler",
     "FootballStartingQBResolver",

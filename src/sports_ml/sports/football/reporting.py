@@ -6,6 +6,8 @@ import polars as pl
 from rich.console import Console
 from rich.table import Table
 
+from sports_ml.core.market import LineBettingReport
+from sports_ml.sports.football.models.market_eval import FootballMarketEvaluation
 from sports_ml.sports.football.models.predictor import (
     FootballLedgerScore,
     FootballMatchupPrediction,
@@ -132,10 +134,115 @@ def _render_team_projections(console: Console, team: str, frame: pl.DataFrame) -
         console.print(table)
 
 
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1%}"
+
+
+def _render_line_report(console: Console, title: str, report: LineBettingReport) -> None:
+    table = Table(
+        title=(
+            f"{title} — {report.n_games} games with closing lines "
+            f"({report.n_whole_point_lines} whole-point / {report.n_half_point_lines} half-point), "
+            f"break-even {report.break_even_win_rate:.2%} at -110"
+        )
+    )
+    for col in (
+        "|Edge| >=",
+        "Bets",
+        "W-L-P",
+        "Hit Rate",
+        "ROI @ -110",
+        "Key # Bets / Pushes",
+        "CLV",
+    ):
+        table.add_column(col, justify="right")
+    for b in report.buckets:
+        clv = (
+            "-" if b.mean_clv is None else f"{b.mean_clv:+.2f} pts ({_pct(b.clv_positive_rate)} +)"
+        )
+        table.add_row(
+            f"{b.threshold:g} pts",
+            str(b.n_bets),
+            f"{b.wins}-{b.losses}-{b.pushes}",
+            _pct(b.hit_rate),
+            _pct(b.roi),
+            f"{b.key_bets} / {b.key_pushes}",
+            clv,
+        )
+    console.print(table)
+    console.print(
+        f"Model MAE {report.mean_abs_error_model:.2f} pts vs. closing-line MAE "
+        f"{report.mean_abs_error_closing:.2f} pts."
+    )
+
+
+def render_football_market(console: Console, evaluation: FootballMarketEvaluation | None) -> None:
+    """Print the de-vigged closing-line benchmark, model-vs-market disagreement, ATS and totals."""
+    if evaluation is None or not evaluation.has_market:
+        console.print("[dim]No closing odds available; market benchmark skipped.[/dim]")
+        return
+    rep = evaluation.moneyline
+    if rep is not None and rep.market_closing_baseline is not None:
+        table = Table(title=f"De-Vigged Market Closing Line ({evaluation.n_with_moneyline} games)")
+        table.add_column("Model", style="cyan")
+        for col in ("Log Loss", "Brier Score", "ECE", "Accuracy"):
+            table.add_column(col, justify="right")
+        edge = rep.market_edge_report
+        mkt = rep.market_closing_baseline
+        mod = rep.model
+        if edge is not None:
+            mod_ll, mod_bs, mod_ece, mod_acc = (
+                edge.model_log_loss, edge.model_brier_score, edge.model_ece, edge.model_accuracy
+            )  # fmt: skip
+        else:
+            mod_ll, mod_bs, mod_ece, mod_acc = mod.log_loss, mod.brier_score, mod.ece, mod.accuracy
+        table.add_row(
+            "Stage 1 (same games)",
+            f"{mod_ll:.4f}",
+            f"{mod_bs:.4f}",
+            f"{mod_ece:.4f}",
+            f"{mod_acc:.3f}",
+        )
+        table.add_row(
+            "Market closing line",
+            f"{mkt.log_loss:.4f}",
+            f"{mkt.brier_score:.4f}",
+            f"{mkt.ece:.4f}",
+            f"{mkt.accuracy:.3f}",
+        )
+        console.print(table)
+        if edge is not None:
+            dis = Table(title="Fundamental vs. Market Disagreement")
+            for col in (
+                "|P(Home) gap| >=",
+                "Games",
+                "Bets",
+                "Model Brier",
+                "Market Brier",
+                "Flat ROI",
+            ):
+                dis.add_column(col, justify="right")
+            for sl in edge.disagreement_slices:
+                dis.add_row(
+                    f"{sl.threshold:.0%}",
+                    str(sl.sample_count),
+                    str(sl.bet_count),
+                    f"{sl.model_brier_score:.4f}",
+                    f"{sl.market_brier_score:.4f}",
+                    f"{sl.flat_stake_roi:+.1%}",
+                )
+            console.print(dis)
+    if evaluation.lines.spread is not None:
+        _render_line_report(console, "Against the Spread (ATS)", evaluation.lines.spread)
+    if evaluation.lines.total is not None:
+        _render_line_report(console, "Over / Under vs. Closing Total", evaluation.lines.total)
+
+
 def render_football_backtest(
     console: Console,
     result: FootballStage1BacktestResult | None,
     stage2_metrics: dict[str, float] | None,
+    market: FootballMarketEvaluation | None = None,
 ) -> None:
     """Print Stage 1 benchmark and Stage 2 MAE tables."""
     if result is not None:
@@ -166,6 +273,8 @@ def render_football_backtest(
             f"Expected-score MAE: margin={sm.margin_mae:.2f}, total={sm.total_mae:.2f} "
             f"over {sm.n_games} games."
         )
+    if result is not None:
+        render_football_market(console, market)
     if stage2_metrics:
         table = Table(title="Stage 2 Player Projections — holdout MAE vs. position-mean baseline")
         table.add_column("Position / Stat", style="cyan")
@@ -202,6 +311,7 @@ def render_football_score(console: Console, score: FootballLedgerScore) -> None:
         f"{rep.coin_flip_baseline.accuracy:.3f}",
     )
     console.print(table)
+    render_football_market(console, score.market)
     if score.player_mae:
         ptable = Table(title=f"Player Projection MAE ({score.n_player_rows} matched rows)")
         ptable.add_column("Position / Stat", style="cyan")
