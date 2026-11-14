@@ -1,10 +1,10 @@
 # System Architecture Blueprint
 
-> **Related Documents**: [NHL Data & Feature Specification](./hockey-data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [MLB & NPB Baseball Data & Feature Specification](./baseball-data-and-features.md) | [Implementation Roadmap](./roadmap.md)
+> **Related Documents**: [NHL Data & Feature Specification](./hockey-data-and-features.md) | [EPL Soccer Data & Feature Specification](./soccer-data-and-features.md) | [MLB & NPB Baseball Data & Feature Specification](./baseball-data-and-features.md) | [NFL Football Data & Feature Specification](./football-data-and-features.md) | [Implementation Roadmap](./roadmap.md)
 
 ## 1. Executive Summary & Design Goals
 
-`sports-analytics-ml` is a modular, leak-free machine learning platform built in **Python 3.11+** using **Polars** and **PyArrow**. Supporting **NHL Hockey (`--sport hockey`)**, **EPL Soccer (`--sport soccer`)**, and **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`, Phase 5 Roadmap)**, the system ingests historical and daily schedule, roster, play-by-play/shot-quality/pitch-tracking, and specialist (goaltending/goalkeeping/starting pitching) data, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
+`sports-analytics-ml` is a modular, leak-free machine learning platform built in **Python 3.11+** using **Polars** and **PyArrow**. Supporting **NHL Hockey (`--sport hockey`)**, **EPL Soccer (`--sport soccer`)**, **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`, Phase 5 Roadmap)**, and **NFL Football (`--sport football --league nfl`, Phase 6 Roadmap)**, the system ingests historical and daily schedule, roster, play-by-play/shot-quality/pitch-tracking, and specialist (goaltending/goalkeeping/starting pitching) data, engineers strictly pre-game temporal features, and executes a **Two-Stage Prediction Pipeline**:
 
 1. **Stage 1 — Game Outcome Model (Mandatory)**: Produces calibrated win probabilities $P(\text{Home Win})$ and $P(\text{Away Win}) = 1 - P(\text{Home Win})$, alongside expected team scoring pace context, evaluated via walk-forward time-series backtesting (**Log Loss**, **Brier Score**, and Expected Calibration Error).
 2. **Stage 2 — Player Matchup Stat Projections (Optional)**: On-demand per-player predictions for both teams' active rosters in a matchup (Skaters: expected goals, assists, points, shots on goal, TOI, and point/goal probabilities; Goalies: expected shots against, saves, goals against, save %), conditioned on Stage 1 game environment and opponent strength.
@@ -118,14 +118,14 @@ To ensure adding future sports—specifically **Baseball (MLB)** and **Golf (PGA
 
 ### 4.1 How `core/` Generalizes Across Hockey, Baseball, and Golf
 
-| Architectural Dimension | `core/` Abstraction | Hockey (`sports/hockey/`) | Baseball (`sports/baseball/` - Future) | Golf (`sports/golf/` - Future) |
-| :--- | :--- | :--- | :--- | :--- |
-| **Competition Topology** | `head_to_head` (2 sides) & `multi_entrant_field` ($N$ entrants in an `event_id`) | `head_to_head` (Home Team vs. Away Team) | `head_to_head` (Home Team vs. Away Team, incl. same-day doubleheaders) | Both `multi_entrant_field` (120–156 golfers in 4-round event) & `head_to_head` (tournament/round matchups) |
-| **Temporal Ordering Key** | `(start_time_utc, event_seq, event_id)` (never assumes 1 game/day) | Regular season / playoff game timestamp | Handles Game 1 (`event_seq=1`) vs. Game 2 (`event_seq=2`) of MLB doubleheaders | Handles Round 1–4 (`event_seq=1..4`) sequential cut & tee-time ordering |
-| **Exposure Rate Basis** | `pregame_exposure_rate(num, denom, scale)` | Per 60 minutes of TOI (`scale=60.0`) | Per PA / BF (`scale=1.0`) for batters; per 9 IP (`scale=9.0`) for pitchers | Per 18-hole round (`scale=1.0` or `18.0`) for Strokes Gained categories |
-| **Key Specialist / Context Unit** | Pluggable `ContextModifier` & `StarterUnit` hooks | Starting Goalie GSAx + Arena coordinates | Starting Pitcher (FIP/xFIP/Stuff+) + Bullpen workload + Ballpark/Weather factors | Course-fit profile (driving distance/accuracy, grass type) + Field strength |
-| **Stage 1 Mandatory Output** | Calibrated event outcome probabilities | Binary $P(\text{Home Win})$ + implied team goals $(\hat{\lambda}_H, \hat{\lambda}_A)$ | Binary $P(\text{Home Win})$ + implied team runs $(\hat{\lambda}_H, \hat{\lambda}_A)$ | Group-normalized field probs $\sum_i P(\text{Win}_i)=1$, $P(\text{Top 5/10/20})$, $P(\text{Make Cut})$, or H2H $P(A \text{ beats } B)$ |
-| **Stage 2 Optional Output** | Conditioned participant stat projections | Skaters: $E[\text{G, A, PTS, SOG, TOI}]$; Goalies: $E[\text{SA, SV, GA}]$ | Batters: $E[\text{H, HR, TB, RBI, R, K}]$; Pitchers: $E[\text{IP, K, ER, Outs}]$ | Golfers: $E[\text{SG:OTT, SG:APP, SG:ATG, SG:PUTT, Birdies, GIR, Score}]$ |
+| Architectural Dimension | `core/` Abstraction | Hockey (`sports/hockey/`) | Baseball (`sports/baseball/` - Future) | Golf (`sports/golf/` - Future) | Football (`sports/football/`, NFL) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Competition Topology** | `head_to_head` (2 sides) & `multi_entrant_field` ($N$ entrants in an `event_id`) | `head_to_head` (Home Team vs. Away Team) | `head_to_head` (Home Team vs. Away Team, incl. same-day doubleheaders) | Both `multi_entrant_field` (120–156 golfers in 4-round event) & `head_to_head` (tournament/round matchups) | `head_to_head`; one game per team per week (`event_seq = 1`), byes, playoff bracket `WC/DIV/CON/SB` |
+| **Temporal Ordering Key** | `(start_time_utc, event_seq, event_id)` (never assumes 1 game/day) | Regular season / playoff game timestamp | Handles Game 1 (`event_seq=1`) vs. Game 2 (`event_seq=2`) of MLB doubleheaders | Handles Round 1–4 (`event_seq=1..4`) sequential cut & tee-time ordering | Same key; Thursday → Sunday → Monday ordering by kickoff instant |
+| **Exposure Rate Basis** | `pregame_exposure_rate(num, denom, scale)` | Per 60 minutes of TOI (`scale=60.0`) | Per PA / BF (`scale=1.0`) for batters; per 9 IP (`scale=9.0`) for pitchers | Per 18-hole round (`scale=1.0` or `18.0`) for Strokes Gained categories | Per play / per dropback (`scale=1.0`) |
+| **Key Specialist / Context Unit** | Pluggable `ContextModifier` & `StarterUnit` hooks | Starting Goalie GSAx + Arena coordinates | Starting Pitcher (FIP/xFIP/Stuff+) + Bullpen workload + Ballpark/Weather factors | Course-fit profile (driving distance/accuracy, grass type) + Field strength | Starting QB (`FootballQBEloHook`) + rest/venue/altitude (`FootballVenueEloHook`) |
+| **Stage 1 Mandatory Output** | Calibrated event outcome probabilities | Binary $P(\text{Home Win})$ + implied team goals $(\hat{\lambda}_H, \hat{\lambda}_A)$ | Binary $P(\text{Home Win})$ + implied team runs $(\hat{\lambda}_H, \hat{\lambda}_A)$ | Group-normalized field probs $\sum_i P(\text{Win}_i)=1$, $P(\text{Top 5/10/20})$, $P(\text{Make Cut})$, or H2H $P(A \text{ beats } B)$ | Binary $P(\text{Home Win})$ (ties excluded from targets, 0.5 in Elo) + expected team scores |
+| **Stage 2 Optional Output** | Conditioned participant stat projections | Skaters: $E[\text{G, A, PTS, SOG, TOI}]$; Goalies: $E[\text{SA, SV, GA}]$ | Batters: $E[\text{H, HR, TB, RBI, R, K}]$; Pitchers: $E[\text{IP, K, ER, Outs}]$ | Golfers: $E[\text{SG:OTT, SG:APP, SG:ATG, SG:PUTT, Birdies, GIR, Score}]$ | QB, RB, WR/TE stat projections + anytime-TD probabilities |
 
 ### 4.2 Core vs. Sport Plugin Responsibilities
 
@@ -134,8 +134,8 @@ To ensure adding future sports—specifically **Baseball (MLB)** and **Golf (PGA
 | **Schemas (`contracts.py`)** | Enforces canonical event keys `(sport, season, event_id, event_seq, start_time_utc)` and participant keys `(event_id, entity_id, participant_id)`. | Maps sport API IDs (NHL, MLB StatsAPI/Statcast, PGA/DataGolf) into canonical schemas. |
 | **Ratings (`ratings.py`)** | Pairwise Elo/Glicko engine (with starter-adjustment hooks) AND multi-entrant Plackett-Luce / field-adjusted skill rating engine. | Configures sport parameters (e.g., NHL $K=6$ & OT dampening; MLB SP-adjusted Elo; PGA field-adjusted Strokes Gained skill). |
 | **Rolling Engine (`temporal.py`)** | Strictly shifted (`shift(1)`) Polars window expressions over $N$ appearances or EWMA spans $\alpha$, generalized `pregame_exposure_rate`, and Bayesian shrinkage. | Defines sport-specific columns to roll ($xGF_{5v5}$ & GSAx in NHL; $xwOBA$ & $xFIP$ in MLB; $SG:Total$ splits in PGA). |
-| **Schedule (`schedule.py`)** | Computes days rest, back-to-backs, doubleheader turnarounds, $k$-in-$m$ density, geodesic venue travel distance, and timezone shifts. | Supplies venue coordinates, timezones, and optional venue/park/course environment factors. |
-| **Modeling & Eval** | Walk-forward splitter, GBDT trainers, binary & group-softmax probability calibrators, Log Loss / Brier / Ranking / Poisson deviance evaluators. | Registers Stage 1 (Event Outcome) and Stage 2 (Participant Stat) feature sets and target columns. |
+| **Schedule (`schedule.py`)** | Computes days rest, back-to-backs, doubleheader turnarounds, $k$-in-$m$ density, geodesic venue travel distance, timezone shifts, and weekly-cadence rest/bye flags (`compute_weekly_cadence_features`). | Supplies venue coordinates, timezones, and optional venue/park/course environment factors. |
+| **Modeling & Eval** | Walk-forward splitter, GBDT trainers, binary (incl. small-sample Platt/temperature) & group-softmax probability calibrators, Log Loss / Brier / Ranking / Poisson deviance evaluators. | Registers Stage 1 (Event Outcome) and Stage 2 (Participant Stat) feature sets and target columns. |
 
 ---
 
@@ -201,8 +201,31 @@ sports-analytics-ml/
 │       │   ├── validation.py        # Walk-forward expanding & sliding window time-series splitters
 │       │   ├── calibration.py       # Out-of-fold Platt / Isotonic probability calibration
 │       │   ├── evaluation.py        # Log Loss, Brier Score, ECE, ROI & player MAE/Poisson metrics
-│       │   └── registry.py          # Artifact serialization, metadata & model registry
+│       │   ├── registry.py          # Artifact serialization, metadata & model registry
+│       │   └── starred.py           # Starred-teams store (TOML, atomic), TeamResolver registry, orchestrator
+│       ├── starred_cli.py       # Starred-teams adapters over the existing predictors + rendering
 │       └── sports/
+│           ├── football/            # NFL FOOTBALL PLUGIN (Phase 6)
+│           │   ├── adapter.py       # FootballAdapter implementing SportAdapter
+│           │   ├── constants.py     # 32 teams, stadium registry, Elo/prior parameters, Silver schemas
+│           │   ├── ingestion/       # nflverse_client, lineups (2-tier QB resolver), health, reconciler, ingestor, weather (Open-Meteo forecasts), pbp_micro + ngs (micro logs), odds (closing-line archive/live snapshot)
+│           │   ├── models/
+│           │   │   ├── stage1_game.py   # Calibrated win prob + expected scores, walk-forward backtest
+│           │   │   ├── stage2_player.py # QB/RB/WR/TE projections, opportunity-conserving reconciliation
+│           │   │   ├── market_eval.py   # Evaluation-only closing-odds benchmark, ATS/total/CLV
+│           │   │   ├── predictor.py     # FootballMatchupPredictor, ledger, QB warnings, live scoring
+│           │   │   └── training.py      # Fingerprinted artifacts/football bundle persistence
+│           │   └── features/
+│           │       ├── elo_hooks.py        # MOV Elo driver, starting-QB & venue Elo hooks
+│           │       ├── schedule_hooks.py   # Weekly cadence, Thursday/Monday, body-clock & international travel
+│           │       ├── team.py             # Rolling/EWMA EPA, ridge SoS, luck signals, cold-start shrinkage
+│           │       ├── qb.py               # Starting-QB features, draft priors, qb_value for the Elo hook
+│           │       ├── schedule_context.py # Per-game rest/travel/round context + Elo & QB-adjusted Elo
+│           │       ├── micro.py            # Rolling PROE/pace/pressure-proxy/CPOE/red-zone micro features
+│           │       ├── environment.py      # Wind/cold/precip penalties, roof/surface/altitude interactions, env shifts
+│           │       ├── availability.py     # Position-group availability indices, empirical start probabilities
+│           │       ├── player.py           # Stage 2 player Gold rows (shares, rates, defense vs position, p_active)
+│           │       └── pipeline.py         # Gold stage1/stage2 parquet + odds/observed-outcome firewall
 │           └── hockey/              # NHL HOCKEY PLUGIN
 │               ├── __init__.py
 │               ├── adapter.py       # HockeyAdapter implementing SportAdapter
@@ -282,6 +305,20 @@ Used when experimenting with new features, auditing data, or measuring out-of-sa
 ```bash
 # Verify live connectivity and schema contracts across all external feeds
 sports-ml check-sources --sport hockey
+
+# NFL Football (Milestones 23-26)
+sports-ml check-sources --sport football --league nfl
+sports-ml ingest --sport football --league nfl --from-year 2018
+sports-ml features build --sport football --league nfl
+sports-ml train --sport football --include-stage2
+sports-ml backtest --sport football --stage all --splits 2
+sports-ml predict --sport football --season 2026 --week 9 --matchup KC@BUF --include-players
+sports-ml score-predictions --sport football
+
+# Starred teams (Milestone 30): a thin orchestration layer over each plugin's predict_team_next_games
+sports-ml starred add --sport hockey --team COL
+sports-ml starred list
+sports-ml predict --starred --games 1 --offline
 
 # Sync only the current season to date (or a specific date window)
 sports-ml ingest --sport hockey --current-season

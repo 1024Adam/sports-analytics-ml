@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,6 +28,12 @@ from sports_ml.core.evaluation import (
 )
 from sports_ml.core.market import MarketEdgeReport
 from sports_ml.core.registry import ModelRegistry
+from sports_ml.core.starred import (
+    StarredConfigError,
+    StarredTeamsConfig,
+    resolve_team,
+    starred_teams_path,
+)
 from sports_ml.sports.baseball.ingestion import (
     BaseballSilverReconciler,
     MLBStatsAPIClient,
@@ -52,6 +59,17 @@ from sports_ml.sports.baseball.models import (
     build_and_persist_baseball_gold_features,
     run_baseball_stage1_walk_forward_backtest,
     score_baseball_prediction_ledger,
+)
+from sports_ml.sports.football.features import (
+    build_and_persist_football_gold_features,
+    build_and_persist_football_stage2_features,
+)
+from sports_ml.sports.football.ingestion import (
+    FootballOddsIngestor,
+    FootballSilverReconciler,
+    NflverseClient,
+    NflverseIngestor,
+    check_football_data_sources,
 )
 from sports_ml.sports.hockey.features.player import build_stage2_player_features
 from sports_ml.sports.hockey.ingestion.health import check_hockey_data_sources
@@ -115,6 +133,12 @@ features_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(features_app, name="features")
+starred_app = typer.Typer(
+    name="starred",
+    help="Manage your starred teams (used by `sports-ml predict --starred`).",
+    no_args_is_help=True,
+)
+app.add_typer(starred_app, name="starred")
 
 console = Console()
 
@@ -126,6 +150,217 @@ def _ensure_supported_sport(sport: str) -> str:
             f"Unsupported sport '{sport}'. Active plugins: 'hockey', 'soccer', 'baseball'."
         )
     return slug
+
+
+def _ensure_football_league(league: str) -> str:
+    lg = league.strip().lower()
+    if lg not in {"nfl", "all"}:
+        raise typer.BadParameter(
+            f"Unsupported football league '{league}'. Only 'nfl' is implemented."
+        )
+    return "nfl"
+
+
+def _parse_iso_date(raw: str | None, option: str) -> date | None:
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{option} must be YYYY-MM-DD, got '{raw}'.") from exc
+
+
+def _run_football_ingestion(
+    settings: Settings,
+    *,
+    from_year: int | None,
+    current_season: bool,
+    start_date: str | None,
+    end_date: str | None,
+    offline: bool = False,
+    verbose: bool = True,
+) -> Any:
+    settings.paths.ensure_dirs(sport="football")
+    client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse", offline=offline)
+    reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
+    ingestor = NflverseIngestor(client, reconciler)
+    if verbose:
+        console.print("[dim]Syncing nflverse data (cached assets are reused)...[/dim]")
+    report = ingestor.ingest(
+        from_year=from_year,
+        current_season=current_season,
+        start_date=_parse_iso_date(start_date, "--start-date"),
+        end_date=_parse_iso_date(end_date, "--end-date"),
+    )
+    odds_ingestor = FootballOddsIngestor(settings.paths.raw_dir / "odds")
+    odds_ingestor.persist_to_silver(settings.paths.silver_dir / "football", offline=offline)
+    if not offline:
+        _sync_football_forecasts(settings, reconciler.read_games(), verbose=verbose)
+    return report
+
+
+def _sync_football_forecasts(
+    settings: Settings, games: pl.DataFrame, *, verbose: bool = True
+) -> None:
+    """Cache Open-Meteo forecasts for outdoor venues; weather is optional, so failures only warn."""
+    from sports_ml.sports.football.ingestion.weather import (
+        OpenMeteoForecastClient,
+        sync_football_forecasts,
+    )
+
+    client = OpenMeteoForecastClient(settings.paths.raw_dir / "football" / "weather")
+    if verbose:
+        console.print(
+            "[dim]Syncing forecast weather (the first run downloads ~150 venue-seasons; "
+            "later runs reuse the cache)...[/dim]"
+        )
+    sync = sync_football_forecasts(games, client)
+    if verbose:
+        console.print(
+            f"Forecast weather: {sync.windows_requested} venue windows "
+            f"({sync.windows_from_cache} cached, {sync.windows_failed} failed)."
+        )
+    for failure in sync.failures[:3]:
+        console.print(f"[yellow]Forecast sync warning: {failure}[/yellow]")
+
+
+def _run_football_train(settings: Settings, *, version: str, include_stage2: bool) -> None:
+    from sports_ml.sports.football.models import train_football_stage1_bundle
+
+    try:
+        gold = build_and_persist_football_gold_features(settings)
+        stage2 = (
+            build_and_persist_football_stage2_features(settings, stage1_df=gold)
+            if include_stage2
+            else None
+        )
+        result = train_football_stage1_bundle(
+            gold,
+            settings.paths.artifacts_dir,
+            model_version=version,
+            stage2_df=stage2,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if include_stage2 and result.stage2_model is None:
+        console.print("[yellow]No completed player rows found — Stage 2 was not trained.[/yellow]")
+    metrics = ", ".join(f"{k}={v:.4f}" for k, v in result.validation_metrics.items())
+    console.print(
+        f"[bold green]Training complete[/bold green] for sport='football' "
+        f"(version={version}): Stage 1 games={result.n_training_games}, "
+        f"Stage 2 rows={result.n_stage2_rows}.\nValidation: {metrics}\n"
+        f"Artifacts: {result.bundle_dir}"
+    )
+
+
+def _run_football_backtest(settings: Settings, *, stage: str, n_splits: int) -> None:
+    from sports_ml.sports.football.models import (
+        evaluate_football_market,
+        evaluate_football_stage2_holdout,
+        run_football_stage1_walk_forward_backtest,
+    )
+    from sports_ml.sports.football.reporting import render_football_backtest
+
+    if stage not in {"1", "2", "all"}:
+        raise typer.BadParameter("--stage must be '1', '2', or 'all'.")
+    try:
+        gold = build_and_persist_football_gold_features(settings)
+        completed = gold.filter(pl.col("home_score").is_not_null())
+        holdout = max(1, n_splits)
+        n_seasons = completed["season"].n_unique()
+        result = None
+        if stage in {"1", "all"}:
+            result = run_football_stage1_walk_forward_backtest(
+                completed,
+                min_train_seasons=max(1, n_seasons - holdout),
+                n_bootstrap=200,
+            )
+        stage2_metrics = None
+        if stage in {"2", "all"}:
+            stage2_df = build_and_persist_football_stage2_features(settings, stage1_df=gold)
+            if stage2_df.is_empty():
+                raise ValueError("No Stage 2 player rows available; re-run football ingestion.")
+            stage2_metrics = evaluate_football_stage2_holdout(
+                completed, stage2_df, n_holdout_seasons=min(holdout, max(1, n_seasons - 1))
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    market = None
+    if result is not None:
+        games_path = settings.paths.silver_dir / "football" / "games.parquet"
+        market = evaluate_football_market(result.oof_predictions, pl.read_parquet(games_path))
+    render_football_backtest(console, result, stage2_metrics, market)
+
+
+def _run_football_predict(
+    settings: Settings,
+    *,
+    league: str,
+    season: int | None,
+    week: int | None,
+    game_date: date | None,
+    matchup: str | None,
+    team: str | None,
+    n_games: int | None,
+    include_players: bool,
+    offline: bool,
+    debug: bool = False,
+) -> None:
+    from sports_ml.sports.football.models import FootballMatchupPredictor
+    from sports_ml.sports.football.reporting import render_football_predictions
+
+    _ensure_football_league(league)
+    if not offline:
+        _run_football_ingestion(
+            settings,
+            from_year=None,
+            current_season=True,
+            start_date=None,
+            end_date=None,
+            verbose=debug,
+        )
+    artifact_dir = settings.paths.artifacts_dir / "football" / "latest"
+    if debug:
+        console.print("[dim]Rebuilding features and predicting (about 15-30 s)...[/dim]")
+    try:
+        predictor = FootballMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
+        if team:
+            predictions = predictor.predict_team_next_games(
+                team,
+                n_games=n_games if n_games is not None else 1,
+                from_date=game_date,
+                include_players=include_players,
+            )
+        elif game_date is not None and season is None and week is None:
+            predictions = predictor.predict_date(
+                game_date, include_players=include_players, matchup_filter=matchup
+            )
+        else:
+            target = predictor.upcoming_week()
+            resolved_season = season if season is not None else (target[0] if target else None)
+            resolved_week = week if week is not None else (target[1] if target else None)
+            if resolved_season is None or resolved_week is None:
+                raise ValueError("No upcoming games found; pass --season and --week.")
+            predictions = predictor.predict_week(
+                resolved_season,
+                resolved_week,
+                include_players=include_players,
+                matchup_filter=matchup,
+            )
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    render_football_predictions(console, predictions)
+
+
+def _run_football_score(settings: Settings) -> None:
+    from sports_ml.sports.football.models import score_football_prediction_ledger
+    from sports_ml.sports.football.reporting import render_football_score
+
+    try:
+        score = score_football_prediction_ledger(settings)
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    render_football_score(console, score)
 
 
 def _ensure_baseball_league(league: str) -> str:
@@ -985,11 +1220,16 @@ def _run_baseball_ingestion(
 @app.command("ingest")
 def ingest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
     seasons: Annotated[
         str | None,
@@ -1027,6 +1267,33 @@ def ingest_command(
     ] = False,
 ) -> None:
     """Download, cache, and reconcile raw sport feeds into Silver Parquet tables."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        if seasons is not None:
+            raise typer.BadParameter(
+                "Football ingestion supports --from-year, --current-season, "
+                "--start-date/--end-date, and --offline (not --seasons)."
+            )
+        try:
+            report = _run_football_ingestion(
+                get_settings(),
+                from_year=from_year,
+                current_season=current_season,
+                start_date=start_date,
+                end_date=end_date,
+                offline=offline,
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(
+            f"[bold green]Ingestion complete[/bold green] for sport='football' "
+            f"(league='nfl', seasons={','.join(str(s) for s in report.seasons)}, "
+            f"silver_games={report.games_rows}, team_logs={report.team_log_rows}, "
+            f"player_logs={report.player_log_rows}, availability={report.availability_rows}, "
+            f"missing_assets={list(report.missing_assets)})."
+        )
+        return
+
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     try:
@@ -1106,14 +1373,32 @@ def ingest_command(
 @features_app.command("build")
 def features_build_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
 ) -> None:
     """Recompute leak-free pre-game Gold feature tables from local Silver Parquet data."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        try:
+            f_settings = get_settings()
+            f_df = build_and_persist_football_gold_features(f_settings)
+            f2_df = build_and_persist_football_stage2_features(f_settings, stage1_df=f_df)
+        except FileNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        console.print(
+            f"[bold green]Gold features built[/bold green] for sport='football': "
+            f"Stage 1 rows={f_df.height}, Stage 2 rows={f2_df.height}."
+        )
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     if slug == "baseball":
@@ -1170,7 +1455,10 @@ def _render_market_disagreement_table(edge_report: MarketEdgeReport | None, spor
 @app.command("backtest")
 def backtest_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
@@ -1186,6 +1474,10 @@ def backtest_command(
     ] = 2,
 ) -> None:
     """Run walk-forward time-series backtesting across historical seasons."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        _run_football_backtest(get_settings(), stage=stage.strip().lower(), n_splits=n_splits)
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
     if slug == "baseball":
@@ -1443,7 +1735,10 @@ def backtest_command(
 @app.command("train")
 def train_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
@@ -1462,6 +1757,10 @@ def train_command(
     ] = "v1",
 ) -> None:
     """Build/refresh Gold features and fit production model artifacts."""
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        _run_football_train(get_settings(), version=version, include_stage2=include_stage2)
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 
@@ -2000,11 +2299,154 @@ def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -
                 console.print(b_table)
 
 
+def _load_starred() -> tuple[Path, StarredTeamsConfig]:
+    from sports_ml.sports.starred import register_default_team_resolvers
+
+    register_default_team_resolvers()
+    path = starred_teams_path()
+    try:
+        return path, StarredTeamsConfig.load(path)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@starred_app.command("add")
+def starred_add_command(
+    sport: Annotated[
+        str, typer.Option("--sport", help="'hockey', 'soccer', 'baseball', or 'football'.")
+    ],
+    team: Annotated[str, typer.Option("--team", "-t", help="Team code or name (e.g. COL, ARS).")],
+    league: Annotated[
+        str | None,
+        typer.Option("--league", help="'nhl', 'epl', 'mlb'/'npb', or 'nfl' (auto-resolved)."),
+    ] = None,
+    label: Annotated[str | None, typer.Option("--label", help="Optional display label.")] = None,
+) -> None:
+    """Star a team (keyed by sport, league and team)."""
+    path, config = _load_starred()
+    try:
+        updated, entry, added = config.add(sport, team, league, label)
+        full_name = resolve_team(entry.sport, entry.team, entry.league).full_name
+        if added:
+            updated.save(path)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    verb = "Starred" if added else "Already starred"
+    console.print(f"{verb}: {entry.sport} / {entry.league} / {entry.team} ({full_name})")
+
+
+@starred_app.command("remove")
+def starred_remove_command(
+    sport: Annotated[str, typer.Option("--sport", help="Sport slug.")],
+    team: Annotated[str, typer.Option("--team", "-t", help="Team code or name.")],
+    league: Annotated[str | None, typer.Option("--league", help="League filter.")] = None,
+) -> None:
+    """Remove a starred team."""
+    path, config = _load_starred()
+    try:
+        updated, removed = config.remove(sport, team, league)
+    except StarredConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not removed:
+        console.print(f"[yellow]Not starred:[/yellow] {sport} {team}")
+        raise typer.Exit(code=1)
+    updated.save(path)
+    for entry in removed:
+        console.print(f"Removed: {entry.sport} / {entry.league} / {entry.team}")
+
+
+@starred_app.command("list")
+def starred_list_command() -> None:
+    """List starred teams."""
+    from sports_ml.starred_cli import EMPTY_HINT
+
+    path, config = _load_starred()
+    if not config.teams:
+        console.print(EMPTY_HINT)
+        return
+    table = Table(title=f"Starred Teams ({path})")
+    for col in ("Sport", "League", "Team", "Name", "Label"):
+        table.add_column(col)
+    for t in config.teams:
+        table.add_row(
+            t.sport,
+            t.league,
+            t.team,
+            resolve_team(t.sport, t.team, t.league).full_name,
+            t.label or "",
+        )
+    console.print(table)
+
+
+def _run_starred_predict(
+    *, n_games: int, include_players: bool, offline: bool, debug: bool = False
+) -> None:
+    from sports_ml.starred_cli import run_starred_command
+
+    settings = get_settings()
+    _path, config = _load_starred()
+
+    def sync_hockey() -> None:
+        _run_hockey_ingestion(settings, current_season=True, offline=False, team=None)
+
+    def sync_soccer() -> None:
+        _run_soccer_ingestion(settings, current_season=True, offline=False)
+
+    def sync_baseball() -> None:
+        _run_baseball_ingestion(settings, league="all", current_season=True, offline=False)
+
+    def sync_football() -> None:
+        _run_football_ingestion(
+            settings,
+            from_year=None,
+            current_season=True,
+            start_date=None,
+            end_date=None,
+            verbose=debug,
+        )
+
+    sync: dict[str, Callable[[], None]] = {
+        "hockey": sync_hockey,
+        "soccer": sync_soccer,
+        "baseball": sync_baseball,
+        "football": sync_football,
+    }
+    from sports_ml.sports.football.reporting import render_football_predictions
+
+    renderers: dict[str, Callable[[list[Any]], None]] = {
+        "hockey": _render_predictions,
+        "soccer": _render_soccer_predictions,
+        "baseball": _render_baseball_predictions,
+        "football": lambda preds: render_football_predictions(console, preds),
+    }
+    code = run_starred_command(
+        console,
+        settings,
+        config,
+        n_games=n_games,
+        include_players=include_players,
+        offline=offline,
+        sync=sync,
+        renderers=renderers,
+        debug=debug,
+    )
+    if code != 0:
+        raise typer.Exit(code=code)
+
+
 @app.command("predict")
 def predict_command(
+    target: Annotated[
+        str | None,
+        typer.Argument(help="Optional: 'starred' (alias of --starred)."),
+    ] = None,
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
-    ] = "hockey",
+        str | None,
+        typer.Option(
+            "--sport",
+            help="Sport slug: 'hockey' (default), 'soccer', 'baseball', or 'football'.",
+        ),
+    ] = None,
     league: Annotated[
         str,
         typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
@@ -2051,8 +2493,77 @@ def predict_command(
         bool,
         typer.Option("--offline", help="Skip live network sync and use cached Silver tables."),
     ] = False,
+    season: Annotated[
+        int | None,
+        typer.Option("--season", help="Football season year (defaults to the upcoming slate)."),
+    ] = None,
+    week: Annotated[
+        int | None,
+        typer.Option("--week", min=1, help="Football week (defaults to the upcoming slate)."),
+    ] = None,
+    starred: Annotated[
+        bool,
+        typer.Option(
+            "--starred",
+            help="Predict the next game(s) of every starred team across sports "
+            "(see `sports-ml starred`). Exclusive with --sport/--team/--matchup/--date.",
+        ),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            "-d",
+            help="Show progress and timing output (sync, feature rebuild, per-team steps).",
+        ),
+    ] = False,
 ) -> None:
     """Generate Stage 1 game win probabilities and optional Stage 2 player projections."""
+    if target is not None and target.strip().lower() != "starred":
+        raise typer.BadParameter(f"Unknown predict target '{target}'. Did you mean 'starred'?")
+    if starred or target is not None:
+        conflicts = [
+            flag
+            for flag, value in (
+                ("--sport", sport),
+                ("--team", team),
+                ("--matchup", matchup),
+                ("--date", game_date),
+            )
+            if value is not None
+        ]
+        if conflicts:
+            raise typer.BadParameter(
+                f"--starred cannot be combined with {', '.join(conflicts)}; "
+                "it predicts every starred team's next game across all sports."
+            )
+        _run_starred_predict(
+            n_games=n_games if n_games is not None else 1,
+            include_players=include_players,
+            offline=offline,
+            debug=debug,
+        )
+        return
+    sport = sport or "hockey"
+    if sport.strip().lower() == "football":
+        if team and matchup:
+            raise typer.BadParameter("Specify either --team or --matchup, not both.")
+        if n_games is not None and not team:
+            raise typer.BadParameter("--games requires --team to be specified.")
+        _run_football_predict(
+            get_settings(),
+            league=league,
+            season=season,
+            week=week,
+            game_date=_parse_iso_date(game_date, "--date"),
+            matchup=matchup,
+            team=team,
+            n_games=n_games,
+            include_players=include_players,
+            offline=offline,
+            debug=debug,
+        )
+        return
     slug = _ensure_supported_sport(sport)
     if team and matchup:
         raise typer.BadParameter("Specify either --team or --matchup, not both.")
@@ -2142,10 +2653,16 @@ def predict_command(
 @app.command("score-predictions")
 def score_predictions_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
 ) -> None:
     """Score the live append-only prediction ledger against completed Silver games."""
+    if sport.strip().lower() == "football":
+        _run_football_score(get_settings())
+        return
     slug = _ensure_supported_sport(sport)
     settings = get_settings()
 
@@ -2331,11 +2848,16 @@ def score_predictions_command(
 @app.command("check-sources")
 def check_sources_command(
     sport: Annotated[
-        str, typer.Option("--sport", help="Sport plugin slug ('hockey', 'soccer', or 'baseball').")
+        str,
+        typer.Option(
+            "--sport", help="Sport plugin slug ('hockey', 'soccer', 'baseball', or 'football')."
+        ),
     ] = "hockey",
     league: Annotated[
         str,
-        typer.Option("--league", help="Baseball league filter ('mlb', 'npb', or 'all')."),
+        typer.Option(
+            "--league", help="League filter (baseball: 'mlb'|'npb'|'all'; football: 'nfl')."
+        ),
     ] = "all",
     team: Annotated[
         str,
@@ -2343,7 +2865,17 @@ def check_sources_command(
     ] = "BOS",
 ) -> None:
     """Verify live connectivity and schema contracts across all external data feeds."""
-    slug = _ensure_supported_sport(sport)
+    if sport.strip().lower() == "football":
+        _ensure_football_league(league)
+        slug = "football"
+        results = check_football_data_sources(get_settings().paths.raw_dir)
+    else:
+        slug = _ensure_supported_sport(sport)
+        results = _run_non_football_source_checks(slug, league, team)
+    _render_source_health(slug, results)
+
+
+def _run_non_football_source_checks(slug: str, league: str, team: str) -> list[Any]:
     settings = get_settings()
     if slug == "baseball":
         lg_mode = _ensure_baseball_league(league)
@@ -2356,7 +2888,10 @@ def check_sources_command(
             settings.paths.raw_dir,
             team_code=team,
         )
+    return list(results)
 
+
+def _render_source_health(slug: str, results: list[Any]) -> None:
     table = Table(title=f"Upstream Data Source Health ({slug.upper()})")
     table.add_column("Source", style="cyan", no_wrap=True)
     table.add_column("Status", justify="center")

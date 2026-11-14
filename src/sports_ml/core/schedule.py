@@ -187,3 +187,61 @@ def compute_schedule_features(
         pl.Series("tz_shift_hours", tz_shift_out, dtype=pl.Float64),
         pl.Series("is_b2b_with_travel", is_b2b_travel_out, dtype=pl.Boolean),
     )
+
+
+def kickoff_local_hour_vs_body_clock(
+    start_utc: datetime,
+    body_clock_tz: str,
+) -> float:
+    """Return the wall-clock hour (`0.0 <= h < 24.0`) of `start_utc` on an entity's body clock.
+
+    A West Coast team kicking off at 1:00 PM Eastern has a body-clock kickoff hour of `10.0`.
+    Compare against the venue-local hour (same instant in the venue timezone) to size
+    early/late body-clock disadvantages.
+    """
+    ref = start_utc if start_utc.tzinfo is not None else start_utc.replace(tzinfo=ZoneInfo("UTC"))
+    local = ref.astimezone(ZoneInfo(body_clock_tz))
+    return float(local.hour + local.minute / 60.0 + local.second / 3600.0)
+
+
+def compute_weekly_cadence_features(
+    df: pl.DataFrame,
+    *,
+    entity_col: str = "team",
+    overtime_col: str | None = "went_to_overtime",
+    short_week_max_days: float = 5.0,
+    mini_bye_min_days: float = 9.0,
+    post_bye_min_days: float = 13.0,
+) -> pl.DataFrame:
+    """Annotate once-per-week entity logs with exact kickoff-to-kickoff rest and bye flags.
+
+    Features use only the entity's previous appearance in the same `season` (shifted by one
+    within `[entity_col, season]`) and the current scheduled `start_time_utc`:
+      * `rest_hours` / `days_rest`: exact elapsed time since the previous kickoff (null for
+        the first appearance of a season).
+      * `is_short_week`: `days_rest <= short_week_max_days`.
+      * `is_post_mini_bye`: `mini_bye_min_days <= days_rest < post_bye_min_days`.
+      * `is_post_bye`: `days_rest >= post_bye_min_days`.
+      * `prior_game_was_overtime`: previous appearance's `overtime_col` flag (False if absent).
+    """
+    sorted_df = sort_events_chronologically(df, extra_tiebreakers=[entity_col])
+    partition = [entity_col, "season"]
+    prev_start = pl.col("start_time_utc").shift(1).over(partition)
+    rest_hours = (pl.col("start_time_utc") - prev_start).dt.total_seconds().cast(
+        pl.Float64
+    ) / 3600.0
+    out = sorted_df.with_columns(rest_hours.alias("rest_hours")).with_columns(
+        (pl.col("rest_hours") / 24.0).alias("days_rest")
+    )
+    if overtime_col is not None and overtime_col in out.columns:
+        prior_ot = pl.col(overtime_col).cast(pl.Boolean).shift(1).over(partition)
+    else:
+        prior_ot = pl.lit(False)
+    return out.with_columns(
+        (pl.col("days_rest") <= short_week_max_days).fill_null(False).alias("is_short_week"),
+        ((pl.col("days_rest") >= mini_bye_min_days) & (pl.col("days_rest") < post_bye_min_days))
+        .fill_null(False)
+        .alias("is_post_mini_bye"),
+        (pl.col("days_rest") >= post_bye_min_days).fill_null(False).alias("is_post_bye"),
+        prior_ot.fill_null(False).alias("prior_game_was_overtime"),
+    )

@@ -12,6 +12,7 @@ from sports_ml.core.ratings import (
     EloConfig,
     MultiEntrantSkillEngine,
     PairwiseEloEngine,
+    compute_winner_perspective_mov_multiplier,
 )
 
 
@@ -164,3 +165,27 @@ def test_multi_entrant_field_skill_engine() -> None:
     g3_r2 = r2.filter(pl.col("entity_id") == "G3")
     assert g1_r2["skill_rating_pre"][0] > g3_r2["skill_rating_pre"][0]
     assert g1_r2["field_win_prob"][0] > g3_r2["field_win_prob"][0]
+
+
+def test_playoff_k_multiplier_and_winner_perspective_mov() -> None:
+    games = _sample_games_df().head(1).with_columns(pl.lit(True).alias("is_playoff"))
+    regular = PairwiseEloEngine(EloConfig(k_factor=6.0)).compute_ratings(
+        games.with_columns(pl.lit(False).alias("is_playoff"))
+    )
+    playoff = PairwiseEloEngine(EloConfig(k_factor=6.0, playoff_k_multiplier=1.5)).compute_ratings(
+        games
+    )
+    reg_delta = regular["elo_home_post"][0] - regular["elo_home_pre"][0]
+    po_delta = playoff["elo_home_post"][0] - playoff["elo_home_pre"][0]
+    assert po_delta == pytest.approx(1.5 * reg_delta)
+
+    # Upsets (winner was the Elo underdog) get a larger multiplier than favorite blowouts
+    assert compute_winner_perspective_mov_multiplier(
+        14, -100.0
+    ) > compute_winner_perspective_mov_multiplier(14, 100.0)
+
+    # Home favorite (HFA) loses: signed winner-perspective Elo edge differs from |elo_diff|
+    upset = _sample_games_df().filter(pl.col("event_id") == 2023020002)
+    default_engine = PairwiseEloEngine().compute_ratings(upset)
+    winner_engine = PairwiseEloEngine(EloConfig(mov_winner_perspective=True)).compute_ratings(upset)
+    assert default_engine["elo_home_post"][0] != winner_engine["elo_home_post"][0]

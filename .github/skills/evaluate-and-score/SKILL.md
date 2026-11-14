@@ -1,6 +1,6 @@
 ---
 name: evaluate-and-score
-description: "Use when: running walk-forward historical backtesting (`sports-ml backtest`) or scoring the live pre-game prediction ledger against completed games (`sports-ml score-predictions`) for `--sport hockey` or `--sport soccer` to evaluate Ranked Probability Score (RPS), Log Loss, Brier Score, Expected Calibration Error (ECE), accuracy, and player projection MAE."
+description: "Use when: running walk-forward historical backtesting (`sports-ml backtest`) or scoring the live pre-game prediction ledger against completed games (`sports-ml score-predictions`) for `--sport hockey`, `--sport soccer`, or `--sport football` to evaluate Ranked Probability Score (RPS), Log Loss, Brier Score, Expected Calibration Error (ECE), accuracy, and player projection MAE."
 argument-hint: "Specify --sport (hockey|soccer), backtest (--stage 1|2|all, --splits N), or score-predictions..."
 user-invocable: true
 disable-model-invocation: false
@@ -48,3 +48,12 @@ Report the resulting metrics clearly:
 - **Log Loss** and **Brier Score** (lower is better; highlight whether the model beats the Home Win-Rate and Coin-Flip baselines).
 - **Expected Calibration Error (ECE)** (measures how closely predicted probabilities match empirical win frequencies).
 - **Accuracy** and (when `--stage all` is run) **Stage 2 Skater Points MAE**.
+
+## NFL Football (`--sport football`)
+```bash
+uv run sports-ml backtest --sport football --stage all --splits 2   # Stage 1 walk-forward + Stage 2 holdout MAE
+uv run sports-ml score-predictions --sport football
+```
+- When closing odds exist, both commands also print the *De-Vigged Market Closing Line* comparison, *Fundamental vs. Market Disagreement*, *Against the Spread* (hit rate vs. the 52.38% `-110` break-even, pushes, key numbers 3/6/7/10, ROI) and *Over / Under* tables; the live ledger adds closing-line value. Report whether Stage 1 beats the market; the market never enters training.
+- `--splits N` holds out the newest `N` seasons: Stage 1 uses expanding, week-aligned season folds (ties excluded from probability metrics); Stage 2 reports position-level MAE (QB attempts/yards, RB carries/yards, WR/TE targets/yards) against a position-mean baseline.
+- `score-predictions` joins `football_predictions.parquet` to completed Silver games (log loss, Brier, accuracy vs. home-rate/coin-flip baselines, market-edge report when odds exist) and the player ledger to `player_game_logs` for projection MAE.

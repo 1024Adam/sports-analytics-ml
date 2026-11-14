@@ -7,6 +7,7 @@ provincial neutral venue context, and schedule density into the Gold Stage 1 fea
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Any, Final
@@ -159,12 +160,19 @@ def _compute_team_history_features_for_games(
             c = normalize_baseball_team(str(g[f"{side}_team"]))
             sched_by_club.setdefault(c, []).append(g)
 
+    def _keys(rows: list[dict[str, Any]]) -> list[tuple[datetime, int]]:
+        return [(r["start_time_utc"], int(r.get("event_seq") or 1)) for r in rows]
+
+    hist_keys = {c: _keys(rows) for c, rows in hist_by_club.items()}
+    sched_keys = {c: _keys(rows) for c, rows in sched_by_club.items()}
+
     out_rows: list[dict[str, Any]] = []
     for g in games_df.iter_rows(named=True):
         gid = int(g.get("game_id") or g.get("event_id") or 0)
         g_seq = int(g.get("event_seq") or 1)
         g_utc: datetime = g["start_time_utc"]
         g_date: date = g.get("game_date") or g_utc.date()
+        g_key = (g_utc, g_seq)
 
         home_code = normalize_baseball_team(str(g["home_team"]))
         away_code = normalize_baseball_team(str(g["away_team"]))
@@ -238,11 +246,9 @@ def _compute_team_history_features_for_games(
         }
 
         for side, club_code in (("home", home_code), ("away", away_code)):
-            prior_t = [
-                tl
-                for tl in hist_by_club.get(club_code, [])
-                if (tl["start_time_utc"], int(tl.get("event_seq") or 1)) < (g_utc, g_seq)
-            ][-30:]
+            club_hist = hist_by_club.get(club_code, [])
+            n_hist = bisect_left(hist_keys.get(club_code, []), g_key)
+            prior_t = club_hist[max(0, n_hist - 30) : n_hist]
 
             if not prior_t:
                 row_out[f"{side}_team_runs_for_per_g_shrunk"] = lg_priors.lg_runs_per_team_game
@@ -304,12 +310,9 @@ def _compute_team_history_features_for_games(
                 row_out[f"{side}_baseruns_luck_w20"] = rf_20 - implied_runs_20
 
             # Rest days and travel distance from prior scheduled/completed game
-            prior_sched = [
-                sg
-                for sg in sched_by_club.get(club_code, [])
-                if (sg["start_time_utc"], int(sg.get("event_seq") or 1)) < (g_utc, g_seq)
-            ]
-            if not prior_sched:
+            club_sched = sched_by_club.get(club_code, [])
+            n_sched = bisect_left(sched_keys.get(club_code, []), g_key)
+            if n_sched == 0:
                 row_out[f"{side}_rest_days"] = 5.0
                 if side == "away":
                     home_park = get_ballpark_metadata(away_code) or park
@@ -320,7 +323,7 @@ def _compute_team_history_features_for_games(
                         park.longitude,
                     )
             else:
-                prev_g = prior_sched[-1]
+                prev_g = club_sched[n_sched - 1]
                 prev_d: date = prev_g.get("game_date") or prev_g["start_time_utc"].date()
                 row_out[f"{side}_rest_days"] = float(min(max(0, (g_date - prev_d).days), 7))
                 if side == "away":

@@ -455,3 +455,276 @@ def evaluate_market_edge(
         market_rps=mkt_rps,
         disagreement_slices=tuple(slices),
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Point-spread / total (line-market) evaluation: ATS, over/under, closing-line value
+# ---------------------------------------------------------------------------------------------
+
+STANDARD_JUICE_AMERICAN: float = -110.0
+STANDARD_JUICE_DECIMAL: float = 1.0 + 100.0 / 110.0
+BREAK_EVEN_WIN_RATE: float = 110.0 / 210.0  # 52.38% at -110
+DEFAULT_LINE_THRESHOLDS: tuple[float, ...] = (1.0, 2.0, 3.0)
+FOOTBALL_KEY_NUMBERS: tuple[float, ...] = (3.0, 6.0, 7.0, 10.0)
+_PUSH_TOL: float = 1e-9
+
+
+class LineBucket(BaseModel):
+    """Betting results where the model's line disagrees with the closing line by `>= threshold`.
+
+    `hit_rate` excludes pushes (`wins / (wins + losses)`); `roi` is profit per unit staked at
+    standard `-110` juice (a win pays `100/110`, a loss costs `1`, a push returns the stake).
+    `key_*` fields cover bets whose closing line is a whole-number key number (3, 6, 7, 10 by
+    default), where pushes are most likely.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    threshold: float
+    n_games: int
+    n_bets: int
+    wins: int
+    losses: int
+    pushes: int
+    hit_rate: float | None
+    roi: float | None
+    mean_abs_edge: float
+    key_bets: int
+    key_pushes: int
+    mean_clv: float | None = None
+    clv_positive_rate: float | None = None
+
+
+class LineBettingReport(BaseModel):
+    """Model-implied line vs. closing line across disagreement buckets."""
+
+    model_config = ConfigDict(frozen=True)
+
+    market: Literal["spread", "total"]
+    n_games: int
+    break_even_win_rate: float
+    mean_abs_error_model: float
+    mean_abs_error_closing: float
+    n_half_point_lines: int
+    n_whole_point_lines: int
+    buckets: tuple[LineBucket, ...]
+
+    def get_bucket(self, threshold: float) -> LineBucket | None:
+        """Return the bucket with the given threshold (within `1e-9`), if present."""
+        for b in self.buckets:
+            if abs(b.threshold - threshold) < 1e-9:
+                return b
+        return None
+
+
+def ats_break_even(decimal_odds: float = STANDARD_JUICE_DECIMAL) -> float:
+    """Break-even win rate (ignoring pushes) for a bet paying `decimal_odds`: `1 / decimal`."""
+    if decimal_odds <= 1.0:
+        raise ValueError(f"decimal_odds must be > 1.0, got {decimal_odds}.")
+    return 1.0 / decimal_odds
+
+
+def is_whole_point_line(line: float) -> bool:
+    """True when `line` is a whole number (pushes are possible); half-point lines never push."""
+    return abs(line - round(line)) < _PUSH_TOL
+
+
+def is_key_number_line(line: float, key_numbers: Sequence[float] = FOOTBALL_KEY_NUMBERS) -> bool:
+    """True when `|line|` equals one of `key_numbers` (e.g. a closing spread of -3 or +7)."""
+    return any(abs(abs(line) - k) < _PUSH_TOL for k in key_numbers)
+
+
+def closing_line_value(
+    side: NDArray[np.float64],
+    taken_line: NDArray[np.float64],
+    closing_line: NDArray[np.float64],
+    market: Literal["spread", "total"],
+) -> NDArray[np.float64]:
+    """Points of closing-line value for bets taken at `taken_line` and closing at `closing_line`.
+
+    `side` is `+1` for the home side (spread) or the over (total) and `-1` for the opposite side.
+    Spread lines are home spreads (negative when the home team is favored): a home bet taken at
+    `+3` that closes at `+1` earned `+2` points. For totals, an over taken at 44 that closes at
+    46 earned `+2`, and an under taken at 46 that closes at 44 earned `+2`.
+    """
+    home_side = taken_line - closing_line if market == "spread" else closing_line - taken_line
+    return np.asarray(side * home_side, dtype=np.float64)
+
+
+def _bucket_stats(
+    *,
+    threshold: float,
+    edge: NDArray[np.float64],
+    result: NDArray[np.float64],
+    lines: NDArray[np.float64],
+    clv: NDArray[np.float64] | None,
+    key_numbers: Sequence[float],
+    decimal_odds: float,
+) -> LineBucket:
+    n_games = int(edge.size)
+    bet_mask = np.abs(edge) >= threshold - _PUSH_TOL
+    n_bets = int(bet_mask.sum())
+    if n_bets == 0:
+        return LineBucket(
+            threshold=threshold,
+            n_games=n_games,
+            n_bets=0,
+            wins=0,
+            losses=0,
+            pushes=0,
+            hit_rate=None,
+            roi=None,
+            mean_abs_edge=0.0,
+            key_bets=0,
+            key_pushes=0,
+        )
+    side = np.sign(edge[bet_mask])
+    margin = side * result[bet_mask]  # >0: bet side covered, <0: lost, 0: push
+    wins = int(np.sum(margin > _PUSH_TOL))
+    losses = int(np.sum(margin < -_PUSH_TOL))
+    pushes = n_bets - wins - losses
+    graded = wins + losses
+    profit = wins * (decimal_odds - 1.0) - losses
+    sel_lines = lines[bet_mask]
+    is_key = np.array([is_key_number_line(float(x), key_numbers) for x in sel_lines], dtype=bool)
+    is_push = np.abs(margin) <= _PUSH_TOL
+    clv_sel = clv[bet_mask] * side if clv is not None else None
+    return LineBucket(
+        threshold=threshold,
+        n_games=n_games,
+        n_bets=n_bets,
+        wins=wins,
+        losses=losses,
+        pushes=pushes,
+        hit_rate=wins / graded if graded else None,
+        roi=profit / (graded + pushes) if (graded + pushes) else None,
+        mean_abs_edge=float(np.mean(np.abs(edge[bet_mask]))),
+        key_bets=int(is_key.sum()),
+        key_pushes=int(np.sum(is_key & is_push)),
+        mean_clv=float(np.mean(clv_sel)) if clv_sel is not None else None,
+        clv_positive_rate=float(np.mean(clv_sel > _PUSH_TOL)) if clv_sel is not None else None,
+    )
+
+
+def _evaluate_line(
+    *,
+    market: Literal["spread", "total"],
+    edge: NDArray[np.float64],
+    result: NDArray[np.float64],
+    lines: NDArray[np.float64],
+    model_error: NDArray[np.float64],
+    closing_error: NDArray[np.float64],
+    clv: NDArray[np.float64] | None,
+    thresholds: Sequence[float],
+    key_numbers: Sequence[float],
+    decimal_odds: float,
+) -> LineBettingReport:
+    if edge.size == 0:
+        raise ValueError("Line evaluation needs at least one game with a closing line.")
+    whole = np.array([is_whole_point_line(float(x)) for x in lines], dtype=bool)
+    return LineBettingReport(
+        market=market,
+        n_games=int(edge.size),
+        break_even_win_rate=ats_break_even(decimal_odds),
+        mean_abs_error_model=float(np.mean(np.abs(model_error))),
+        mean_abs_error_closing=float(np.mean(np.abs(closing_error))),
+        n_half_point_lines=int(np.sum(~whole)),
+        n_whole_point_lines=int(np.sum(whole)),
+        buckets=tuple(
+            _bucket_stats(
+                threshold=float(t),
+                edge=edge,
+                result=result,
+                lines=lines,
+                clv=clv,
+                key_numbers=key_numbers,
+                decimal_odds=decimal_odds,
+            )
+            for t in thresholds
+        ),
+    )
+
+
+def _clean(*arrays: NDArray[np.float64] | None) -> tuple[NDArray[np.float64], ...]:
+    first = next(a for a in arrays if a is not None)
+    mask = np.ones(first.size, dtype=bool)
+    for a in arrays:
+        if a is not None:
+            mask &= np.isfinite(a)
+    return tuple(np.asarray(a, dtype=np.float64)[mask] if a is not None else a for a in arrays)  # type: ignore[misc]
+
+
+def evaluate_spread_betting(
+    model_margin: NDArray[np.float64],
+    closing_spread_home: NDArray[np.float64],
+    actual_margin: NDArray[np.float64],
+    *,
+    taken_spread_home: NDArray[np.float64] | None = None,
+    thresholds: Sequence[float] = DEFAULT_LINE_THRESHOLDS,
+    key_numbers: Sequence[float] = FOOTBALL_KEY_NUMBERS,
+    decimal_odds: float = STANDARD_JUICE_DECIMAL,
+) -> LineBettingReport:
+    """Against-the-spread evaluation of model-implied margins (`home - away`).
+
+    `closing_spread_home` is the betting-convention home line (negative when the home team is
+    favored). The model's edge is `model_margin + spread`: positive favors the home side. The
+    home side covers when `actual_margin + spread > 0`, the away side when `< 0`, and the bet
+    pushes at exactly `0` (only possible on whole-point lines). `taken_spread_home` (the line at
+    bet time, e.g. a pre-game snapshot) enables closing-line-value summaries.
+    """
+    m, s, a, taken = _clean(
+        np.asarray(model_margin, dtype=np.float64),
+        np.asarray(closing_spread_home, dtype=np.float64),
+        np.asarray(actual_margin, dtype=np.float64),
+        None if taken_spread_home is None else np.asarray(taken_spread_home, dtype=np.float64),
+    )
+    clv = None if taken is None else closing_line_value(np.ones_like(s), taken, s, "spread")
+    return _evaluate_line(
+        market="spread",
+        edge=m + s,
+        result=a + s,
+        lines=s,
+        model_error=m - a,
+        closing_error=-s - a,
+        clv=clv,
+        thresholds=thresholds,
+        key_numbers=key_numbers,
+        decimal_odds=decimal_odds,
+    )
+
+
+def evaluate_total_betting(
+    model_total: NDArray[np.float64],
+    closing_total: NDArray[np.float64],
+    actual_total: NDArray[np.float64],
+    *,
+    taken_total: NDArray[np.float64] | None = None,
+    thresholds: Sequence[float] = DEFAULT_LINE_THRESHOLDS,
+    key_numbers: Sequence[float] = FOOTBALL_KEY_NUMBERS,
+    decimal_odds: float = STANDARD_JUICE_DECIMAL,
+) -> LineBettingReport:
+    """Over/under evaluation of model-implied totals against the closing total.
+
+    The model's edge is `model_total - closing_total` (positive bets the over). The over wins
+    when `actual_total > closing_total`; a total exactly on the number pushes. Key numbers are
+    not applied to totals (their line values are ~40+), so `key_*` counts are zero.
+    """
+    m, c, a, taken = _clean(
+        np.asarray(model_total, dtype=np.float64),
+        np.asarray(closing_total, dtype=np.float64),
+        np.asarray(actual_total, dtype=np.float64),
+        None if taken_total is None else np.asarray(taken_total, dtype=np.float64),
+    )
+    clv = None if taken is None else closing_line_value(np.ones_like(c), taken, c, "total")
+    return _evaluate_line(
+        market="total",
+        edge=m - c,
+        result=a - c,
+        lines=c,
+        model_error=m - a,
+        closing_error=c - a,
+        clv=clv,
+        thresholds=thresholds,
+        key_numbers=(),
+        decimal_odds=decimal_odds,
+    )

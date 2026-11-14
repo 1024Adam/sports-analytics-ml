@@ -32,6 +32,8 @@ class EloConfig(BaseModel):
     use_mov_multiplier: bool = True
     draw_param: float = 0.0
     promoted_team_rating: float | None = None
+    playoff_k_multiplier: float = 1.0
+    mov_winner_perspective: bool = False
 
 
 def compute_elo_win_probability(elo_diff: float) -> float:
@@ -66,6 +68,20 @@ def compute_mov_multiplier(goal_diff: int | float, elo_diff: float) -> float:
     """Compute MOV multiplier `ln(|GoalDiff| + 1) * 2.2 / (0.001 * |elo_diff| + 2.2)`."""
     eff_diff = max(abs(float(goal_diff)), 1.0)
     return math.log(eff_diff + 1.0) * (2.2 / (0.001 * abs(elo_diff) + 2.2))
+
+
+def compute_winner_perspective_mov_multiplier(
+    point_diff: int | float,
+    winner_elo_diff: float,
+) -> float:
+    """Compute `ln(|PD| + 1) * 2.2 / (0.001 * (Elo_winner - Elo_loser) + 2.2)`.
+
+    Unlike `compute_mov_multiplier`, the sign of the winner's pre-game Elo edge is kept so
+    favorites that blow out opponents are damped while upsets are amplified.
+    """
+    eff_diff = max(abs(float(point_diff)), 1.0)
+    denom = max(0.001 * float(winner_elo_diff) + 2.2, 0.1)
+    return math.log(eff_diff + 1.0) * (2.2 / denom)
 
 
 class PairwiseEloEngine:
@@ -268,13 +284,19 @@ class PairwiseEloEngine:
             else:
                 actual_s_home = 1.0 if home_won else 0.0
 
-            mov_mult = (
-                compute_mov_multiplier(goal_diff, elo_diff)
-                if (self.config.use_mov_multiplier and not is_tie)
-                else 1.0
-            )
+            if not self.config.use_mov_multiplier or is_tie:
+                mov_mult = 1.0
+            elif self.config.mov_winner_perspective:
+                mov_mult = compute_winner_perspective_mov_multiplier(
+                    goal_diff, elo_diff if home_won else -elo_diff
+                )
+            else:
+                mov_mult = compute_mov_multiplier(goal_diff, elo_diff)
 
-            delta = self.config.k_factor * mov_mult * (actual_s_home - expected_home_score)
+            k_eff = self.config.k_factor * (
+                self.config.playoff_k_multiplier if bool(row.get("is_playoff", False)) else 1.0
+            )
+            delta = k_eff * mov_mult * (actual_s_home - expected_home_score)
             r_home_post = r_home_pre + delta
             r_away_post = r_away_pre - delta
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pytest
 
+from sports_ml.config import get_settings
 from sports_ml.sports.baseball.features import (
     STAGE1_FEATURE_COLUMNS,
     STAGE2_BATTER_FEATURE_COLUMNS,
@@ -20,6 +22,7 @@ from sports_ml.sports.baseball.features import (
     resolve_batter_prior,
     resolve_pitcher_prior,
 )
+from sports_ml.sports.baseball.models.predictor import build_and_persist_baseball_gold_features
 
 
 def _build_synthetic_baseball_silver_tables() -> tuple[
@@ -577,3 +580,23 @@ def test_cross_league_priors_and_npb_koshien_context_in_pipeline() -> None:
     rolled_teams = build_baseball_team_rolling_features(team_df)
     assert "team_pythag_luck_w30" in rolled_teams.columns
     assert pytest.approx(rolled_teams["team_pythag_luck_w30"][0], abs=1e-9) == 0.0
+
+
+def test_gold_build_is_reused_until_silver_changes(tmp_path: Path) -> None:
+    """The Gold rebuild is memoized per Silver signature and refreshed when Silver changes."""
+    settings = get_settings(root_dir=tmp_path)
+    silver_dir = settings.paths.silver_dir / "baseball"
+    silver_dir.mkdir(parents=True)
+    games_df, team_df, pitcher_df, batter_df = _build_synthetic_baseball_silver_tables()
+    games_df.write_parquet(silver_dir / "games.parquet")
+    team_df.write_parquet(silver_dir / "team_game_logs.parquet")
+    pitcher_df.write_parquet(silver_dir / "pitcher_game_logs.parquet")
+    batter_df.write_parquet(silver_dir / "batter_game_logs.parquet")
+
+    first = build_and_persist_baseball_gold_features(settings)
+    assert build_and_persist_baseball_gold_features(settings)[0] is first[0]
+
+    games_df.filter(pl.col("game_id") != 1003).write_parquet(silver_dir / "games.parquet")
+    refreshed = build_and_persist_baseball_gold_features(settings)
+    assert refreshed[0] is not first[0]
+    assert refreshed[0].height < first[0].height

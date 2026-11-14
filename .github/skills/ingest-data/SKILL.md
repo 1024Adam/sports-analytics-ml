@@ -1,6 +1,6 @@
 ---
 name: ingest-data
-description: "Use when: running data ingestion (`sports-ml ingest`), verifying upstream feed connectivity (`sports-ml check-sources`), backfilling historical NHL or EPL seasons from a starting year (`--from-year`), syncing the active season to date (`--current-season`), fetching a specific date window (`--start-date` / `--end-date`), or reconciling raw caches into Silver Parquet tables for `--sport hockey` or `--sport soccer`."
+description: "Use when: running data ingestion (`sports-ml ingest`), verifying upstream feed connectivity (`sports-ml check-sources`), backfilling historical NHL, EPL or NFL seasons from a starting year (`--from-year`), syncing the active season to date (`--current-season`), fetching a specific date window (`--start-date` / `--end-date`), or reconciling raw caches into Silver Parquet tables for `--sport hockey` or `--sport soccer`."
 argument-hint: "Specify --sport (hockey|soccer), --from-year (e.g., 2023), --current-season, --seasons (e.g., 20232024,20242025 or 2023-2026), or check-sources..."
 user-invocable: true
 disable-model-invocation: false
@@ -68,3 +68,12 @@ After ingestion completes, verify the 4 canonical Silver Parquet tables under `d
 - `goalie_game_logs.parquet` (unique on `(game_id, player_id)`)
 
 Report the row counts, date range (`min(game_date)` to `max(game_date)`), and whether the user should run `/train-models` or `/predict-matchup` next.
+
+## NFL Football (`--sport football --league nfl`)
+- `uv run sports-ml check-sources --sport football --league nfl` probes the nflverse release assets and schema contracts.
+- `uv run sports-ml ingest --sport football --league nfl --from-year 2018` (or `--current-season`, or `--start-date/--end-date`) fetches nflverse schedules, play-by-play, player stats, snap counts, injuries, depth charts and rosters into `data/raw/football/nflverse/`, then reconciles Silver tables under `data/silver/football/` (`games`, `team_game_logs`, `player_game_logs`, `qb_game_logs`, `team_week_availability`).
+- Ingestion merges closing odds into the evaluation-only `market_*` columns of `games.parquet`: nflverse schedule lines first, then an optional `data/raw/odds/nfl_historical_odds.csv.gz`, then an optional `THE_ODDS_API_KEY` pre-game snapshot for unfinished games.
+- Ingestion also writes `team_pbp_micro_logs.parquet` and `player_pbp_micro_logs.parquet` (neutral-situation pace/PROE, CPOE, pressure proxy, red-zone EPA, plus Next Gen Stats from 2016; earlier seasons carry `has_ngs = 0`).
+- After the nflverse sync, ingestion caches Open-Meteo forecast weather for outdoor venues under `data/raw/football/weather/` (non-fatal on failure) and writes `snap_game_logs.parquet` (all-position snap shares used for position-group availability). Re-run ingestion after upgrading to populate both.
+- `--offline` serves only already-cached nflverse assets (and skips the forecast sync) (seasons with no cached schedule are skipped); `--seasons` is not supported for football.
+- `player_game_logs.parquet` carries Stage 2 usage columns (`completions`, `pass_air_yards`, `rec_air_yards`, `rz_targets`, `rz_carries`, `gl_carries`); re-run ingestion after upgrading so older Silver files gain them.

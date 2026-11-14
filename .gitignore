@@ -34,3 +34,6 @@ htmlcov/
 .env
 .env.*
 .DS_Store
+
+# Personal starred-teams list (see config/starred_teams.example.toml)
+config/starred_teams.toml

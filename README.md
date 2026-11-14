@@ -18,6 +18,7 @@ Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on
 - **NHL Hockey (`--sport hockey`)**: Ingests schedule, roster, boxscore, and advanced shot-quality ($xG$, Corsi, Fenwick, high-danger chances, Goalie GSAx) data from the **Official NHL Web API** (`https://api-web.nhle.com/v1/`), **MoneyPuck**, and pre-game starting goalie/lineup feeds.
 - **English Premier League (EPL) Soccer (`--sport soccer`)**: Ingests fixtures, squad availability, set-piece order, and match stats from the **Official FPL / Premier League API**, **Understat** ($npxG$, $xG$, $xA$, $xGChain$, $PPDA$, deep completions), and **Football-Data.co.uk**.
 - **MLB & NPB Baseball (`--sport baseball --league mlb|npb|all`)**: Unified dual-league baseball plugin covering **Major League Baseball (30 MLB clubs, 2-way binary outcome)** and **Nippon Professional Baseball (12 Central & Pacific League clubs, 3-way 12-inning tie-aware `1X2` outcome)** with starting pitcher `xFIP`/`K-BB%`/velocity delta (`sp_velo_delta_mph`), 3-day bullpen workload, handedness platoon lineups, ballpark factors, and cross-league (`NPB ↔ MLB`) player translation priors.
+- **NFL Football (`--sport football --league nfl`)**: Weekly-cadence NFL plugin (nflverse data) with a 32-team/stadium registry, margin-of-victory tie-aware Elo, starting-QB and venue (altitude/dome/rest) Elo hooks, and kickoff-exact rest/bye/short-week features. Foundation (Milestone 22), nflverse ingestion with a 2-tier starting-QB resolver (Milestone 23), leak-free Gold features with a hard odds firewall (Milestone 24), and the calibrated Stage 1 win-probability/expected-score model with a walk-forward backtest (Milestone 25) are shipped; Stage 2 QB/RB/WR/TE projections (opportunity-conserving, with `P(Anytime TD)`), the unified `FootballMatchupPredictor`, and the full `train`/`backtest`/`predict`/`score-predictions` CLI shipped in Milestone 26. Milestone 27 adds forecast weather (Open-Meteo, with a flagged observed-proxy fallback), wind/cold/precipitation environment penalties, and as-of position-group availability indices. Milestone 28 adds play-by-play and Next Gen Stats micro logs (neutral-situation pace and PROE, CPOE, a pressure proxy, red-zone EPA) with five rolling matchup features in Stage 1 and `yprr` / rush-yards-over-expected in Stage 2. Milestone 29 adds an evaluation-only closing-odds benchmark: power de-vigged moneylines, ATS / over-under evaluation with push, `-110` break-even and key-number handling, and closing-line value, shown by `backtest` and `score-predictions` when odds exist.
 
 ---
 
@@ -27,6 +28,7 @@ Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on
 - [NHL Data Contracts & Feature Specification](./docs/hockey-data-and-features.md)
 - [EPL Soccer Data Contracts & Feature Specification](./docs/soccer-data-and-features.md)
 - [MLB & NPB Baseball Data Contracts & Feature Specification](./docs/baseball-data-and-features.md)
+- [NFL Football Data Contracts & Feature Specification](./docs/football-data-and-features.md)
 - [Phased Implementation Roadmap](./docs/roadmap.md)
 - [Contributing & Anti-Leakage Guidelines](./CONTRIBUTING.md)
 - [Security Policy](./SECURITY.md)
@@ -70,7 +72,37 @@ uv run sports-ml train --sport soccer --include-stage2
 
 # 3. Predict an EPL matchweek or specific matchup with Stage 2 Outfield & GK Projections
 uv run sports-ml predict --sport soccer --date 2026-10-25 --matchup MCI@ARS --include-players
+
+# --- NFL Football (--sport football --league nfl) ---
+uv run sports-ml check-sources --sport football --league nfl
+uv run sports-ml ingest --sport football --league nfl --from-year 2018
+uv run sports-ml features build --sport football --league nfl
+uv run sports-ml train --sport football --include-stage2
+uv run sports-ml backtest --sport football --stage all --splits 2
+
+# Predict the upcoming week, one matchup with QB/RB/WR/TE projections, or a team's next games
+uv run sports-ml predict --sport football
+uv run sports-ml predict --sport football --season 2026 --week 9 --matchup KC@BUF --include-players
+uv run sports-ml predict --sport football --team KC --games 3
+uv run sports-ml score-predictions --sport football
 ```
+
+### Starred Teams (cross-sport)
+```bash
+# Keep a personal watch list, keyed by (sport, league, team): PHI in hockey and PHI in baseball coexist
+uv run sports-ml starred add --sport hockey --team COL
+uv run sports-ml starred add --sport baseball --team OAK      # stored as ATH; league (MLB/NPB) auto-resolved
+uv run sports-ml starred add --sport soccer --team ARS
+uv run sports-ml starred add --sport football --team KC
+uv run sports-ml starred list
+uv run sports-ml starred remove --sport hockey --team COL
+
+# One command: the next game of every starred team, merged chronologically (local time)
+uv run sports-ml predict --starred                  # alias: uv run sports-ml predict starred
+uv run sports-ml predict --starred --games 3 --include-players --offline
+uv run sports-ml predict --starred --debug          # also stream sync/timing progress (-d works on any predict)
+```
+The list lives in `config/starred_teams.toml` (git-ignored; see `config/starred_teams.example.toml`; override with `SPORTS_ML_STARRED_TEAMS_FILE`). Each sport is synced once, a team that cannot be predicted prints a `SKIPPED` line (`NO_UPCOMING_GAME`, `NO_TRAINED_ARTIFACTS`, `SOURCE_UNAVAILABLE`) without stopping the others, and the exit code is non-zero only if every team failed. `--starred` cannot be combined with `--sport`, `--team`, `--matchup`, or `--date`.
 
 ### 3. Developer & Audit Commands
 ```bash
