@@ -6,6 +6,7 @@ run the real offline pipeline (ingest -> features -> train) on tiny fixtures.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
@@ -85,11 +86,20 @@ def _write_hockey_fixture(root: Path) -> None:
     (bundle / "metadata.json").write_text("{}", encoding="utf-8")
 
 
+def _strip_ansi(output: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+
+def _plain(output: str) -> str:
+    """Strip ANSI colors and rich panel borders, then collapse wrapping (CI forces color)."""
+    return re.sub(r"[│╭╮╰╯─\s]+", " ", _strip_ansi(output))
+
+
 def _invoke(*args: str, ok: bool = True) -> str:
     result = runner.invoke(app, list(args))
     if ok:
         assert result.exit_code == 0, f"{args}: {result.output}{result.exception!r}"
-    return result.output
+    return _strip_ansi(result.output)
 
 
 @pytest.fixture(scope="module")
@@ -317,9 +327,9 @@ def test_games_option_and_alias_and_exclusive_options(world: Path, starred_file:
     ):
         bad = runner.invoke(app, ["predict", "--starred", *extra])
         assert bad.exit_code != 0
-        assert "cannot be combined" in bad.output and extra[0] in bad.output
+        assert "cannot be combined" in _plain(bad.output) and extra[0] in _plain(bad.output)
         alias_bad = runner.invoke(app, ["predict", "starred", *extra])
-        assert alias_bad.exit_code != 0 and "cannot be combined" in alias_bad.output
+        assert alias_bad.exit_code != 0 and "cannot be combined" in _plain(alias_bad.output)
     assert runner.invoke(app, ["predict", "stared"]).exit_code != 0
     # without --starred nothing changes: `--sport` still defaults to hockey
     assert "61.2%" in _invoke("predict", "--team", "COL", "--offline")
