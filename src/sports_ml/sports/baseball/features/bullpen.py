@@ -7,7 +7,8 @@ Computes strictly pre-game relief corps quality (`bp_xfip_shrunk`, `bp_k_minus_b
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from bisect import bisect_left
+from datetime import date, datetime, timedelta
 from typing import Any, Final
 
 import polars as pl
@@ -22,6 +23,115 @@ from sports_ml.sports.baseball.constants import (
 )
 
 HIGH_PITCH_RELIEF_THRESHOLD: Final[int] = 28
+
+
+def _row_key(row: dict[str, Any]) -> tuple[datetime, int]:
+    return (row["start_time_utc"], int(row.get("event_seq") or 1))
+
+
+def _row_date(row: dict[str, Any]) -> date:
+    row_date: date = row.get("game_date") or row["start_time_utc"].date()
+    return row_date
+
+
+class _ClubTeamIndex:
+    """Chronological team logs with date buckets so each game only touches nearby rows."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = sorted(rows, key=_row_key)
+        self.keys = [_row_key(r) for r in self.rows]
+        self.by_date: dict[date, list[int]] = {}
+        for i, r in enumerate(self.rows):
+            self.by_date.setdefault(_row_date(r), []).append(i)
+
+    def acute_workload(self, g_key: tuple[datetime, int], g_date: date) -> tuple[int, int, int]:
+        n_prior = bisect_left(self.keys, g_key)
+        pitches_1d = pitches_3d = outs_3d = 0
+        for day_diff in range(4):
+            for i in self.by_date.get(g_date - timedelta(days=day_diff), ()):
+                if i >= n_prior:
+                    break
+                bp_p = int(self.rows[i].get("bullpen_pitches") or 0)
+                bp_o = int(self.rows[i].get("bullpen_outs_pitched") or 0)
+                if day_diff <= 1:
+                    pitches_1d += bp_p
+                pitches_3d += bp_p
+                outs_3d += bp_o
+        return pitches_1d, pitches_3d, outs_3d
+
+    def last_prior(self, g_key: tuple[datetime, int], n: int) -> list[dict[str, Any]]:
+        n_prior = bisect_left(self.keys, g_key)
+        return self.rows[max(0, n_prior - n) : n_prior]
+
+
+class _ClubReliefIndex:
+    """Chronological relief appearances for one club."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = sorted(rows, key=_row_key)
+        self.keys = [_row_key(r) for r in self.rows]
+        self.dates = [_row_date(r) for r in self.rows]
+        self.prefix_max_date: list[date] = []
+        running: date | None = None
+        for d in self.dates:
+            running = d if running is None or d > running else running
+            self.prefix_max_date.append(running)
+
+    def recent_prior(
+        self, g_key: tuple[datetime, int], g_date: date, window_days: int
+    ) -> list[dict[str, Any]]:
+        n_prior = bisect_left(self.keys, g_key)
+        cutoff = g_date - timedelta(days=window_days)
+        picked: list[dict[str, Any]] = []
+        i = n_prior - 1
+        # No earlier row can qualify once the running maximum date falls before the cutoff.
+        while i >= 0 and self.prefix_max_date[i] >= cutoff:
+            if self.dates[i] >= cutoff:
+                picked.append(self.rows[i])
+            i -= 1
+        picked.reverse()
+        return picked
+
+    def high_leverage_unavailable(
+        self,
+        queries: list[tuple[tuple[datetime, int], int, str]],
+        games: list[dict[str, Any]],
+    ) -> list[tuple[int, str, int]]:
+        """Top-3 relievers (by prior appearances, outs, fewer ER) that are fatigued per query."""
+        results: list[tuple[int, str, int]] = []
+        stats: dict[int, list[int]] = {}
+        by_date: dict[int, dict[date, list[int]]] = {}
+        pointer = 0
+        for g_key, gi, side in sorted(queries, key=lambda q: q[0]):
+            while pointer < len(self.rows) and self.keys[pointer] < g_key:
+                row = self.rows[pointer]
+                pid = int(row["player_id"])
+                st = stats.setdefault(pid, [0, 0, 0])
+                st[0] += 1
+                st[1] += int(row.get("outs_pitched") or 0)
+                st[2] += int(row.get("er_allowed") or 0)
+                bucket = by_date.setdefault(pid, {}).setdefault(self.dates[pointer], [0, 0])
+                bucket[0] += 1
+                bucket[1] += int(row.get("pitches_thrown") or 0)
+                pointer += 1
+            g = games[gi]
+            g_date: date = g.get("game_date") or g["start_time_utc"].date()
+            ranked = sorted(
+                stats, key=lambda p: (stats[p][0], stats[p][1], -stats[p][2]), reverse=True
+            )[:3]
+            count = 0
+            for pid in ranked:
+                dates = by_date[pid]
+                d1 = dates.get(g_date - timedelta(days=1))
+                d2 = dates.get(g_date - timedelta(days=2))
+                if (
+                    g_date in dates
+                    or (d1 is not None and d2 is not None)
+                    or (d1 is not None and d1[1] >= HIGH_PITCH_RELIEF_THRESHOLD)
+                ):
+                    count += 1
+            results.append((gi, side, count))
+        return results
 
 
 def build_bullpen_pregame_features(
@@ -43,7 +153,6 @@ def build_bullpen_pregame_features(
     if games_df.is_empty():
         return games_df
 
-    # Index team logs by normalized team
     team_hist_by_club: dict[str, list[dict[str, Any]]] = {}
     if not team_logs_df.is_empty():
         t_work = team_logs_df
@@ -56,7 +165,6 @@ def build_bullpen_pregame_features(
             c = normalize_baseball_team(str(r["team"]))
             team_hist_by_club.setdefault(c, []).append(r)
 
-    # Index relief pitcher appearances by normalized team
     rp_hist_by_club: dict[str, list[dict[str, Any]]] = {}
     if pitcher_logs_df is not None and not pitcher_logs_df.is_empty():
         p_work = pitcher_logs_df.filter(pl.col("is_starter") == pl.lit(False))
@@ -70,12 +178,34 @@ def build_bullpen_pregame_features(
                 c = normalize_baseball_team(str(r["team"]))
                 rp_hist_by_club.setdefault(c, []).append(r)
 
+    team_idx = {c: _ClubTeamIndex(rows) for c, rows in team_hist_by_club.items()}
+    rp_idx = {c: _ClubReliefIndex(rows) for c, rows in rp_hist_by_club.items()}
+
+    games = list(games_df.iter_rows(named=True))
+    game_keys: list[tuple[datetime, int]] = []
+    hl_queries: dict[str, list[tuple[tuple[datetime, int], int, str]]] = {}
+    for gi, g in enumerate(games):
+        key = (g["start_time_utc"], int(g.get("event_seq") or 1))
+        game_keys.append(key)
+        for side in ("home", "away"):
+            club = normalize_baseball_team(str(g[f"{side}_team"]))
+            hl_queries.setdefault(club, []).append((key, gi, side))
+
+    hl_counts: dict[tuple[int, str], int] = {}
+    for club, queries in hl_queries.items():
+        index = rp_idx.get(club)
+        if index is None:
+            continue
+        for gi, side, count in index.high_leverage_unavailable(queries, games):
+            hl_counts[(gi, side)] = count
+
     out_rows: list[dict[str, Any]] = []
-    for g in games_df.iter_rows(named=True):
+    for gi, g in enumerate(games):
         gid = int(g.get("game_id") or g.get("event_id") or 0)
         g_seq = int(g.get("event_seq") or 1)
         g_utc: datetime = g["start_time_utc"]
         g_date: date = g.get("game_date") or g_utc.date()
+        g_key = game_keys[gi]
 
         row_out: dict[str, Any] = {"game_id": gid, "event_seq": g_seq}
 
@@ -84,39 +214,18 @@ def build_bullpen_pregame_features(
             lg_code = resolve_team_league(team_code) or str(g.get("league") or "MLB").upper()
             lg_priors = get_league_sabermetric_priors("NPB" if lg_code == "NPB" else "MLB")
 
-            prior_t_logs = [
-                tl
-                for tl in team_hist_by_club.get(team_code, [])
-                if (tl["start_time_utc"], int(tl.get("event_seq") or 1)) < (g_utc, g_seq)
-            ]
-            prior_rp_logs = [
-                rl
-                for rl in rp_hist_by_club.get(team_code, [])
-                if (rl["start_time_utc"], int(rl.get("event_seq") or 1)) < (g_utc, g_seq)
-            ]
+            t_index = team_idx.get(team_code)
+            r_index = rp_idx.get(team_code)
 
-            # 1. Acute 1-day and 3-day team bullpen pitch/out counts
             pitches_1d = 0
             pitches_3d = 0
             outs_3d = 0
-            for tl in prior_t_logs:
-                tl_date: date = tl.get("game_date") or tl["start_time_utc"].date()
-                day_diff = (g_date - tl_date).days
-                bp_p = int(tl.get("bullpen_pitches") or 0)
-                bp_o = int(tl.get("bullpen_outs_pitched") or 0)
-                if 0 <= day_diff <= 1:
-                    pitches_1d += bp_p
-                if 0 <= day_diff <= 3:
-                    pitches_3d += bp_p
-                    outs_3d += bp_o
+            recent_t: list[dict[str, Any]] = []
+            if t_index is not None:
+                pitches_1d, pitches_3d, outs_3d = t_index.acute_workload(g_key, g_date)
+                recent_t = t_index.last_prior(g_key, 30)
 
-            # 2. Rolling 30-game bullpen ERA / xFIP & K-BB%
-            recent_t = prior_t_logs[-30:]
-            recent_rp = [
-                rl
-                for rl in prior_rp_logs
-                if (g_date - (rl.get("game_date") or rl["start_time_utc"].date())).days <= 45
-            ]
+            recent_rp = r_index.recent_prior(g_key, g_date, 45) if r_index is not None else []
 
             if recent_rp:
                 tot_rp_outs = sum(int(r.get("outs_pitched") or 0) for r in recent_rp)
@@ -167,50 +276,7 @@ def build_bullpen_pregame_features(
                 bp_xfip_s = lg_priors.lg_bp_xfip
                 bp_k_bb_s = lg_priors.lg_sp_k_pct - lg_priors.lg_sp_bb_pct + 0.020
 
-            # 3. High-leverage reliever unavailability (top-3 relievers by appearances/outs)
-            unavail_hl_count = 0
-            if prior_rp_logs:
-                apps_by_pid: dict[int, list[dict[str, Any]]] = {}
-                for rl in prior_rp_logs:
-                    pid = int(rl["player_id"])
-                    apps_by_pid.setdefault(pid, []).append(rl)
-
-                # Rank relievers by appearances and low ER rate to identify top-3 high-leverage arms
-                ranked_pids = sorted(
-                    apps_by_pid.keys(),
-                    key=lambda pid: (
-                        len(apps_by_pid[pid]),
-                        sum(int(x.get("outs_pitched") or 0) for x in apps_by_pid[pid]),
-                        -sum(int(x.get("er_allowed") or 0) for x in apps_by_pid[pid]),
-                    ),
-                    reverse=True,
-                )[:3]
-
-                for pid in ranked_pids:
-                    p_apps = apps_by_pid[pid]
-                    pitched_today_g1 = False
-                    pitched_d_minus_1 = False
-                    pitched_d_minus_2 = False
-                    pitches_d_minus_1 = 0
-
-                    for a in p_apps:
-                        a_date: date = a.get("game_date") or a["start_time_utc"].date()
-                        d_gap = (g_date - a_date).days
-                        p_cnt = int(a.get("pitches_thrown") or 0)
-                        if d_gap == 0:
-                            pitched_today_g1 = True
-                        elif d_gap == 1:
-                            pitched_d_minus_1 = True
-                            pitches_d_minus_1 += p_cnt
-                        elif d_gap == 2:
-                            pitched_d_minus_2 = True
-
-                    if (
-                        pitched_today_g1
-                        or (pitched_d_minus_1 and pitched_d_minus_2)
-                        or pitches_d_minus_1 >= HIGH_PITCH_RELIEF_THRESHOLD
-                    ):
-                        unavail_hl_count += 1
+            unavail_hl_count = hl_counts.get((gi, side), 0)
 
             row_out[f"{side}_bp_xfip_shrunk"] = float(bp_xfip_s)
             row_out[f"{side}_bp_k_minus_bb_pct_shrunk"] = float(bp_k_bb_s)

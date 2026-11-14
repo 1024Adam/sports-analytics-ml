@@ -90,6 +90,7 @@ uv run sports-ml starred add --sport hockey --team COL        # also: soccer ARS
 uv run sports-ml starred list
 uv run sports-ml predict --starred                           # alias: predict starred
 uv run sports-ml predict --starred --games 3 --include-players --offline
+uv run sports-ml predict --starred --debug                   # stream sync/timing progress (-d on any predict)
 ```
 - Entries are keyed by `(sport, league, team)` and stored in `config/starred_teams.toml` (git-ignored; `SPORTS_ML_STARRED_TEAMS_FILE` overrides the path). An empty list prints a hint and exits 0.
 - `--starred` cannot be combined with `--sport`, `--team`, `--matchup`, or `--date`; `--games N` (default 1), `--include-players`, and `--offline` apply to every sport.

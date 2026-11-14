@@ -100,6 +100,7 @@ uv run sports-ml starred remove --sport hockey --team COL
 # One command: the next game of every starred team, merged chronologically (local time)
 uv run sports-ml predict --starred                  # alias: uv run sports-ml predict starred
 uv run sports-ml predict --starred --games 3 --include-players --offline
+uv run sports-ml predict --starred --debug          # also stream sync/timing progress (-d works on any predict)
 ```
 The list lives in `config/starred_teams.toml` (git-ignored; see `config/starred_teams.example.toml`; override with `SPORTS_ML_STARRED_TEAMS_FILE`). Each sport is synced once, a team that cannot be predicted prints a `SKIPPED` line (`NO_UPCOMING_GAME`, `NO_TRAINED_ARTIFACTS`, `SOURCE_UNAVAILABLE`) without stopping the others, and the exit code is non-zero only if every team failed. `--starred` cannot be combined with `--sport`, `--team`, `--matchup`, or `--date`.
 

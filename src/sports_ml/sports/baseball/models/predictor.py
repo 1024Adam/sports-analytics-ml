@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any, Final
 
 import numpy as np
 import polars as pl
@@ -92,12 +93,55 @@ class BaseballMatchupPrediction(BaseModel):
     player_projections: BaseballPlayerMatchupProjections | None = None
 
 
+_GoldFeatures = tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]
+_GOLD_CACHE: dict[tuple[Any, ...], _GoldFeatures] = {}
+_SILVER_INPUTS: Final[tuple[str, ...]] = (
+    "games.parquet",
+    "team_game_logs.parquet",
+    "pitcher_game_logs.parquet",
+    "batter_game_logs.parquet",
+)
+
+
+def _silver_signature(silver_dir: Path, league: str) -> tuple[Any, ...]:
+    parts: list[Any] = [str(silver_dir), league.strip().upper()]
+    for name in _SILVER_INPUTS:
+        path = silver_dir / name
+        if path.exists():
+            st = path.stat()
+            parts.append((name, st.st_size, st.st_mtime_ns))
+        else:
+            parts.append((name, None, None))
+    return tuple(parts)
+
+
 def build_and_persist_baseball_gold_features(
     settings: Settings,
     *,
     league: str = "all",
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """Build and persist Gold Baseball Stage 1 and Stage 2 feature matrices from Silver Parquet."""
+    """Build and persist Gold Baseball Stage 1 and Stage 2 feature matrices from Silver Parquet.
+
+    The build is a pure function of the Silver tables, so the result is reused in-process
+    until any Silver input changes (e.g. across the games of one `predict` run).
+    """
+    silver_dir = settings.paths.silver_dir / "baseball"
+    gold_dir = settings.paths.gold_dir / "baseball"
+    signature = _silver_signature(silver_dir, league)
+    cached = _GOLD_CACHE.get(signature)
+    if cached is not None and (gold_dir / "stage1_game_features.parquet").exists():
+        return cached
+    result = _build_and_persist_baseball_gold_features(settings, league=league)
+    _GOLD_CACHE.clear()
+    _GOLD_CACHE[signature] = result
+    return result
+
+
+def _build_and_persist_baseball_gold_features(
+    settings: Settings,
+    *,
+    league: str,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     silver_dir = settings.paths.silver_dir / "baseball"
     gold_dir = settings.paths.gold_dir / "baseball"
     gold_dir.mkdir(parents=True, exist_ok=True)

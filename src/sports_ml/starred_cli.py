@@ -296,8 +296,12 @@ def run_starred_command(
     offline: bool,
     sync: SyncHooks,
     renderers: Renderers,
+    debug: bool = False,
 ) -> int:
-    """Run `predict --starred`; returns the process exit code (non-zero only if all failed)."""
+    """Run `predict --starred`; returns the process exit code (non-zero only if all failed).
+
+    Per-step progress lines are streamed only when `debug` is set.
+    """
     if not config.teams:
         console.print(EMPTY_HINT)
         return 0
@@ -308,7 +312,7 @@ def run_starred_command(
         config.teams,
         adapters,
         n_games=n_games,
-        on_event=lambda message: console.print(f"[dim]{message}[/dim]"),
+        on_event=(lambda message: console.print(f"[dim]{message}[/dim]")) if debug else None,
     )
     render_starred_overview(console, result)
     for sport, group in result.by_sport().items():

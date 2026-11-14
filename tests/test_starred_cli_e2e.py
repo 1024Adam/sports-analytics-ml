@@ -336,10 +336,13 @@ def test_missing_artifacts_skip_before_any_download_and_progress_is_streamed(
     parked = artifacts.with_name("latest_parked")
     shutil.move(artifacts, parked)
     try:
-        out = _invoke("predict", "--starred")
+        quiet = _invoke("predict", "--starred")
+        out = _invoke("predict", "--starred", "--debug")
     finally:
         shutil.move(parked, artifacts)
-    assert syncs == ["hockey"]  # football has no model, so nothing is downloaded for it
+    assert syncs == ["hockey", "hockey"]  # football has no model, so nothing is downloaded for it
+    assert "SKIPPED" in quiet and "NO_TRAINED_ARTIFACTS" in quiet
+    assert "syncing live data" not in quiet and "predicted in" not in quiet
     assert "football: skipped (NO_TRAINED_ARTIFACTS)" in out
     assert "hockey: syncing live data..." in out and "hockey COL: predicted in" in out
     assert out.index("hockey COL: predicted in") < out.index("SKIPPED")  # streamed, not deferred

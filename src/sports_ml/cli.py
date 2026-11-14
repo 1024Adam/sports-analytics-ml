@@ -178,12 +178,14 @@ def _run_football_ingestion(
     start_date: str | None,
     end_date: str | None,
     offline: bool = False,
+    verbose: bool = True,
 ) -> Any:
     settings.paths.ensure_dirs(sport="football")
     client = NflverseClient(settings.paths.raw_dir / "football" / "nflverse", offline=offline)
     reconciler = FootballSilverReconciler(settings.paths.silver_dir / "football")
     ingestor = NflverseIngestor(client, reconciler)
-    console.print("[dim]Syncing nflverse data (cached assets are reused)...[/dim]")
+    if verbose:
+        console.print("[dim]Syncing nflverse data (cached assets are reused)...[/dim]")
     report = ingestor.ingest(
         from_year=from_year,
         current_season=current_season,
@@ -193,11 +195,13 @@ def _run_football_ingestion(
     odds_ingestor = FootballOddsIngestor(settings.paths.raw_dir / "odds")
     odds_ingestor.persist_to_silver(settings.paths.silver_dir / "football", offline=offline)
     if not offline:
-        _sync_football_forecasts(settings, reconciler.read_games())
+        _sync_football_forecasts(settings, reconciler.read_games(), verbose=verbose)
     return report
 
 
-def _sync_football_forecasts(settings: Settings, games: pl.DataFrame) -> None:
+def _sync_football_forecasts(
+    settings: Settings, games: pl.DataFrame, *, verbose: bool = True
+) -> None:
     """Cache Open-Meteo forecasts for outdoor venues; weather is optional, so failures only warn."""
     from sports_ml.sports.football.ingestion.weather import (
         OpenMeteoForecastClient,
@@ -205,15 +209,17 @@ def _sync_football_forecasts(settings: Settings, games: pl.DataFrame) -> None:
     )
 
     client = OpenMeteoForecastClient(settings.paths.raw_dir / "football" / "weather")
-    console.print(
-        "[dim]Syncing forecast weather (the first run downloads ~150 venue-seasons; "
-        "later runs reuse the cache)...[/dim]"
-    )
+    if verbose:
+        console.print(
+            "[dim]Syncing forecast weather (the first run downloads ~150 venue-seasons; "
+            "later runs reuse the cache)...[/dim]"
+        )
     sync = sync_football_forecasts(games, client)
-    console.print(
-        f"Forecast weather: {sync.windows_requested} venue windows "
-        f"({sync.windows_from_cache} cached, {sync.windows_failed} failed)."
-    )
+    if verbose:
+        console.print(
+            f"Forecast weather: {sync.windows_requested} venue windows "
+            f"({sync.windows_from_cache} cached, {sync.windows_failed} failed)."
+        )
     for failure in sync.failures[:3]:
         console.print(f"[yellow]Forecast sync warning: {failure}[/yellow]")
 
@@ -298,6 +304,7 @@ def _run_football_predict(
     n_games: int | None,
     include_players: bool,
     offline: bool,
+    debug: bool = False,
 ) -> None:
     from sports_ml.sports.football.models import FootballMatchupPredictor
     from sports_ml.sports.football.reporting import render_football_predictions
@@ -305,10 +312,16 @@ def _run_football_predict(
     _ensure_football_league(league)
     if not offline:
         _run_football_ingestion(
-            settings, from_year=None, current_season=True, start_date=None, end_date=None
+            settings,
+            from_year=None,
+            current_season=True,
+            start_date=None,
+            end_date=None,
+            verbose=debug,
         )
     artifact_dir = settings.paths.artifacts_dir / "football" / "latest"
-    console.print("[dim]Rebuilding features and predicting (about 15-30 s)...[/dim]")
+    if debug:
+        console.print("[dim]Rebuilding features and predicting (about 15-30 s)...[/dim]")
     try:
         predictor = FootballMatchupPredictor.from_artifacts(artifact_dir, settings=settings)
         if team:
@@ -2365,7 +2378,9 @@ def starred_list_command() -> None:
     console.print(table)
 
 
-def _run_starred_predict(*, n_games: int, include_players: bool, offline: bool) -> None:
+def _run_starred_predict(
+    *, n_games: int, include_players: bool, offline: bool, debug: bool = False
+) -> None:
     from sports_ml.starred_cli import run_starred_command
 
     settings = get_settings()
@@ -2382,7 +2397,12 @@ def _run_starred_predict(*, n_games: int, include_players: bool, offline: bool) 
 
     def sync_football() -> None:
         _run_football_ingestion(
-            settings, from_year=None, current_season=True, start_date=None, end_date=None
+            settings,
+            from_year=None,
+            current_season=True,
+            start_date=None,
+            end_date=None,
+            verbose=debug,
         )
 
     sync: dict[str, Callable[[], None]] = {
@@ -2408,6 +2428,7 @@ def _run_starred_predict(*, n_games: int, include_players: bool, offline: bool) 
         offline=offline,
         sync=sync,
         renderers=renderers,
+        debug=debug,
     )
     if code != 0:
         raise typer.Exit(code=code)
@@ -2488,6 +2509,14 @@ def predict_command(
             "(see `sports-ml starred`). Exclusive with --sport/--team/--matchup/--date.",
         ),
     ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            "-d",
+            help="Show progress and timing output (sync, feature rebuild, per-team steps).",
+        ),
+    ] = False,
 ) -> None:
     """Generate Stage 1 game win probabilities and optional Stage 2 player projections."""
     if target is not None and target.strip().lower() != "starred":
@@ -2512,6 +2541,7 @@ def predict_command(
             n_games=n_games if n_games is not None else 1,
             include_players=include_players,
             offline=offline,
+            debug=debug,
         )
         return
     sport = sport or "hockey"
@@ -2531,6 +2561,7 @@ def predict_command(
             n_games=n_games,
             include_players=include_players,
             offline=offline,
+            debug=debug,
         )
         return
     slug = _ensure_supported_sport(sport)
