@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
+import sports_ml.cli as cli
 from sports_ml.cli import app
 
 runner = CliRunner()
@@ -248,6 +250,7 @@ def _write_offline_soccer_fixtures(raw_dir: Path) -> None:
 
 def test_soccer_cli_end_to_end_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ingest -> features -> train -> backtest -> predict -> score-predictions for soccer."""
+    monkeypatch.setattr(cli, "console", Console(width=300))
     monkeypatch.setenv("SPORTS_ML_ROOT_DIR", str(tmp_path))
     _write_offline_soccer_fixtures(tmp_path / "data" / "raw")
 
@@ -289,12 +292,31 @@ def test_soccer_cli_end_to_end_pipeline(tmp_path: Path, monkeypatch: pytest.Monk
     assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in r_pred_s1.output
     assert "Date" in r_pred_s1.output
     assert "Matchup" in r_pred_s1.output
+    assert "Prediction" in r_pred_s1.output
     assert "P(Away)" in r_pred_s1.output
-    assert "P(Draw)" in r_pred_s1.output
     assert "P(Home)" in r_pred_s1.output
+    assert "P(Draw)" in r_pred_s1.output
     assert "Mkt 1X2 (Edge)" not in r_pred_s1.output
     assert "E[G] A/H" not in r_pred_s1.output
     assert "Lineup Status" not in r_pred_s1.output
+
+    r_pred_verbose = runner.invoke(
+        app,
+        [
+            "predict",
+            "--sport",
+            "soccer",
+            "--date",
+            "2024-08-20",
+            "--matchup",
+            "MCI@ARS",
+            "--verbose",
+            "--offline",
+        ],
+    )
+    assert r_pred_verbose.exit_code == 0, r_pred_verbose.output
+    assert "Expected Goals (A-H)" in r_pred_verbose.output
+    assert "Lineups (A-H)" in r_pred_verbose.output
 
     # 6. Predict Stage 1 + Stage 2 (--include-players)
     r_pred_s2 = runner.invoke(

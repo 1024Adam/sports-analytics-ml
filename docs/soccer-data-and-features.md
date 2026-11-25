@@ -160,3 +160,7 @@ To eliminate early-season variance (Matchweeks 1–8) and handle promoted clubs 
   * **Game-State Neutral $npxG$ (`tied_state_npxgd_per_90`)**: Strips out late-game score-effect distortion when a club trails by $2+$ goals.
   * **Spatial Box & Throughball Danger (`box_shot_share`, `throughball_xgf`)**: Captures central 18-yard box penetration vs. low-probability long shots.
 
+## CLI Prediction Output
+
+Run `sports-ml predict --sport soccer` for the default table (`Date`, `Matchup`, `Prediction`, `P(Away)`, `P(Draw)`, `P(Home)`). Add `--verbose` to include expected goals (away-home) and lineup status (away-home). Prediction warnings are hidden by default; add `--show-warnings` to print them.
+

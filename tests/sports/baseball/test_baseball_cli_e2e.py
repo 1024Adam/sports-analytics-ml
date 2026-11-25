@@ -6,9 +6,11 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
 from tests.sports.baseball.test_baseball_ingestion import _sample_mlb_boxscore_payload
 from typer.testing import CliRunner
 
+import sports_ml.cli as cli
 from sports_ml.cli import app
 from sports_ml.core.cache import write_cached_json
 
@@ -179,6 +181,7 @@ def test_baseball_cli_end_to_end_mlb_and_npb(
     monkeypatch: Any,
 ) -> None:
     """Run offline E2E CLI workflow: ingest -> features -> train -> backtest -> predict -> score."""
+    monkeypatch.setattr(cli, "console", Console(width=300))
     monkeypatch.setenv("SPORTS_ML_ROOT_DIR", str(tmp_path))
     _seed_offline_baseball_raw_cache(tmp_path / "data" / "raw")
 
@@ -227,6 +230,13 @@ def test_baseball_cli_end_to_end_mlb_and_npb(
     )
     assert res_pred_mlb.exit_code == 0, res_pred_mlb.output
     assert "SDP @ LAD" in res_pred_mlb.output
+    assert all(
+        column in res_pred_mlb.output
+        for column in ("Date", "Matchup", "Prediction", "P(Away)", "P(Home)")
+    )
+    assert "League" not in res_pred_mlb.output
+    assert "P(Draw)" not in res_pred_mlb.output
+    assert "E[Runs A-H]" not in res_pred_mlb.output
     assert "Starting Pitchers (SP)" in res_pred_mlb.output
 
     # 6. Predict NPB matchup with Stage 2 players and --team next games
@@ -243,11 +253,17 @@ def test_baseball_cli_end_to_end_mlb_and_npb(
             "--matchup",
             "YOM@HAN",
             "--include-players",
+            "--verbose",
             "--offline",
         ],
     )
     assert res_pred_npb.exit_code == 0, res_pred_npb.output
     assert "YOM @ HAN" in res_pred_npb.output
+    assert "Prediction" in res_pred_npb.output
+    assert "P(Draw)" in res_pred_npb.output
+    assert "P(Home DNB)" in res_pred_npb.output
+    assert "Expected Runs (A-H)" in res_pred_npb.output
+    assert "Starters (A-H)" in res_pred_npb.output
 
     res_pred_team = runner.invoke(
         app,

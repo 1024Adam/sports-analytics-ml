@@ -64,6 +64,7 @@ class _StubHockeyPredictor:
                 away_win_prob=p_away,
                 expected_home_goals=3.1,
                 expected_away_goals=2.7,
+                warnings=["stub hockey warning"],
             )
         ][:n_games]
 
@@ -214,7 +215,9 @@ def test_starred_predictions_are_chronological_and_identical_to_single_team_runs
     assert "KC @ BUF" in out
     # each sport keeps its own renderer (2-way vs 3-way tables stay separate)
     assert "Stage 1 — Calibrated Game Win Probabilities" in out
-    assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in out and "P(Draw)" in out
+    assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in out
+    assert "P(Draw)" in out and "P(Home DNB)" not in out
+    assert "stub hockey warning" not in out
     for header in ("HOCKEY", "SOCCER", "BASEBALL", "FOOTBALL"):
         assert header in out
 
@@ -222,6 +225,13 @@ def test_starred_predictions_are_chronological_and_identical_to_single_team_runs
         s: _ledger(world, s).tail(1).row(0, named=True) for s in ("baseball", "soccer", "football")
     }
     assert _StubHockeyPredictor.calls == [("COL", 1, True)]
+
+    verbose = _invoke("predict", "--starred", "--offline", "--verbose")
+    assert "Expected Goals (A-H)" in verbose
+    assert "Expected Runs (A-H)" in verbose
+    assert "Projected Score" in verbose
+    with_warnings = _invoke("predict", "--starred", "--offline", "--show-warnings")
+    assert "stub hockey warning" in with_warnings
 
     single = {
         "baseball": _invoke(

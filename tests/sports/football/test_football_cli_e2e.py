@@ -50,7 +50,14 @@ def test_football_cli_pipeline_end_to_end(football_root: Path) -> None:
 
     # upcoming slate (Stage 1)
     out = _invoke("predict", "--sport", "football", "--offline")
-    assert "P(Away)" in out and "P(Home)" in out and "QB matchup" in out
+    assert all(column in out for column in ("Date", "Matchup", "Prediction", "P(Away)", "P(Home)"))
+    assert "Projected Score" not in out and "Margin (Home)" not in out and "Warnings" not in out
+    assert "QB matchup" not in out
+    verbose = _invoke("predict", "--sport", "football", "--offline", "--verbose")
+    assert all(
+        column in verbose for column in ("Week", "Projected Score", "Margin (Home)", "Total")
+    )
+    assert "QB matchup" in verbose
 
     # explicit week + matchup with Stage 2 tables
     out = _invoke(

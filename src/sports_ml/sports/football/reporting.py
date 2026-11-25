@@ -6,6 +6,7 @@ import polars as pl
 from rich.console import Console
 from rich.table import Table
 
+from sports_ml.cli_formatting import format_outcome_probabilities
 from sports_ml.core.market import LineBettingReport
 from sports_ml.sports.football.models.market_eval import FootballMarketEvaluation
 from sports_ml.sports.football.models.predictor import (
@@ -60,43 +61,62 @@ def _qb_line(card: FootballQBCard) -> str:
 
 
 def render_football_predictions(
-    console: Console, predictions: list[FootballMatchupPrediction]
+    console: Console,
+    predictions: list[FootballMatchupPrediction],
+    *,
+    verbose: bool = False,
+    show_warnings: bool = False,
 ) -> None:
-    """Print the probability table, QB matchup cards and position-grouped projections."""
+    """Print the probability table and optional verbose/player details."""
     if not predictions:
         console.print("[yellow]No football games matched the requested slate.[/yellow]")
         return
 
     table = Table(title="NFL Matchup Predictions (Stage 1)")
     for col, just in (
-        ("Wk", "right"),
+        ("Date", "right"),
         ("Matchup", "left"),
+        ("Prediction", "center"),
         ("P(Away)", "right"),
         ("P(Home)", "right"),
-        ("Projected Score", "right"),
-        ("Margin (Home)", "right"),
-        ("Total", "right"),
-        ("Warnings", "left"),
     ):
         table.add_column(col, justify=just, style="cyan" if col == "Matchup" else None)  # type: ignore[arg-type]
+    if verbose:
+        for col in ("Week", "Projected Score", "Margin (Home)", "Total"):
+            table.add_column(col, justify="right")
     for p in predictions:
-        table.add_row(
-            f"{p.season} W{p.week}",
-            f"{p.away_team} @ {p.home_team}",
-            f"{p.away_win_prob:.1%}",
-            f"{p.home_win_prob:.1%}",
-            f"{p.away_team} {p.expected_away_score:.1f} - "
-            f"{p.home_team} {p.expected_home_score:.1f}",
-            f"{p.expected_margin:+.1f}",
-            f"{p.expected_total:.1f}",
-            ", ".join(p.warnings) or "-",
+        away_probability, home_probability = format_outcome_probabilities(
+            (p.away_win_prob, p.home_win_prob)
         )
+        predicted_team = p.away_team if p.away_win_prob >= p.home_win_prob else p.home_team
+        row = [
+            p.game_date.isoformat(),
+            f"{p.away_team} @ {p.home_team}",
+            predicted_team,
+            away_probability,
+            home_probability,
+        ]
+        if verbose:
+            row.extend(
+                [
+                    f"{p.season} W{p.week}",
+                    f"{p.away_team} {p.expected_away_score:.1f} - "
+                    f"{p.home_team} {p.expected_home_score:.1f}",
+                    f"{p.expected_margin:+.1f}",
+                    f"{p.expected_total:.1f}",
+                ]
+            )
+        table.add_row(*row)
     console.print(table)
 
     for p in predictions:
-        console.print(f"[bold]QB matchup[/bold] {p.away_team} @ {p.home_team}")
-        console.print(f"  {_qb_line(p.away_qb)}")
-        console.print(f"  {_qb_line(p.home_qb)}")
+        if show_warnings:
+            for warning in p.warnings:
+                console.print(f"[yellow]Warning ({p.away_team}@{p.home_team}):[/yellow] {warning}")
+        if verbose:
+            console.print(f"[bold]QB matchup[/bold] {p.away_team} @ {p.home_team}")
+            console.print(f"  {_qb_line(p.away_qb)}")
+            console.print(f"  {_qb_line(p.home_qb)}")
         if p.player_projections is None:
             continue
         for team, frame in (

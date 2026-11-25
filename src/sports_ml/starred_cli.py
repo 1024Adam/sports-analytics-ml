@@ -260,10 +260,13 @@ def build_starred_adapters(
     }
 
 
-def render_starred_overview(console: Console, result: StarredRunResult) -> None:
+def render_starred_overview(
+    console: Console, result: StarredRunResult, *, show_warnings: bool = False
+) -> None:
     """One chronological table of upcoming starred games (kickoff shown in local time)."""
-    for warning in result.warnings:
-        console.print(f"[yellow]Warning: {warning}[/yellow]")
+    if show_warnings:
+        for warning in result.warnings:
+            console.print(f"[yellow]Warning: {warning}[/yellow]")
     if result.predictions:
         table = Table(title="Starred Teams — Upcoming Games (chronological, local time)")
         for col in ("Kickoff", "Sport / League", "Team", "Matchup"):
@@ -296,6 +299,7 @@ def run_starred_command(
     offline: bool,
     sync: SyncHooks,
     renderers: Renderers,
+    show_warnings: bool = False,
     debug: bool = False,
 ) -> int:
     """Run `predict --starred`; returns the process exit code (non-zero only if all failed).
@@ -314,7 +318,7 @@ def run_starred_command(
         n_games=n_games,
         on_event=(lambda message: console.print(f"[dim]{message}[/dim]")) if debug else None,
     )
-    render_starred_overview(console, result)
+    render_starred_overview(console, result, show_warnings=show_warnings)
     for sport, group in result.by_sport().items():
         console.print(f"\n[bold]{sport.upper()}[/bold]")
         renderers[sport]([p.prediction for p in group])
