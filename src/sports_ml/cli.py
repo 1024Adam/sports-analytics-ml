@@ -2001,13 +2001,18 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
     game_table.add_column("Date", style="cyan", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
+    game_table.add_column("Prediction", style="bold")
     game_table.add_column("P(Away)", justify="right", style="yellow")
     game_table.add_column("P(Home)", justify="right", style="green")
 
     for pred in predictions:
+        predicted_team = (
+            pred.away_team if pred.away_win_prob >= pred.home_win_prob else pred.home_team
+        )
         game_table.add_row(
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
+            predicted_team,
             f"{pred.away_win_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
         )
@@ -2096,14 +2101,24 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
     match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
     match_table.add_column("Date", style="cyan", no_wrap=True)
     match_table.add_column("Matchup", style="bold", no_wrap=True)
+    match_table.add_column("Prediction", style="bold")
     match_table.add_column("P(Away)", justify="right", style="yellow")
     match_table.add_column("P(Draw)", justify="right", style="magenta")
     match_table.add_column("P(Home)", justify="right", style="green")
 
     for pred in predictions:
+        predicted_outcome = max(
+            (
+                (pred.away_win_prob, pred.away_team),
+                (pred.draw_prob, "Draw"),
+                (pred.home_win_prob, pred.home_team),
+            ),
+            key=lambda outcome: outcome[0],
+        )[1]
         match_table.add_row(
             pred.match_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
+            predicted_outcome,
             f"{pred.away_win_prob:.1%}",
             f"{pred.draw_prob:.1%}",
             f"{pred.home_win_prob:.1%}",
@@ -2202,27 +2217,34 @@ def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -
         title="Stage 1 — Calibrated Baseball Game Probabilities (MLB 2-Way & NPB 3-Way 12-Inning)"
     )
     game_table.add_column("Date", style="cyan", no_wrap=True)
-    game_table.add_column("League", style="magenta", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
+    game_table.add_column("Prediction", style="bold")
     game_table.add_column("P(Away)", justify="right", style="yellow")
-    game_table.add_column("P(Draw)", justify="right", style="magenta")
+    has_draws = any(pred.league == "NPB" for pred in predictions)
+    if has_draws:
+        game_table.add_column("P(Draw)", justify="right", style="magenta")
     game_table.add_column("P(Home)", justify="right", style="green")
-    game_table.add_column("P(Home DNB)", justify="right")
-    game_table.add_column("E[Runs A-H]", justify="right")
 
     for pred in predictions:
         seq_tag = f" (G{pred.event_seq})" if pred.event_seq > 1 else ""
-        draw_str = f"{pred.draw_prob:.1%}" if pred.league == "NPB" else "—"
-        game_table.add_row(
+        predicted_outcome = max(
+            (
+                (pred.away_win_prob, pred.away_team),
+                (pred.draw_prob, "Draw"),
+                (pred.home_win_prob, pred.home_team),
+            ),
+            key=lambda outcome: outcome[0],
+        )[1]
+        row = [
             pred.game_date.isoformat(),
-            pred.league,
             f"{pred.away_team} @ {pred.home_team}{seq_tag}",
+            predicted_outcome,
             f"{pred.away_win_prob:.1%}",
-            draw_str,
-            f"{pred.home_win_prob:.1%}",
-            f"{pred.home_dnb_prob:.1%}",
-            f"{pred.expected_away_runs:.2f} - {pred.expected_home_runs:.2f}",
-        )
+        ]
+        if has_draws:
+            row.append(f"{pred.draw_prob:.1%}" if pred.league == "NPB" else "—")
+        row.append(f"{pred.home_win_prob:.1%}")
+        game_table.add_row(*row)
     console.print(game_table)
 
     for pred in predictions:

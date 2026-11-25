@@ -221,7 +221,7 @@ Reference result on real nflverse data (2012-2024 Silver, 8 test seasons 2017-20
 
 Ledgers: `data/predictions/football_predictions.parquet` (one row per prediction, deduplicated by `game_id`, latest wins, when scored) and `football_player_predictions.parquet`. `score_football_prediction_ledger` reports log loss/Brier/accuracy against home-rate and coin-flip baselines (plus the market-edge report when closing odds exist) and player projection MAE. Predictions made for already-final games are retrospective and are scored the same way, so use them for smoke tests rather than live evaluation.
 
-CLI: `features build`, `train [--include-stage2]`, `backtest [--stage 1|2|all] [--splits N]`, `predict [--season --week | --date | --team --games] [--matchup AWAY@HOME] [--include-players] [--offline]`, and `score-predictions` all accept `--sport football` (`--league nfl`). Output shows `P(Away)`/`P(Home)`, projected score, a QB matchup card, and position-grouped projection tables with `P(Anytime TD)`.
+CLI: `features build`, `train [--include-stage2]`, `backtest [--stage 1|2|all] [--splits N]`, `predict [--season --week | --date | --team --games] [--matchup AWAY@HOME] [--include-players] [--offline]`, and `score-predictions` all accept `--sport football` (`--league nfl`). The default prediction table shows `Date`, `Matchup`, `Prediction`, `P(Away)`, and `P(Home)`. A separate QB matchup card and, with `--include-players`, position-grouped projection tables with `P(Anytime TD)` are also printed.
 
 ## 11. Weather, Roof/Surface & Availability Features (Milestone 27)
 

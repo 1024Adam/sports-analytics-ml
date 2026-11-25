@@ -7,7 +7,7 @@ A modular, leak-free, multi-sport machine learning platform built in **Python 3.
 Every sport plugin executes a unified **Two-Stage Prediction Pipeline** built on strictly pre-game temporal features:
 
 1. **Stage 1 — Mandatory Calibrated Matchup Outcome Model**:
-   - Predicts calibrated pre-game win/outcome probabilities (`Date`, `Matchup`, `P(Away)`, `P(Home)`, plus `P(Draw)` for 3-way sports) and estimates the underlying scoring environment $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
+   - Predicts calibrated pre-game win/outcome probabilities. The default CLI table shows `Date`, `Matchup`, `Prediction`, `P(Away)`, and `P(Home)`; sports/leagues that can draw also show `P(Draw)`. It also estimates the underlying scoring environment $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{away}})$.
    - Evaluated via walk-forward cross-validation against Elo and de-vigged market benchmarks using Log Loss, Brier Score, Expected Calibration Error (ECE), and Ranked Probability Score (RPS).
 2. **Stage 2 — Optional Player Matchup Stat Projections (`--include-players`)**:
    - Conditioned on Stage 1's projected scoring pace and opponent defensive/goaltending strength, projects individual playing time/usage, counting stats, milestone probabilities, and goalie/goalkeeper metrics.

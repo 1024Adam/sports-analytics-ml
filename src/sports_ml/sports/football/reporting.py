@@ -69,27 +69,21 @@ def render_football_predictions(
 
     table = Table(title="NFL Matchup Predictions (Stage 1)")
     for col, just in (
-        ("Wk", "right"),
+        ("Date", "right"),
         ("Matchup", "left"),
+        ("Prediction", "left"),
         ("P(Away)", "right"),
         ("P(Home)", "right"),
-        ("Projected Score", "right"),
-        ("Margin (Home)", "right"),
-        ("Total", "right"),
-        ("Warnings", "left"),
     ):
         table.add_column(col, justify=just, style="cyan" if col == "Matchup" else None)  # type: ignore[arg-type]
     for p in predictions:
+        predicted_team = p.away_team if p.away_win_prob >= p.home_win_prob else p.home_team
         table.add_row(
-            f"{p.season} W{p.week}",
+            p.game_date.isoformat(),
             f"{p.away_team} @ {p.home_team}",
+            predicted_team,
             f"{p.away_win_prob:.1%}",
             f"{p.home_win_prob:.1%}",
-            f"{p.away_team} {p.expected_away_score:.1f} - "
-            f"{p.home_team} {p.expected_home_score:.1f}",
-            f"{p.expected_margin:+.1f}",
-            f"{p.expected_total:.1f}",
-            ", ".join(p.warnings) or "-",
         )
     console.print(table)
 

@@ -214,7 +214,8 @@ def test_starred_predictions_are_chronological_and_identical_to_single_team_runs
     assert "KC @ BUF" in out
     # each sport keeps its own renderer (2-way vs 3-way tables stay separate)
     assert "Stage 1 — Calibrated Game Win Probabilities" in out
-    assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in out and "P(Draw)" in out
+    assert "Stage 1 — Calibrated EPL 3-Way (1X2)" in out
+    assert "P(Draw)" in out and "P(Home DNB)" not in out
     for header in ("HOCKEY", "SOCCER", "BASEBALL", "FOOTBALL"):
         assert header in out
 

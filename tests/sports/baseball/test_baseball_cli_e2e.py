@@ -227,6 +227,13 @@ def test_baseball_cli_end_to_end_mlb_and_npb(
     )
     assert res_pred_mlb.exit_code == 0, res_pred_mlb.output
     assert "SDP @ LAD" in res_pred_mlb.output
+    assert all(
+        column in res_pred_mlb.output
+        for column in ("Date", "Matchup", "Prediction", "P(Away)", "P(Home)")
+    )
+    assert "League" not in res_pred_mlb.output
+    assert "P(Draw)" not in res_pred_mlb.output
+    assert "E[Runs A-H]" not in res_pred_mlb.output
     assert "Starting Pitchers (SP)" in res_pred_mlb.output
 
     # 6. Predict NPB matchup with Stage 2 players and --team next games
@@ -248,6 +255,9 @@ def test_baseball_cli_end_to_end_mlb_and_npb(
     )
     assert res_pred_npb.exit_code == 0, res_pred_npb.output
     assert "YOM @ HAN" in res_pred_npb.output
+    assert "Prediction" in res_pred_npb.output
+    assert "P(Draw)" in res_pred_npb.output
+    assert "P(Home DNB)" not in res_pred_npb.output
 
     res_pred_team = runner.invoke(
         app,

@@ -434,7 +434,7 @@ Every invocation of `sports-ml predict` automatically appends the generated pre-
 * Running `sports-ml score-predictions --sport hockey` joins this ledger against subsequently completed `FINAL` games in `data/silver/` to evaluate real-world, live pre-game accuracy over the course of a season.
 
 ### 9.3 Pre-Prediction Data Confidence & Lineup Warnings
-Live pre-game predictions surface explicit confidence indicators in both the `Predictor` return object and the Rich CLI table:
+Live pre-game predictions surface explicit confidence indicators in the `Predictor` return object and print available warnings separately from the compact Rich CLI table. The default prediction table contains `Date`, `Matchup`, `Prediction`, `P(Away)`, and `P(Home)`; sports/leagues that can draw also include `P(Draw)`, and `Draw` can appear in the `Prediction` column.
 * **Starting Goalie Status**: Distinguishes `CONFIRMED` (official pre-game starter) from `PROJECTED` (inferred via primary non-B2B starter heuristic).
 * **Data Freshness**: Displays the latest completed game date present in `data/silver/` and whether MoneyPuck $xG$ data is current or using the NHL API boxscore fallback.
 * **Prior Shrinkage Flags**: Flags debuting rookies or early-season teams where Bayesian prior shrinkage accounts for $>50\%$ of the feature weight.
