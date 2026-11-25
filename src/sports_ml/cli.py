@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from sports_ml.cli_formatting import format_outcome_probabilities
 from sports_ml.config import RANDOM_SEED, Settings, get_settings
 from sports_ml.core.cache import (
     cache_stem,
@@ -304,6 +305,8 @@ def _run_football_predict(
     n_games: int | None,
     include_players: bool,
     offline: bool,
+    verbose: bool = False,
+    show_warnings: bool = False,
     debug: bool = False,
 ) -> None:
     from sports_ml.sports.football.models import FootballMatchupPredictor
@@ -349,7 +352,7 @@ def _run_football_predict(
             )
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
-    render_football_predictions(console, predictions)
+    render_football_predictions(console, predictions, verbose=verbose, show_warnings=show_warnings)
 
 
 def _run_football_score(settings: Settings) -> None:
@@ -1996,33 +1999,53 @@ def train_command(
     )
 
 
-def _render_predictions(predictions: list[MatchupPrediction]) -> None:
+def _render_predictions(
+    predictions: list[MatchupPrediction],
+    *,
+    verbose: bool = False,
+    show_warnings: bool = False,
+) -> None:
     """Render Stage 1 and optional Stage 2 predictions as Rich terminal tables."""
     game_table = Table(title="Stage 1 — Calibrated Game Win Probabilities")
     game_table.add_column("Date", style="cyan", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
-    game_table.add_column("Prediction", style="bold")
-    game_table.add_column("P(Away)", justify="right", style="yellow")
-    game_table.add_column("P(Home)", justify="right", style="green")
+    game_table.add_column("Prediction", justify="center", style="bold")
+    game_table.add_column("P(Away)", justify="right")
+    game_table.add_column("P(Home)", justify="right")
+    if verbose:
+        game_table.add_column("Expected Goals (A-H)", justify="right")
+        game_table.add_column("Goalies (A-H)")
 
     for pred in predictions:
+        away_probability, home_probability = format_outcome_probabilities(
+            (pred.away_win_prob, pred.home_win_prob)
+        )
         predicted_team = (
             pred.away_team if pred.away_win_prob >= pred.home_win_prob else pred.home_team
         )
-        game_table.add_row(
+        row = [
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             predicted_team,
-            f"{pred.away_win_prob:.1%}",
-            f"{pred.home_win_prob:.1%}",
-        )
+            away_probability,
+            home_probability,
+        ]
+        if verbose:
+            row.extend(
+                [
+                    f"{pred.expected_away_goals:.2f} - {pred.expected_home_goals:.2f}",
+                    f"{pred.away_goalie_status} / {pred.home_goalie_status}",
+                ]
+            )
+        game_table.add_row(*row)
     console.print(game_table)
 
     for pred in predictions:
-        for warning in pred.warnings:
-            console.print(
-                f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
-            )
+        if show_warnings:
+            for warning in pred.warnings:
+                console.print(
+                    f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
+                )
 
         if pred.player_projections is not None:
             proj = pred.player_projections
@@ -2096,17 +2119,28 @@ def _render_predictions(predictions: list[MatchupPrediction]) -> None:
                 console.print(goalie_table)
 
 
-def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> None:
+def _render_soccer_predictions(
+    predictions: list[SoccerMatchupPrediction],
+    *,
+    verbose: bool = False,
+    show_warnings: bool = False,
+) -> None:
     """Render EPL Stage 1 `1X2` and optional Stage 2 projections as Rich terminal tables."""
     match_table = Table(title="Stage 1 — Calibrated EPL 3-Way (1X2) Match Probabilities")
     match_table.add_column("Date", style="cyan", no_wrap=True)
     match_table.add_column("Matchup", style="bold", no_wrap=True)
-    match_table.add_column("Prediction", style="bold")
-    match_table.add_column("P(Away)", justify="right", style="yellow")
-    match_table.add_column("P(Draw)", justify="right", style="magenta")
-    match_table.add_column("P(Home)", justify="right", style="green")
+    match_table.add_column("Prediction", justify="center", style="bold")
+    match_table.add_column("P(Away)", justify="right")
+    match_table.add_column("P(Draw)", justify="right")
+    match_table.add_column("P(Home)", justify="right")
+    if verbose:
+        match_table.add_column("Expected Goals (A-H)", justify="right")
+        match_table.add_column("Lineups (A-H)")
 
     for pred in predictions:
+        away_probability, draw_probability, home_probability = format_outcome_probabilities(
+            (pred.away_win_prob, pred.draw_prob, pred.home_win_prob)
+        )
         predicted_outcome = max(
             (
                 (pred.away_win_prob, pred.away_team),
@@ -2115,21 +2149,30 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
             ),
             key=lambda outcome: outcome[0],
         )[1]
-        match_table.add_row(
+        row = [
             pred.match_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}",
             predicted_outcome,
-            f"{pred.away_win_prob:.1%}",
-            f"{pred.draw_prob:.1%}",
-            f"{pred.home_win_prob:.1%}",
-        )
+            away_probability,
+            draw_probability,
+            home_probability,
+        ]
+        if verbose:
+            row.extend(
+                [
+                    f"{pred.expected_away_goals:.2f} - {pred.expected_home_goals:.2f}",
+                    f"{pred.away_lineup_status} / {pred.home_lineup_status}",
+                ]
+            )
+        match_table.add_row(*row)
     console.print(match_table)
 
     for pred in predictions:
-        for warning in pred.warnings:
-            console.print(
-                f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
-            )
+        if show_warnings:
+            for warning in pred.warnings:
+                console.print(
+                    f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
+                )
 
         if pred.player_projections is not None:
             proj = pred.player_projections
@@ -2211,21 +2254,34 @@ def _render_soccer_predictions(predictions: list[SoccerMatchupPrediction]) -> No
                 console.print(gk_table)
 
 
-def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -> None:
+def _render_baseball_predictions(
+    predictions: list[BaseballMatchupPrediction],
+    *,
+    verbose: bool = False,
+    show_warnings: bool = False,
+) -> None:
     """Render MLB (2-Way) & NPB (3-Way + DNB) Stage 1 & Stage 2 projections as Rich tables."""
     game_table = Table(
         title="Stage 1 — Calibrated Baseball Game Probabilities (MLB 2-Way & NPB 3-Way 12-Inning)"
     )
     game_table.add_column("Date", style="cyan", no_wrap=True)
     game_table.add_column("Matchup", style="bold", no_wrap=True)
-    game_table.add_column("Prediction", style="bold")
-    game_table.add_column("P(Away)", justify="right", style="yellow")
+    game_table.add_column("Prediction", justify="center", style="bold")
+    game_table.add_column("P(Away)", justify="right")
     has_draws = any(pred.league == "NPB" for pred in predictions)
     if has_draws:
-        game_table.add_column("P(Draw)", justify="right", style="magenta")
-    game_table.add_column("P(Home)", justify="right", style="green")
+        game_table.add_column("P(Draw)", justify="right")
+    game_table.add_column("P(Home)", justify="right")
+    if verbose:
+        game_table.add_column("P(Home DNB)", justify="right")
+        game_table.add_column("Expected Runs (A-H)", justify="right")
+        game_table.add_column("Starters (A-H)")
+        game_table.add_column("Lineups (A-H)")
 
     for pred in predictions:
+        away_probability, draw_probability, home_probability = format_outcome_probabilities(
+            (pred.away_win_prob, pred.draw_prob, pred.home_win_prob)
+        )
         seq_tag = f" (G{pred.event_seq})" if pred.event_seq > 1 else ""
         predicted_outcome = max(
             (
@@ -2239,19 +2295,29 @@ def _render_baseball_predictions(predictions: list[BaseballMatchupPrediction]) -
             pred.game_date.isoformat(),
             f"{pred.away_team} @ {pred.home_team}{seq_tag}",
             predicted_outcome,
-            f"{pred.away_win_prob:.1%}",
+            away_probability,
         ]
         if has_draws:
-            row.append(f"{pred.draw_prob:.1%}" if pred.league == "NPB" else "—")
-        row.append(f"{pred.home_win_prob:.1%}")
+            row.append(draw_probability if pred.league == "NPB" else "—")
+        row.append(home_probability)
+        if verbose:
+            row.extend(
+                [
+                    f"{pred.home_dnb_prob:.1%}",
+                    f"{pred.expected_away_runs:.2f} - {pred.expected_home_runs:.2f}",
+                    f"{pred.away_starter_status} / {pred.home_starter_status}",
+                    f"{pred.away_lineup_status} / {pred.home_lineup_status}",
+                ]
+            )
         game_table.add_row(*row)
     console.print(game_table)
 
     for pred in predictions:
-        for warning in pred.warnings:
-            console.print(
-                f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
-            )
+        if show_warnings:
+            for warning in pred.warnings:
+                console.print(
+                    f"[yellow]Warning ({pred.away_team}@{pred.home_team}):[/yellow] {warning}"
+                )
 
         if pred.player_projections is not None:
             proj = pred.player_projections
@@ -2401,7 +2467,13 @@ def starred_list_command() -> None:
 
 
 def _run_starred_predict(
-    *, n_games: int, include_players: bool, offline: bool, debug: bool = False
+    *,
+    n_games: int,
+    include_players: bool,
+    offline: bool,
+    verbose: bool = False,
+    show_warnings: bool = False,
+    debug: bool = False,
 ) -> None:
     from sports_ml.starred_cli import run_starred_command
 
@@ -2436,10 +2508,18 @@ def _run_starred_predict(
     from sports_ml.sports.football.reporting import render_football_predictions
 
     renderers: dict[str, Callable[[list[Any]], None]] = {
-        "hockey": _render_predictions,
-        "soccer": _render_soccer_predictions,
-        "baseball": _render_baseball_predictions,
-        "football": lambda preds: render_football_predictions(console, preds),
+        "hockey": lambda preds: _render_predictions(
+            preds, verbose=verbose, show_warnings=show_warnings
+        ),
+        "soccer": lambda preds: _render_soccer_predictions(
+            preds, verbose=verbose, show_warnings=show_warnings
+        ),
+        "baseball": lambda preds: _render_baseball_predictions(
+            preds, verbose=verbose, show_warnings=show_warnings
+        ),
+        "football": lambda preds: render_football_predictions(
+            console, preds, verbose=verbose, show_warnings=show_warnings
+        ),
     }
     code = run_starred_command(
         console,
@@ -2450,6 +2530,7 @@ def _run_starred_predict(
         offline=offline,
         sync=sync,
         renderers=renderers,
+        show_warnings=show_warnings,
         debug=debug,
     )
     if code != 0:
@@ -2511,6 +2592,14 @@ def predict_command(
             help="Run Stage 2 player stat projections.",
         ),
     ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Show additional sport-specific prediction columns."),
+    ] = False,
+    show_warnings: Annotated[
+        bool,
+        typer.Option("--show-warnings", help="Print prediction and sync warnings."),
+    ] = False,
     offline: Annotated[
         bool,
         typer.Option("--offline", help="Skip live network sync and use cached Silver tables."),
@@ -2563,6 +2652,8 @@ def predict_command(
             n_games=n_games if n_games is not None else 1,
             include_players=include_players,
             offline=offline,
+            verbose=verbose,
+            show_warnings=show_warnings,
             debug=debug,
         )
         return
@@ -2583,6 +2674,8 @@ def predict_command(
             n_games=n_games,
             include_players=include_players,
             offline=offline,
+            verbose=verbose,
+            show_warnings=show_warnings,
             debug=debug,
         )
         return
@@ -2621,7 +2714,7 @@ def predict_command(
                 offline=offline,
                 persist_ledger=True,
             )
-        _render_baseball_predictions(b_predictions)
+        _render_baseball_predictions(b_predictions, verbose=verbose, show_warnings=show_warnings)
         return
 
     if slug == "soccer":
@@ -2645,7 +2738,7 @@ def predict_command(
                 offline=offline,
                 persist_ledger=True,
             )
-        _render_soccer_predictions(s_predictions)
+        _render_soccer_predictions(s_predictions, verbose=verbose, show_warnings=show_warnings)
         return
 
     if not offline:
@@ -2669,7 +2762,7 @@ def predict_command(
             offline=offline,
             persist_ledger=True,
         )
-    _render_predictions(predictions)
+    _render_predictions(predictions, verbose=verbose, show_warnings=show_warnings)
 
 
 @app.command("score-predictions")

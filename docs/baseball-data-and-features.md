@@ -235,3 +235,7 @@ Conditioned on Stage 1's $(\hat{\lambda}_{\text{home}}, \hat{\lambda}_{\text{awa
    * **Count & Milestone Models**: Predicts `proj_hits`, `proj_total_bases`, `proj_hr`, `proj_runs`, `proj_rbi`, `proj_bb`, `proj_k`, `prob_1plus_hit` ($1 - \prod (1 - p_{\text{hit/PA}})$), `prob_2plus_tb`, and `prob_1plus_hr`.
 3. **Cross-Stage Coherence Reconciliation (`reconcile_baseball_stage2_projections`)**:
    * Soft-scales batter `proj_runs` and `proj_rbi` toward Stage 1's $\hat{\lambda}_{\text{team}}$ ($\gamma = 0.50$), and reconciles starting pitcher `proj_k` against opposing lineup projected strikeouts (accounting for expected starter share of game BF).
+
+## CLI Prediction Output
+
+Run `sports-ml predict --sport baseball` for the compact table (`Date`, `Matchup`, `Prediction`, `P(Away)`, `P(Home)`); NPB predictions also include `P(Draw)`. Add `--verbose` to include the home draw-no-bet probability, expected runs (away-home), and starting pitcher and lineup statuses (away-home). Prediction warnings are hidden by default; add `--show-warnings` to print them.

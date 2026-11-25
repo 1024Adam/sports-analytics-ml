@@ -267,3 +267,7 @@ Using MoneyPuck bulk shot archives (`shots_{YYYY}.csv.gz`) and NHL API play-by-p
 * **Spatial Slot Danger (`avg_shot_distance_5v5`, `inner_slot_xg_share`)**: Measures how effectively a team penetrates the inner slot vs. taking low-percentage point shots.
 * **Skater TOI Quality of Competition (`qoc_opponent_toi_share`) & Quality of Teammates (`qot_teammate_ixg_per_60`)**: Derived from shift-overlap matrices to distinguish top-line shutdown minutes from sheltered 3rd-line/3rd-pair usage in Stage 2 player projections.
 
+## CLI Prediction Output
+
+Run `sports-ml predict --sport hockey` for the default compact table (`Date`, `Matchup`, `Prediction`, `P(Away)`, `P(Home)`). Add `--verbose` to include expected goals (away-home) and goalie status (away-home). Prediction warnings are hidden by default; add `--show-warnings` to print them.
+
